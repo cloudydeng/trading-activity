@@ -1,0 +1,37 @@
+server:
+  port: 8080
+  address: "127.0.0.1"
+
+spring:
+  application:
+    name: binance-spot-competition-bot
+  threads:
+    virtual:
+      enabled: true
+
+binance:
+  api:
+    base-url: "https://api.binance.com"
+    ws-market-url: "wss://stream.binance.com:9443/ws"
+    ws-user-url: "wss://stream.binance.com:9443/ws"
+    api-key: "YOUR_BINANCE_API_KEY"
+    secret-key: "YOUR_BINANCE_SECRET_KEY"
+  strategy:
+    symbol: "PYTHUSDT"
+    # 单笔下单金额 (USDT, 建议 $15~$25，化整为零抗单边)
+    order-amount-usdt: 20.0
+    # 买单挂单深度偏移 (避开买一，挂在 Bid 2 ~ Bid 3 吃插针)
+    bid-depth-offset-ticks: 2
+    # 卖单挂单深度 (接到货后贴紧卖一快速回本出货)
+    ask-depth-offset-ticks: 1
+    # 挂单超时时间 (毫秒，超时后跟随最新盘口位移)
+    order-ttl-ms: 1200
+    # 最小要求盘口点差 (Ticks)
+    min-spread-ticks: 2
+    # 数量随机扰动比例 (如 0.05 表示 +-5% 随机数量，打破机器人特征)
+    random-size-jitter: 0.05
+
+logging:
+  level:
+    com.binance.bot: INFO
+    org.springframework.web: WARN
