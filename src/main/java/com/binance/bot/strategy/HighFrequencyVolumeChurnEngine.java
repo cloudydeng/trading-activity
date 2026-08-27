@@ -34,6 +34,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final SymbolRuleManager ruleManager;
     private final UserDataStreamService userDataStreamService;
     private final MarketSignalEvaluator marketSignalEvaluator;
+    private final PostFillOutcomeTracker postFillOutcomeTracker;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final AtomicReference<BigDecimal> lastBestAsk = new AtomicReference<>();
 
@@ -50,15 +51,17 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicBoolean marketConnectInProgress = new AtomicBoolean(false);
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
     private final AtomicBoolean acceptingMarketConnections = new AtomicBoolean(true);
+    private final AtomicReference<String> activeEntrySignalReason = new AtomicReference<>("UNKNOWN");
 
     public HighFrequencyVolumeChurnEngine(BinanceProperties properties, BinanceOptimizedTradeService tradeService,
                                            SymbolRuleManager ruleManager, UserDataStreamService userDataStreamService,
-                                           MarketSignalEvaluator marketSignalEvaluator) {
+                                           MarketSignalEvaluator marketSignalEvaluator, PostFillOutcomeTracker postFillOutcomeTracker) {
         this.properties = properties;
         this.tradeService = tradeService;
         this.ruleManager = ruleManager;
         this.userDataStreamService = userDataStreamService;
         this.marketSignalEvaluator = marketSignalEvaluator;
+        this.postFillOutcomeTracker = postFillOutcomeTracker;
     }
 
     @PostConstruct
@@ -151,6 +154,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 BigDecimal ask = new BigDecimal(node.get("a").asText());
                 BigDecimal askQty = new BigDecimal(node.get("A").asText());
                 lastBestAsk.set(ask);
+                postFillOutcomeTracker.recordMarketPrice(bid.add(ask).divide(BigDecimal.valueOf(2), RoundingMode.HALF_UP), System.currentTimeMillis());
                 marketSignalEvaluator.recordQuote(bid, bidQty, ask, askQty, System.currentTimeMillis(), properties.getStrategy());
                 if (isRunning.get()) driveChurnStateMachine(bid, ask);
             } else if (node.has("q") && node.has("m")) {
@@ -177,6 +181,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     log.debug("新开仓被信号层阻止: {} (book={}, depth={}, flow={}, returnBps={}, rangeBps={})", decision.reason(), decision.bookImbalance(), decision.depthImbalance(), decision.takerFlowImbalance(), decision.returnBps(), decision.rangeBps());
                     return;
                 }
+                activeEntrySignalReason.set(decision.reason());
                 BigDecimal qty = buyQuantity(bestBid, rule);
                 BigDecimal price = PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(BigDecimal.valueOf(properties.getStrategy().getBidDepthOffsetTicks()))), rule.tickSize());
                 if (!isValidOrder(qty, price, rule)) return;
@@ -218,7 +223,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (rule == null) { halt("未加载交易规则"); return; }
         if ("TRADE".equals(executionType) && lastFilledQty.signum() > 0) {
             totalVolumeUsdt.accumulateAndGet(lastFilledQty.multiply(lastFilledPrice), BigDecimal::add);
-            if ("BUY".equalsIgnoreCase(side)) holdingInventory.accumulateAndGet(lastFilledQty, BigDecimal::add);
+            if ("BUY".equalsIgnoreCase(side)) {
+                holdingInventory.accumulateAndGet(lastFilledQty, BigDecimal::add);
+                postFillOutcomeTracker.recordBuyFill(lastFilledPrice, activeEntrySignalReason.get(), System.currentTimeMillis());
+            }
             else holdingInventory.accumulateAndGet(lastFilledQty, BigDecimal::subtract);
         }
         if ("BUY".equalsIgnoreCase(side) && currentStatus.get() == ChurnStatus.BUYING
@@ -279,4 +287,5 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public String getSymbol() { return properties.getStrategy().getSymbol(); }
     public int getUsedApiWeight() { return tradeService.getUsedWeight1m().get(); }
     public MarketSignalEvaluator.EntryDecision getLastEntryDecision() { return marketSignalEvaluator.getLastDecision(); }
+    public PostFillOutcomeTracker.OutcomeSummary getPostFillOutcomes() { return postFillOutcomeTracker.getSummary(); }
 }

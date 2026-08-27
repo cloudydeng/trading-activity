@@ -24,7 +24,8 @@ public class BotDashboardController {
                 "totalVolumeUsdt", engine.getTotalVolumeUsdt().get(),
                 "roundTripsCompleted", engine.getRoundTripsCompleted().get(),
                 "usedApiWeight1m", engine.getUsedApiWeight(),
-                "entrySignal", engine.getLastEntryDecision()
+                "entrySignal", engine.getLastEntryDecision(),
+                "postFillOutcomes", engine.getPostFillOutcomes()
         );
     }
 
