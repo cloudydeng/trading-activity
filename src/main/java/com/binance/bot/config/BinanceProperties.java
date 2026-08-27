@@ -32,5 +32,12 @@ public class BinanceProperties {
         private long orderTtlMs;
         private int minSpreadTicks;
         private double randomSizeJitter;
+        private long signalLookbackMs = 3000;
+        private long marketDataStaleMs = 1000;
+        private double minBookImbalance = 0.05;
+        private double minDepthImbalance = -0.10;
+        private double minTakerFlowImbalance = -0.20;
+        private double maxDownwardMoveBps = 8;
+        private double maxShortTermVolatilityBps = 20;
     }
 }

@@ -23,7 +23,8 @@ public class BotDashboardController {
                 "symbol", engine.getSymbol(),
                 "totalVolumeUsdt", engine.getTotalVolumeUsdt().get(),
                 "roundTripsCompleted", engine.getRoundTripsCompleted().get(),
-                "usedApiWeight1m", engine.getUsedApiWeight()
+                "usedApiWeight1m", engine.getUsedApiWeight(),
+                "entrySignal", engine.getLastEntryDecision()
         );
     }
 

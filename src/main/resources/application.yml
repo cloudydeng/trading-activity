@@ -30,6 +30,14 @@ binance:
     min-spread-ticks: 2
     # 数量随机扰动比例 (如 0.05 表示 +-5% 随机数量，打破机器人特征)
     random-size-jitter: 0.05
+    # 新开仓信号窗口与保护阈值；均应先在 Testnet 回测和验证后调整
+    signal-lookback-ms: 3000
+    market-data-stale-ms: 1000
+    min-book-imbalance: 0.05
+    min-depth-imbalance: -0.10
+    min-taker-flow-imbalance: -0.20
+    max-downward-move-bps: 8
+    max-short-term-volatility-bps: 20
 
 logging:
   level:
