@@ -25,14 +25,14 @@ public class BotDashboardController {
                 "roundTripsCompleted", engine.getRoundTripsCompleted().get(),
                 "usedApiWeight1m", engine.getUsedApiWeight(),
                 "entrySignal", engine.getLastEntryDecision(),
-                "postFillOutcomes", engine.getPostFillOutcomes()
+                "postFillOutcomes", engine.getPostFillOutcomes(),
+                "risk", engine.getRiskSnapshot()
         );
     }
 
     @PostMapping("/start")
     public String startEngine() {
-        engine.startTrading();
-        return "纯刷量引擎已启动";
+        return engine.startTrading() ? "引擎已启动" : "引擎拒绝启动；请检查 status 的状态与风险日志";
     }
 
     @PostMapping("/stop")

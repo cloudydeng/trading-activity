@@ -35,6 +35,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final UserDataStreamService userDataStreamService;
     private final MarketSignalEvaluator marketSignalEvaluator;
     private final PostFillOutcomeTracker postFillOutcomeTracker;
+    private final TradingRiskGuard riskGuard;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final AtomicReference<BigDecimal> lastBestAsk = new AtomicReference<>();
 
@@ -52,16 +53,19 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
     private final AtomicBoolean acceptingMarketConnections = new AtomicBoolean(true);
     private final AtomicReference<String> activeEntrySignalReason = new AtomicReference<>("UNKNOWN");
+    private final StringBuilder inboundMarketMessage = new StringBuilder();
 
     public HighFrequencyVolumeChurnEngine(BinanceProperties properties, BinanceOptimizedTradeService tradeService,
                                            SymbolRuleManager ruleManager, UserDataStreamService userDataStreamService,
-                                           MarketSignalEvaluator marketSignalEvaluator, PostFillOutcomeTracker postFillOutcomeTracker) {
+                                           MarketSignalEvaluator marketSignalEvaluator, PostFillOutcomeTracker postFillOutcomeTracker,
+                                           TradingRiskGuard riskGuard) {
         this.properties = properties;
         this.tradeService = tradeService;
         this.ruleManager = ruleManager;
         this.userDataStreamService = userDataStreamService;
         this.marketSignalEvaluator = marketSignalEvaluator;
         this.postFillOutcomeTracker = postFillOutcomeTracker;
+        this.riskGuard = riskGuard;
     }
 
     @PostConstruct
@@ -112,13 +116,27 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
     }
 
-    public synchronized void startTrading() {
-        if (isRunning.get()) return;
+    public synchronized boolean startTrading() {
+        if (isRunning.get()) return true;
         calibrateHoldings();
+        JsonNode openOrders = tradeService.getOpenOrders(properties.getStrategy().getSymbol());
+        if (openOrders == null) {
+            halt("无法确认交易所活动订单，拒绝启动");
+            return false;
+        }
+        if (!openOrders.isEmpty()) {
+            halt("发现未由本进程恢复的活动订单，需先人工对账");
+            return false;
+        }
+        if (holdingInventory.get().signum() > 0) {
+            halt("发现既有标的持仓，成本未知；拒绝自动接管");
+            return false;
+        }
         isRunning.set(true);
-        currentStatus.set(holdingInventory.get().signum() > 0 ? ChurnStatus.SELLING : ChurnStatus.IDLE);
+        currentStatus.set(ChurnStatus.IDLE);
         orderPlacedTimestamp.set(0);
         log.info("引擎启动，当前标的持仓: {}", holdingInventory.get());
+        return true;
     }
 
     public synchronized void stopTrading() {
@@ -141,12 +159,15 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     @Override
     public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
-        if (!last) {
-            log.warn("收到分片盘口消息，忽略以避免使用不完整行情");
-            return WebSocket.Listener.super.onText(webSocket, data, last);
+        String payload;
+        synchronized (inboundMarketMessage) {
+            inboundMarketMessage.append(data);
+            if (!last) return CompletableFuture.completedFuture(null);
+            payload = inboundMarketMessage.toString();
+            inboundMarketMessage.setLength(0);
         }
         try {
-            JsonNode envelope = objectMapper.readTree(data.toString());
+            JsonNode envelope = objectMapper.readTree(payload);
             JsonNode node = envelope.has("data") ? envelope.get("data") : envelope;
             if (node.has("b") && node.has("B") && node.has("a") && node.has("A")) {
                 BigDecimal bid = new BigDecimal(node.get("b").asText());
@@ -154,8 +175,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 BigDecimal ask = new BigDecimal(node.get("a").asText());
                 BigDecimal askQty = new BigDecimal(node.get("A").asText());
                 lastBestAsk.set(ask);
-                postFillOutcomeTracker.recordMarketPrice(bid.add(ask).divide(BigDecimal.valueOf(2), RoundingMode.HALF_UP), System.currentTimeMillis());
-                marketSignalEvaluator.recordQuote(bid, bidQty, ask, askQty, System.currentTimeMillis(), properties.getStrategy());
+                long now = System.currentTimeMillis();
+                BigDecimal mid = bid.add(ask).divide(BigDecimal.valueOf(2), RoundingMode.HALF_UP);
+                postFillOutcomeTracker.recordMarketPrice(mid, now);
+                riskGuard.recordMark(mid, now, properties.getStrategy());
+                marketSignalEvaluator.recordQuote(bid, bidQty, ask, askQty, now, properties.getStrategy());
                 if (isRunning.get()) driveChurnStateMachine(bid, ask);
             } else if (node.has("q") && node.has("m")) {
                 marketSignalEvaluator.recordAggTrade(new BigDecimal(node.get("q").asText()), node.get("m").asBoolean(), System.currentTimeMillis(), properties.getStrategy());
@@ -185,6 +209,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 BigDecimal qty = buyQuantity(bestBid, rule);
                 BigDecimal price = PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(BigDecimal.valueOf(properties.getStrategy().getBidDepthOffsetTicks()))), rule.tickSize());
                 if (!isValidOrder(qty, price, rule)) return;
+                if (!riskGuard.permitsNewEntry(qty, price, now, properties.getStrategy())) {
+                    log.warn("新开仓被风险熔断阻止: {}", riskGuard.getEntryBlockReason());
+                    return;
+                }
                 JsonNode res = tradeService.cancelAndReplaceOrder(symbol, "BUY", price, qty, null);
                 if (res != null && res.has("orderId")) trackOrder(res.get("orderId").asLong(), ChurnStatus.BUYING);
             }
@@ -200,6 +228,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 BigDecimal qty = buyQuantity(bestBid, rule);
                 BigDecimal price = PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(BigDecimal.valueOf(properties.getStrategy().getBidDepthOffsetTicks()))), rule.tickSize());
                 if (!isValidOrder(qty, price, rule)) return;
+                if (!riskGuard.permitsNewEntry(qty, price, now, properties.getStrategy())) {
+                    cancelActiveEntryOrder("风险熔断: " + riskGuard.getEntryBlockReason());
+                    return;
+                }
                 JsonNode res = tradeService.cancelAndReplaceOrder(symbol, "BUY", price, qty, orderId);
                 if (res != null && res.has("newOrderResponse")) trackOrder(res.get("newOrderResponse").get("orderId").asLong(), ChurnStatus.BUYING);
             }
@@ -218,7 +250,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     private synchronized void onOrderUpdate(long orderId, String side, String executionType, String orderStatus,
                                             BigDecimal lastFilledQty, BigDecimal lastFilledPrice) {
-        if (!isRunning.get() || !Long.valueOf(orderId).equals(activeOrderId.get())) return;
+        if (!Long.valueOf(orderId).equals(activeOrderId.get())) return;
         var rule = ruleManager.getRule(properties.getStrategy().getSymbol());
         if (rule == null) { halt("未加载交易规则"); return; }
         if ("TRADE".equals(executionType) && lastFilledQty.signum() > 0) {
@@ -228,6 +260,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 postFillOutcomeTracker.recordBuyFill(lastFilledPrice, activeEntrySignalReason.get(), System.currentTimeMillis());
             }
             else holdingInventory.accumulateAndGet(lastFilledQty, BigDecimal::subtract);
+            riskGuard.recordFill(side, lastFilledQty, lastFilledPrice, System.currentTimeMillis(), properties.getStrategy());
+            if (riskGuard.getEntryBlockReason() != null) log.warn("风险熔断已触发: {}", riskGuard.getEntryBlockReason());
         }
         if ("BUY".equalsIgnoreCase(side) && currentStatus.get() == ChurnStatus.BUYING
                 && ("FILLED".equals(orderStatus) || "CANCELED".equals(orderStatus) || "EXPIRED".equals(orderStatus))) {
@@ -288,4 +322,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public int getUsedApiWeight() { return tradeService.getUsedWeight1m().get(); }
     public MarketSignalEvaluator.EntryDecision getLastEntryDecision() { return marketSignalEvaluator.getLastDecision(); }
     public PostFillOutcomeTracker.OutcomeSummary getPostFillOutcomes() { return postFillOutcomeTracker.getSummary(); }
+    public TradingRiskGuard.RiskSnapshot getRiskSnapshot() { return riskGuard.snapshot(); }
+    public String getRiskBlockReason() { return riskGuard.getEntryBlockReason(); }
 }

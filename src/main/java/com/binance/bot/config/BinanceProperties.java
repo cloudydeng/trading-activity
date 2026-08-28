@@ -39,5 +39,12 @@ public class BinanceProperties {
         private double minTakerFlowImbalance = -0.20;
         private double maxDownwardMoveBps = 8;
         private double maxShortTermVolatilityBps = 20;
+        /** Conservative production guards. Values are denominated in the quote asset (USDT). */
+        private BigDecimal maxInventoryUsdt = new BigDecimal("40");
+        private BigDecimal maxDailyRealizedLossUsdt = new BigDecimal("5");
+        private BigDecimal maxDailyDrawdownUsdt = new BigDecimal("8");
+        private long maxInventoryAgeMs = 60_000;
+        /** A pessimistic fee estimate, until actual commission events are accounted for. */
+        private BigDecimal assumedMakerFeeBps = new BigDecimal("10");
     }
 }

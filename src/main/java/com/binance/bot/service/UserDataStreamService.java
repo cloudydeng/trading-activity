@@ -4,6 +4,7 @@ import com.binance.bot.config.BinanceProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -13,6 +14,9 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 @Slf4j
@@ -24,6 +28,10 @@ public class UserDataStreamService implements WebSocket.Listener {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final AtomicReference<String> currentListenKey = new AtomicReference<>();
+    private final AtomicBoolean connectInProgress = new AtomicBoolean(false);
+    private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
+    private final AtomicBoolean acceptingConnections = new AtomicBoolean(true);
+    private final StringBuilder inboundMessage = new StringBuilder();
     private ExecutionCallback executionCallback;
 
     @FunctionalInterface
@@ -47,9 +55,12 @@ public class UserDataStreamService implements WebSocket.Listener {
     }
 
     public synchronized void connect() {
+        if (!acceptingConnections.get() || !connectInProgress.compareAndSet(false, true)) return;
         String listenKey = tradeService.createListenKey();
         if (listenKey == null) {
+            connectInProgress.set(false);
             log.error("无法获取 ListenKey，UserDataStream 启动失败");
+            scheduleReconnect("无法获取 ListenKey");
             return;
         }
         this.currentListenKey.set(listenKey);
@@ -57,9 +68,13 @@ public class UserDataStreamService implements WebSocket.Listener {
 
         HttpClient.newHttpClient().newWebSocketBuilder()
                 .buildAsync(URI.create(wsUrl), this)
-                .thenAccept(ws -> log.info("已成功连入币安账户 User Data Stream!"))
+                .thenAccept(ws -> {
+                    connectInProgress.set(false);
+                    log.info("已成功连入币安账户 User Data Stream!");
+                })
                 .exceptionally(ex -> {
-                    log.error("连接 User Data Stream 异常", ex);
+                    connectInProgress.set(false);
+                    scheduleReconnect("连接异常: " + ex.getMessage());
                     return null;
                 });
     }
@@ -67,7 +82,14 @@ public class UserDataStreamService implements WebSocket.Listener {
     @Override
     public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
         try {
-            JsonNode node = objectMapper.readTree(data.toString());
+            String payload;
+            synchronized (inboundMessage) {
+                inboundMessage.append(data);
+                if (!last) return CompletableFuture.completedFuture(null);
+                payload = inboundMessage.toString();
+                inboundMessage.setLength(0);
+            }
+            JsonNode node = objectMapper.readTree(payload);
             String eventType = node.has("e") ? node.get("e").asText() : "";
 
             if ("executionReport".equals(eventType)) {
@@ -85,11 +107,35 @@ public class UserDataStreamService implements WebSocket.Listener {
                 if (executionCallback != null && properties.getStrategy().getSymbol().equalsIgnoreCase(symbol)) {
                     executionCallback.onOrderUpdate(orderId, side, currentExecutionType, orderStatus, lastFilledQty, lastFilledPrice);
                 }
+            } else if ("listenKeyExpired".equals(eventType)) {
+                scheduleReconnect("ListenKey 已失效");
             }
         } catch (Exception e) {
             log.error("解析 UserDataStream 消息异常", e);
         }
         return WebSocket.Listener.super.onText(webSocket, data, last);
+    }
+
+    @Override
+    public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
+        scheduleReconnect("账户流关闭 " + statusCode + ": " + reason);
+        return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
+    public void onError(WebSocket webSocket, Throwable error) {
+        scheduleReconnect("账户流错误: " + error.getMessage());
+    }
+
+    private void scheduleReconnect(String reason) {
+        if (!acceptingConnections.get()) return;
+        log.warn("账户成交流不可用，准备重连: {}", reason);
+        if (reconnectScheduled.compareAndSet(false, true)) {
+            CompletableFuture.delayedExecutor(1, TimeUnit.SECONDS).execute(() -> {
+                reconnectScheduled.set(false);
+                connect();
+            });
+        }
     }
 
     @Scheduled(fixedRate = 1800000)
@@ -98,5 +144,10 @@ public class UserDataStreamService implements WebSocket.Listener {
         if (key != null) {
             tradeService.keepAliveListenKey(key);
         }
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        acceptingConnections.set(false);
     }
 }

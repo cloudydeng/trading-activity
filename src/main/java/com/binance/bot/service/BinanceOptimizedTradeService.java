@@ -139,6 +139,24 @@ public class BinanceOptimizedTradeService {
         return BigDecimal.ZERO;
     }
 
+    /** Returns null on an indeterminate API failure; callers must fail closed in that case. */
+    public JsonNode getOpenOrders(String symbol) {
+        long timestamp = System.currentTimeMillis();
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("symbol", symbol.toUpperCase());
+        params.put("timestamp", String.valueOf(timestamp));
+        String queryString = buildQueryString(params);
+        String signature = signer.sign(queryString, properties.getApi().getSecretKey());
+        try {
+            String response = restClient.get().uri("/api/v3/openOrders?" + queryString + "&signature=" + signature)
+                    .retrieve().body(String.class);
+            return objectMapper.readTree(response);
+        } catch (Exception e) {
+            log.error("查询活动订单失败；拒绝在未知订单状态下启动: {}", e.getMessage());
+            return null;
+        }
+    }
+
     public String createListenKey() {
         try {
             String response = restClient.post()

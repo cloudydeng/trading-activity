@@ -38,6 +38,13 @@ binance:
     min-taker-flow-imbalance: -0.20
     max-downward-move-bps: 8
     max-short-term-volatility-bps: 20
+    # 生产安全上限：达到任一限制后只允许继续降低已有仓位，禁止新开仓。
+    max-inventory-usdt: 40
+    max-daily-realized-loss-usdt: 5
+    max-daily-drawdown-usdt: 8
+    max-inventory-age-ms: 60000
+    # 在尚未接入交易所实际 commission 字段前，保守估算 Maker 手续费。
+    assumed-maker-fee-bps: 10
 
 logging:
   level:
