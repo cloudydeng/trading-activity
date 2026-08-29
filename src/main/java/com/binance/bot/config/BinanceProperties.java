@@ -53,6 +53,7 @@ public class BinanceProperties {
         private BigDecimal assumedMakerFeeBps = new BigDecimal("10");
         private long paperEntryIntervalMs = 1_500;
         private int minPaperObservations = 500;
+        private String observationOutputFile = "data/paper-outcomes.jsonl";
 
         public boolean isObserveMode() {
             return "OBSERVE".equalsIgnoreCase(executionMode);

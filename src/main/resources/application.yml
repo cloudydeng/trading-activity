@@ -53,6 +53,7 @@ binance:
     # 观测模式最多每 1.5 秒记录一次候选入场；至少积累 500 个完整 60 秒样本再人工评估。
     paper-entry-interval-ms: 1500
     min-paper-observations: 500
+    observation-output-file: "data/paper-outcomes.jsonl"
 
 logging:
   level:

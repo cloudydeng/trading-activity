@@ -1,6 +1,7 @@
 package com.binance.bot.strategy;
 
 import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.math.BigDecimal;
 import java.math.MathContext;
@@ -19,6 +20,17 @@ public class PostFillOutcomeTracker {
     private static final MathContext MC = MathContext.DECIMAL64;
     private final Deque<Observation> active = new ArrayDeque<>();
     private final Deque<Outcome> completed = new ArrayDeque<>();
+    private final ObservationJournal observationJournal;
+
+    /** Keeps lightweight unit tests independent from the filesystem. */
+    public PostFillOutcomeTracker() {
+        this.observationJournal = null;
+    }
+
+    @Autowired
+    public PostFillOutcomeTracker(ObservationJournal observationJournal) {
+        this.observationJournal = observationJournal;
+    }
 
     public synchronized void recordBuyFill(BigDecimal entryPrice, String entryReason, long timestampMs) {
         recordBuyFill(entryPrice, entryReason, null, timestampMs);
@@ -48,7 +60,9 @@ public class PostFillOutcomeTracker {
             Observation observation = iterator.next();
             observation.update(price, timestampMs);
             if (observation.isComplete()) {
-                completed.addLast(observation.toOutcome());
+                Outcome outcome = observation.toOutcome();
+                completed.addLast(outcome);
+                if (observationJournal != null) observationJournal.append(outcome);
                 iterator.remove();
             }
         }
