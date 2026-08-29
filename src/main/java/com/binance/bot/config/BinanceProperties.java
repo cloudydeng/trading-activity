@@ -28,8 +28,11 @@ public class BinanceProperties {
     public static class Strategy {
         /** OBSERVE never sends authenticated requests or orders; LIVE is an explicit opt-in. */
         private String executionMode = "OBSERVE";
+        /** A second explicit switch is required even when executionMode is LIVE. */
+        private boolean liveTradingEnabled = false;
         private String symbol;
         private BigDecimal orderAmountUsdt;
+        private BigDecimal maxLiveOrderNotionalUsdt = new BigDecimal("6");
         private int bidDepthOffsetTicks;
         private int askDepthOffsetTicks;
         private long orderTtlMs;
@@ -56,11 +59,15 @@ public class BinanceProperties {
         private long benchmarkObservationIntervalMs = 2_000;
         private long paperEntryIntervalMs = 1_500;
         private int minPaperObservations = 500;
+        private int minQualifiedObservationsForLive = 500;
+        private int minBaselineObservationsForLive = 500;
         private String observationOutputFile = "data/paper-outcomes.jsonl";
 
         public boolean isObserveMode() {
             return "OBSERVE".equalsIgnoreCase(executionMode);
         }
+
+        public boolean isLiveMode() { return "LIVE".equalsIgnoreCase(executionMode); }
     }
 
     @Data

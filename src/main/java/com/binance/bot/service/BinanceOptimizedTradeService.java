@@ -52,8 +52,8 @@ public class BinanceOptimizedTradeService {
         Map<String, String> params = new LinkedHashMap<>();
         params.put("symbol", symbol);
         params.put("side", side.toUpperCase());
-        params.put("type", "LIMIT");
-        params.put("timeInForce", "GTX"); // 100% Maker Post-Only 保证
+        // LIMIT_MAKER is rejected rather than crossing the book, avoiding taker fills.
+        params.put("type", "LIMIT_MAKER");
         params.put("quantity", quantity.toPlainString());
         params.put("price", price.toPlainString());
         if (cancelOrderId != null && cancelOrderId > 0) {
@@ -61,7 +61,7 @@ public class BinanceOptimizedTradeService {
             // Never create a replacement if cancelling the tracked order failed.
             params.put("cancelReplaceMode", "STOP_ON_FAILURE");
         }
-        params.put("selfTradePreventionMode", "EXPIRE_MAKER"); // 防自成交封号
+        params.put("selfTradePreventionMode", "EXPIRE_BOTH"); // Any same-account match expires both sides.
         params.put("timestamp", String.valueOf(timestamp));
 
         String queryString = buildQueryString(params);

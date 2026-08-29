@@ -131,6 +131,25 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             log.info("OBSERVE 模式已启动：只记录虚拟候选入场，不发送订单");
             return true;
         }
+        if (!properties.getStrategy().isLiveMode() || !properties.getStrategy().isLiveTradingEnabled()) {
+            log.error("拒绝启动：真实执行必须同时设置 execution-mode=LIVE 与 live-trading-enabled=true");
+            return false;
+        }
+        if (properties.getApi().getApiKey() == null || properties.getApi().getApiKey().isBlank()
+                || properties.getApi().getSecretKey() == null || properties.getApi().getSecretKey().isBlank()) {
+            log.error("拒绝启动：真实执行缺少 API 凭据");
+            return false;
+        }
+        if (properties.getStrategy().getOrderAmountUsdt().compareTo(properties.getStrategy().getMaxLiveOrderNotionalUsdt()) > 0) {
+            log.error("拒绝启动：单笔名义金额超过 LIVE 上限");
+            return false;
+        }
+        if (getBaselineOutcomes().completedObservations() < properties.getStrategy().getMinBaselineObservationsForLive()
+                || getQualifiedSignalOutcomes().completedObservations() < properties.getStrategy().getMinQualifiedObservationsForLive()) {
+            log.error("拒绝启动：观察样本不足（需要基准 {}、合格信号 {}）",
+                    properties.getStrategy().getMinBaselineObservationsForLive(), properties.getStrategy().getMinQualifiedObservationsForLive());
+            return false;
+        }
         calibrateHoldings();
         JsonNode openOrders = tradeService.getOpenOrders(properties.getStrategy().getSymbol());
         if (openOrders == null) {
