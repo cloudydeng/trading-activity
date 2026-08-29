@@ -192,8 +192,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 if (isRunning.get()) driveChurnStateMachine(bid, ask);
             } else if (node.has("q") && node.has("m")) {
                 marketSignalEvaluator.recordAggTrade(new BigDecimal(node.get("q").asText()), node.get("m").asBoolean(), System.currentTimeMillis(), properties.getStrategy());
-            } else if (node.has("bids") && node.has("asks")) {
-                marketSignalEvaluator.recordDepth(sumDepth(node.get("bids")), sumDepth(node.get("asks")), System.currentTimeMillis());
+            } else if ((node.has("bids") && node.has("asks")) || (node.has("b") && node.has("a"))) {
+                // Binance depth payloads use bids/asks on partial-depth streams and b/a on diff-depth streams.
+                JsonNode bids = node.has("bids") ? node.get("bids") : node.get("b");
+                JsonNode asks = node.has("asks") ? node.get("asks") : node.get("a");
+                marketSignalEvaluator.recordDepth(sumDepth(bids), sumDepth(asks), System.currentTimeMillis());
             }
         } catch (Exception e) {
             log.error("Tick 解析异常", e);
