@@ -13,6 +13,7 @@ public class BinanceProperties {
 
     private Api api = new Api();
     private Strategy strategy = new Strategy();
+    private Security security = new Security();
 
     @Data
     public static class Api {
@@ -58,5 +59,11 @@ public class BinanceProperties {
         public boolean isObserveMode() {
             return "OBSERVE".equalsIgnoreCase(executionMode);
         }
+    }
+
+    @Data
+    public static class Security {
+        /** Required for every dashboard/control API request; injected only through BOT_ADMIN_TOKEN. */
+        private String adminToken;
     }
 }

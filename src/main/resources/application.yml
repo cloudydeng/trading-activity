@@ -10,6 +10,8 @@ spring:
       enabled: true
 
 binance:
+  security:
+    admin-token: "${BOT_ADMIN_TOKEN:}"
   api:
     base-url: "https://api.binance.com"
     ws-market-url: "wss://stream.binance.com:9443/ws"
