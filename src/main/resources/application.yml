@@ -1,6 +1,9 @@
 server:
   port: 8080
   address: "127.0.0.1"
+  # Trust the protocol headers emitted by the local Nginx HTTPS proxy, so login
+  # redirects and Secure session cookies remain on HTTPS.
+  forward-headers-strategy: framework
   servlet:
     session:
       cookie:
