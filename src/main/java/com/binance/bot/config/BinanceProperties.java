@@ -65,5 +65,7 @@ public class BinanceProperties {
     public static class Security {
         /** Required for every dashboard/control API request; injected only through BOT_ADMIN_TOKEN. */
         private String adminToken;
+        /** Browser login secret; injected only through BOT_ADMIN_PASSWORD. */
+        private String adminPassword;
     }
 }

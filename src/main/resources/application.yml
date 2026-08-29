@@ -1,6 +1,12 @@
 server:
   port: 8080
   address: "127.0.0.1"
+  servlet:
+    session:
+      cookie:
+        secure: true
+        http-only: true
+        same-site: strict
 
 spring:
   application:
@@ -12,6 +18,7 @@ spring:
 binance:
   security:
     admin-token: "${BOT_ADMIN_TOKEN:}"
+    admin-password: "${BOT_ADMIN_PASSWORD:}"
   api:
     base-url: "https://api.binance.com"
     ws-market-url: "wss://stream.binance.com:9443/ws"

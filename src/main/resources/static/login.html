@@ -1,0 +1,4 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Trading Activity 登录</title>
+<style>body{font-family:system-ui;max-width:360px;margin:12vh auto;padding:24px;background:#101827;color:#e5e7eb}input,button{box-sizing:border-box;width:100%;padding:12px;margin:8px 0}button{background:#2563eb;color:white;border:0;border-radius:6px}</style></head>
+<body><h2>Trading Activity</h2><p>管理登录</p><form method="post" action="/login"><input name="password" type="password" autocomplete="current-password" required placeholder="管理员密码"><button type="submit">登录</button></form><script>if(new URLSearchParams(location.search).has('error'))document.body.insertAdjacentHTML('beforeend','<p>密码错误</p>')</script></body></html>

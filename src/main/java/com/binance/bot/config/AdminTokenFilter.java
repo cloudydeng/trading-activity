@@ -4,6 +4,7 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpSession;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -16,6 +17,7 @@ import java.security.MessageDigest;
 @Component
 public class AdminTokenFilter extends OncePerRequestFilter {
     private static final String TOKEN_HEADER = "X-Bot-Admin-Token";
+    public static final String AUTHENTICATED_SESSION = "botAdminAuthenticated";
     private final BinanceProperties properties;
 
     public AdminTokenFilter(BinanceProperties properties) {
@@ -30,6 +32,11 @@ public class AdminTokenFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
             throws ServletException, IOException {
+        HttpSession session = request.getSession(false);
+        if (session != null && Boolean.TRUE.equals(session.getAttribute(AUTHENTICATED_SESSION))) {
+            filterChain.doFilter(request, response);
+            return;
+        }
         String expected = properties.getSecurity().getAdminToken();
         if (expected == null || expected.isBlank()) {
             response.sendError(HttpStatus.SERVICE_UNAVAILABLE.value(), "Bot API admin token is not configured");
