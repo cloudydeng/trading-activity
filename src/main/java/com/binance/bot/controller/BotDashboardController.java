@@ -17,16 +17,18 @@ public class BotDashboardController {
 
     @GetMapping("/status")
     public Map<String, Object> getStatus() {
-        return Map.of(
-                "running", engine.getIsRunning().get(),
-                "status", engine.getCurrentStatus().get().name(),
-                "symbol", engine.getSymbol(),
-                "totalVolumeUsdt", engine.getTotalVolumeUsdt().get(),
-                "roundTripsCompleted", engine.getRoundTripsCompleted().get(),
-                "usedApiWeight1m", engine.getUsedApiWeight(),
-                "entrySignal", engine.getLastEntryDecision(),
-                "postFillOutcomes", engine.getPostFillOutcomes(),
-                "risk", engine.getRiskSnapshot()
+        return Map.ofEntries(
+                Map.entry("running", engine.getIsRunning().get()),
+                Map.entry("status", engine.getCurrentStatus().get().name()),
+                Map.entry("executionMode", engine.getExecutionMode()),
+                Map.entry("minimumPaperObservations", engine.getMinimumPaperObservations()),
+                Map.entry("symbol", engine.getSymbol()),
+                Map.entry("totalVolumeUsdt", engine.getTotalVolumeUsdt().get()),
+                Map.entry("roundTripsCompleted", engine.getRoundTripsCompleted().get()),
+                Map.entry("usedApiWeight1m", engine.getUsedApiWeight()),
+                Map.entry("entrySignal", engine.getLastEntryDecision()),
+                Map.entry("postFillOutcomes", engine.getPostFillOutcomes()),
+                Map.entry("risk", engine.getRiskSnapshot())
         );
     }
 

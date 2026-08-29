@@ -14,9 +14,11 @@ binance:
     base-url: "https://api.binance.com"
     ws-market-url: "wss://stream.binance.com:9443/ws"
     ws-user-url: "wss://stream.binance.com:9443/ws"
-    api-key: "YOUR_BINANCE_API_KEY"
-    secret-key: "YOUR_BINANCE_SECRET_KEY"
+    api-key: "${BINANCE_API_API_KEY:}"
+    secret-key: "${BINANCE_API_SECRET_KEY:}"
   strategy:
+    # OBSERVE: 只消费公开行情并记录虚拟入场结果，绝不发认证请求或订单。LIVE 必须显式设置。
+    execution-mode: "OBSERVE"
     symbol: "PYTHUSDT"
     # 单笔下单金额 (USDT, 建议 $15~$25，化整为零抗单边)
     order-amount-usdt: 20.0
@@ -48,6 +50,9 @@ binance:
     max-inventory-age-ms: 60000
     # 在尚未接入交易所实际 commission 字段前，保守估算 Maker 手续费。
     assumed-maker-fee-bps: 10
+    # 观测模式最多每 1.5 秒记录一次候选入场；至少积累 500 个完整 60 秒样本再人工评估。
+    paper-entry-interval-ms: 1500
+    min-paper-observations: 500
 
 logging:
   level:

@@ -51,6 +51,10 @@ public class UserDataStreamService implements WebSocket.Listener {
 
     @PostConstruct
     public void start() {
+        if (properties.getStrategy().isObserveMode()) {
+            log.info("OBSERVE 模式：不连接账户 User Data Stream");
+            return;
+        }
         connect();
     }
 

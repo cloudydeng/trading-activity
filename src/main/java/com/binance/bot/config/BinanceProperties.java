@@ -25,6 +25,8 @@ public class BinanceProperties {
 
     @Data
     public static class Strategy {
+        /** OBSERVE never sends authenticated requests or orders; LIVE is an explicit opt-in. */
+        private String executionMode = "OBSERVE";
         private String symbol;
         private BigDecimal orderAmountUsdt;
         private int bidDepthOffsetTicks;
@@ -49,5 +51,11 @@ public class BinanceProperties {
         private long maxInventoryAgeMs = 60_000;
         /** A pessimistic fee estimate, until actual commission events are accounted for. */
         private BigDecimal assumedMakerFeeBps = new BigDecimal("10");
+        private long paperEntryIntervalMs = 1_500;
+        private int minPaperObservations = 500;
+
+        public boolean isObserveMode() {
+            return "OBSERVE".equalsIgnoreCase(executionMode);
+        }
     }
 }

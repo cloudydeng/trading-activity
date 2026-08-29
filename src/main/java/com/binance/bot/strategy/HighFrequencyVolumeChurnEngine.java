@@ -55,6 +55,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicReference<String> activeEntrySignalReason = new AtomicReference<>("UNKNOWN");
     private final AtomicReference<MarketSignalEvaluator.MarketContext> activeEntryContext = new AtomicReference<>();
     private final StringBuilder inboundMarketMessage = new StringBuilder();
+    private final AtomicLong lastPaperCandidateTimestamp = new AtomicLong(0);
 
     public HighFrequencyVolumeChurnEngine(BinanceProperties properties, BinanceOptimizedTradeService tradeService,
                                            SymbolRuleManager ruleManager, UserDataStreamService userDataStreamService,
@@ -119,6 +120,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     public synchronized boolean startTrading() {
         if (isRunning.get()) return true;
+        if (properties.getStrategy().isObserveMode()) {
+            isRunning.set(true);
+            currentStatus.set(ChurnStatus.IDLE);
+            orderPlacedTimestamp.set(0);
+            log.info("OBSERVE 模式已启动：只记录虚拟候选入场，不发送订单");
+            return true;
+        }
         calibrateHoldings();
         JsonNode openOrders = tradeService.getOpenOrders(properties.getStrategy().getSymbol());
         if (openOrders == null) {
@@ -211,6 +219,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 BigDecimal qty = buyQuantity(bestBid, rule);
                 BigDecimal price = PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(BigDecimal.valueOf(properties.getStrategy().getBidDepthOffsetTicks()))), rule.tickSize());
                 if (!isValidOrder(qty, price, rule)) return;
+                if (properties.getStrategy().isObserveMode()) {
+                    recordPaperCandidate(price, now);
+                    return;
+                }
                 if (!riskGuard.permitsNewEntry(qty, price, now, properties.getStrategy())) {
                     log.warn("新开仓被风险熔断阻止: {}", riskGuard.getEntryBlockReason());
                     return;
@@ -317,6 +329,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
     }
     private void trackOrder(long orderId, ChurnStatus status) { activeOrderId.set(orderId); entryCancellationPending.set(false); orderPlacedTimestamp.set(System.currentTimeMillis()); currentStatus.set(status); }
+    private void recordPaperCandidate(BigDecimal price, long nowMs) {
+        long previous = lastPaperCandidateTimestamp.get();
+        if (nowMs - previous < properties.getStrategy().getPaperEntryIntervalMs()) return;
+        if (!lastPaperCandidateTimestamp.compareAndSet(previous, nowMs)) return;
+        postFillOutcomeTracker.recordPaperCandidate(price, activeEntrySignalReason.get(), activeEntryContext.get(), nowMs);
+        log.info("记录虚拟候选入场 @ {}；当前仅观测，不发送订单", price);
+    }
     private void halt(String reason) { isRunning.set(false); currentStatus.set(ChurnStatus.HALTED); log.error("引擎进入保护停机: {}", reason); }
     private BigDecimal applyJitter(BigDecimal qty) { double j = properties.getStrategy().getRandomSizeJitter(); return j <= 0 ? qty : qty.multiply(BigDecimal.valueOf(1 + ThreadLocalRandom.current().nextDouble(-j, j))); }
     private void calibrateHoldings() { String base = properties.getStrategy().getSymbol().replace("USDT", "").replace("FDUSD", "").replace("USDC", ""); holdingInventory.set(tradeService.getFreeAssetBalance(base)); }
@@ -326,4 +345,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public PostFillOutcomeTracker.OutcomeSummary getPostFillOutcomes() { return postFillOutcomeTracker.getSummary(); }
     public TradingRiskGuard.RiskSnapshot getRiskSnapshot() { return riskGuard.snapshot(); }
     public String getRiskBlockReason() { return riskGuard.getEntryBlockReason(); }
+    public String getExecutionMode() { return properties.getStrategy().getExecutionMode(); }
+    public int getMinimumPaperObservations() { return properties.getStrategy().getMinPaperObservations(); }
 }
