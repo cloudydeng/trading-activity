@@ -38,6 +38,9 @@ binance:
     min-taker-flow-imbalance: -0.20
     max-downward-move-bps: 8
     max-short-term-volatility-bps: 20
+    # 检测到主动卖压/短线下跌后，先冷静，再确认价格从低点回收才允许重新挂买单。
+    post-selloff-cooldown-ms: 1500
+    min-post-selloff-reclaim-bps: 3
     # 生产安全上限：达到任一限制后只允许继续降低已有仓位，禁止新开仓。
     max-inventory-usdt: 40
     max-daily-realized-loss-usdt: 5

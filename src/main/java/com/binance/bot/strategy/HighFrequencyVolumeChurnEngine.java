@@ -53,6 +53,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
     private final AtomicBoolean acceptingMarketConnections = new AtomicBoolean(true);
     private final AtomicReference<String> activeEntrySignalReason = new AtomicReference<>("UNKNOWN");
+    private final AtomicReference<MarketSignalEvaluator.MarketContext> activeEntryContext = new AtomicReference<>();
     private final StringBuilder inboundMarketMessage = new StringBuilder();
 
     public HighFrequencyVolumeChurnEngine(BinanceProperties properties, BinanceOptimizedTradeService tradeService,
@@ -206,6 +207,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     return;
                 }
                 activeEntrySignalReason.set(decision.reason());
+                activeEntryContext.set(marketSignalEvaluator.getMarketContext(now));
                 BigDecimal qty = buyQuantity(bestBid, rule);
                 BigDecimal price = PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(BigDecimal.valueOf(properties.getStrategy().getBidDepthOffsetTicks()))), rule.tickSize());
                 if (!isValidOrder(qty, price, rule)) return;
@@ -257,7 +259,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             totalVolumeUsdt.accumulateAndGet(lastFilledQty.multiply(lastFilledPrice), BigDecimal::add);
             if ("BUY".equalsIgnoreCase(side)) {
                 holdingInventory.accumulateAndGet(lastFilledQty, BigDecimal::add);
-                postFillOutcomeTracker.recordBuyFill(lastFilledPrice, activeEntrySignalReason.get(), System.currentTimeMillis());
+                postFillOutcomeTracker.recordBuyFill(lastFilledPrice, activeEntrySignalReason.get(), activeEntryContext.get(), System.currentTimeMillis());
             }
             else holdingInventory.accumulateAndGet(lastFilledQty, BigDecimal::subtract);
             riskGuard.recordFill(side, lastFilledQty, lastFilledPrice, System.currentTimeMillis(), properties.getStrategy());

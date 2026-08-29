@@ -56,5 +56,27 @@ class MarketSignalEvaluatorTest {
         assertEquals("ALLOWED", evaluator.evaluate(4_500, config).reason());
     }
 
+    @Test
+    void requiresReclaimAfterSelloffBeforeAllowingAnotherEntry() {
+        MarketSignalEvaluator evaluator = new MarketSignalEvaluator();
+        config.setSignalLookbackMs(1_000);
+        config.setPostSelloffCooldownMs(1_000);
+        config.setMinPostSelloffReclaimBps(3);
+        config.setMaxShortTermVolatilityBps(200);
+        evaluator.recordQuote(decimal("100"), decimal("100"), decimal("101"), decimal("100"), 0, config);
+        evaluator.recordQuote(decimal("99"), decimal("110"), decimal("100"), decimal("90"), 500, config);
+        evaluator.recordDepth(decimal("1100"), decimal("900"), 500);
+        assertEquals("SHORT_TERM_DOWNMOVE", evaluator.evaluate(500, config).reason());
+
+        evaluator.recordQuote(decimal("99"), decimal("110"), decimal("100"), decimal("90"), 1_200, config);
+        evaluator.recordQuote(decimal("99"), decimal("110"), decimal("100"), decimal("90"), 1_600, config);
+        evaluator.recordDepth(decimal("1100"), decimal("900"), 1_600);
+        assertEquals("WAIT_FOR_PRICE_RECLAIM", evaluator.evaluate(1_600, config).reason());
+
+        evaluator.recordQuote(decimal("100"), decimal("110"), decimal("101"), decimal("90"), 1_800, config);
+        evaluator.recordDepth(decimal("1100"), decimal("900"), 1_800);
+        assertEquals("ALLOWED", evaluator.evaluate(1_800, config).reason());
+    }
+
     private static BigDecimal decimal(String value) { return new BigDecimal(value); }
 }

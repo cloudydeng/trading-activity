@@ -21,8 +21,13 @@ public class PostFillOutcomeTracker {
     private final Deque<Outcome> completed = new ArrayDeque<>();
 
     public synchronized void recordBuyFill(BigDecimal entryPrice, String entryReason, long timestampMs) {
+        recordBuyFill(entryPrice, entryReason, null, timestampMs);
+    }
+
+    public synchronized void recordBuyFill(BigDecimal entryPrice, String entryReason,
+                                           MarketSignalEvaluator.MarketContext entryContext, long timestampMs) {
         if (entryPrice == null || entryPrice.signum() <= 0) return;
-        active.addLast(new Observation(entryPrice, entryReason, timestampMs));
+        active.addLast(new Observation(entryPrice, entryReason, entryContext, timestampMs));
     }
 
     public synchronized void recordMarketPrice(BigDecimal price, long timestampMs) {
@@ -62,15 +67,17 @@ public class PostFillOutcomeTracker {
     private static final class Observation {
         private final BigDecimal entryPrice;
         private final String entryReason;
+        private final MarketSignalEvaluator.MarketContext entryContext;
         private final long entryTimestampMs;
         private final BigDecimal[] returnBps = new BigDecimal[HORIZONS_MS.length];
         private BigDecimal maxAdverseBps = BigDecimal.ZERO;
         private BigDecimal maxFavorableBps = BigDecimal.ZERO;
         private Long firstRecoveryMs;
 
-        private Observation(BigDecimal entryPrice, String entryReason, long entryTimestampMs) {
+        private Observation(BigDecimal entryPrice, String entryReason, MarketSignalEvaluator.MarketContext entryContext, long entryTimestampMs) {
             this.entryPrice = entryPrice;
             this.entryReason = entryReason == null ? "UNKNOWN" : entryReason;
+            this.entryContext = entryContext;
             this.entryTimestampMs = entryTimestampMs;
         }
 
@@ -84,10 +91,11 @@ public class PostFillOutcomeTracker {
         }
 
         private boolean isComplete() { return returnBps[HORIZONS_MS.length - 1] != null; }
-        private Outcome toOutcome() { return new Outcome(entryReason, Arrays.copyOf(returnBps, returnBps.length), maxAdverseBps, maxFavorableBps, firstRecoveryMs); }
+        private Outcome toOutcome() { return new Outcome(entryReason, entryContext, Arrays.copyOf(returnBps, returnBps.length), maxAdverseBps, maxFavorableBps, firstRecoveryMs); }
     }
 
-    public record Outcome(String entryReason, BigDecimal[] returnBps, BigDecimal maxAdverseBps, BigDecimal maxFavorableBps, Long firstRecoveryMs) { }
+    public record Outcome(String entryReason, MarketSignalEvaluator.MarketContext entryContext, BigDecimal[] returnBps,
+                          BigDecimal maxAdverseBps, BigDecimal maxFavorableBps, Long firstRecoveryMs) { }
     public record OutcomeSummary(int activeObservations, int completedObservations, BigDecimal bounceProbability60s,
                                  BigDecimal medianMaxAdverseBps, BigDecimal medianMaxFavorableBps, Long medianRecoveryMs,
                                  Map<String, Integer> completedByEntryReason, Outcome lastOutcome) {

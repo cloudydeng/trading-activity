@@ -20,6 +20,7 @@ public class MarketSignalEvaluator {
     private final Deque<TradeFlow> trades = new ArrayDeque<>();
     private final AtomicReference<EntryDecision> lastDecision = new AtomicReference<>(EntryDecision.block("AWAITING_MARKET_DATA"));
     private DepthSnapshot latestDepth;
+    private Selloff selloff;
 
     public synchronized void recordQuote(BigDecimal bid, BigDecimal bidQty, BigDecimal ask, BigDecimal askQty, long timestampMs,
                                          BinanceProperties.Strategy config) {
@@ -80,10 +81,22 @@ public class MarketSignalEvaluator {
 
         if (imbalance.compareTo(BigDecimal.valueOf(config.getMinBookImbalance())) < 0) return set(EntryDecision.block("WEAK_TOP_OF_BOOK", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
         if (depthImbalance.compareTo(BigDecimal.valueOf(config.getMinDepthImbalance())) < 0) return set(EntryDecision.block("WEAK_MULTI_LEVEL_BIDS", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
-        if (takerFlowImbalance.compareTo(BigDecimal.valueOf(config.getMinTakerFlowImbalance())) < 0) return set(EntryDecision.block("SELL_TAKER_PRESSURE", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
+        if (takerFlowImbalance.compareTo(BigDecimal.valueOf(config.getMinTakerFlowImbalance())) < 0) {
+            recordSelloff(mid, nowMs);
+            return set(EntryDecision.block("SELL_TAKER_PRESSURE", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
+        }
         if (microPrice.compareTo(mid) <= 0) return set(EntryDecision.block("MICROPRICE_NOT_SUPPORTIVE", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
-        if (returnBps.compareTo(BigDecimal.valueOf(-config.getMaxDownwardMoveBps())) < 0) return set(EntryDecision.block("SHORT_TERM_DOWNMOVE", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
+        if (returnBps.compareTo(BigDecimal.valueOf(-config.getMaxDownwardMoveBps())) < 0) {
+            recordSelloff(mid, nowMs);
+            return set(EntryDecision.block("SHORT_TERM_DOWNMOVE", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
+        }
         if (rangeBps.compareTo(BigDecimal.valueOf(config.getMaxShortTermVolatilityBps())) > 0) return set(EntryDecision.block("EXCESS_SHORT_TERM_VOLATILITY", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
+        if (selloff != null) {
+            if (nowMs - selloff.detectedAtMs() < config.getPostSelloffCooldownMs()) return set(EntryDecision.block("POST_SELLOFF_COOLDOWN", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
+            BigDecimal reclaimBps = mid.subtract(selloff.lowMid()).multiply(BigDecimal.valueOf(10_000)).divide(selloff.lowMid(), MC);
+            if (reclaimBps.compareTo(BigDecimal.valueOf(config.getMinPostSelloffReclaimBps())) < 0) return set(EntryDecision.block("WAIT_FOR_PRICE_RECLAIM", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
+            selloff = null;
+        }
         return set(EntryDecision.allow(imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
     }
 
@@ -92,7 +105,15 @@ public class MarketSignalEvaluator {
         quotes.clear();
         trades.clear();
         latestDepth = null;
+        selloff = null;
         lastDecision.set(EntryDecision.block("AWAITING_MARKET_DATA"));
+    }
+
+    public synchronized MarketContext getMarketContext(long nowMs) {
+        EntryDecision decision = lastDecision.get();
+        return new MarketContext(decision.reason(), decision.bookImbalance(), decision.depthImbalance(),
+                decision.takerFlowImbalance(), decision.returnBps(), decision.rangeBps(),
+                selloff == null ? null : nowMs - selloff.detectedAtMs(), selloff == null ? null : selloff.lowMid());
     }
 
     private void pruneTrades(long cutoff) {
@@ -103,6 +124,11 @@ public class MarketSignalEvaluator {
     private record Quote(BigDecimal bid, BigDecimal bidQty, BigDecimal ask, BigDecimal askQty, long timestampMs) { }
     private record TradeFlow(BigDecimal signedQuantity, BigDecimal totalQuantity, long timestampMs) { }
     private record DepthSnapshot(BigDecimal bidDepth, BigDecimal askDepth, long timestampMs) { }
+    private record Selloff(long detectedAtMs, BigDecimal lowMid) { }
+
+    private void recordSelloff(BigDecimal mid, long nowMs) {
+        selloff = selloff == null ? new Selloff(nowMs, mid) : new Selloff(nowMs, selloff.lowMid().min(mid));
+    }
 
     public record EntryDecision(boolean allowed, String reason, BigDecimal bookImbalance, BigDecimal depthImbalance,
                                 BigDecimal takerFlowImbalance, BigDecimal returnBps, BigDecimal rangeBps) {
@@ -110,4 +136,8 @@ public class MarketSignalEvaluator {
         static EntryDecision block(String reason) { return new EntryDecision(false, reason, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO); }
         static EntryDecision block(String reason, BigDecimal book, BigDecimal depth, BigDecimal flow, BigDecimal returnBps, BigDecimal rangeBps) { return new EntryDecision(false, reason, book, depth, flow, returnBps, rangeBps); }
     }
+
+    public record MarketContext(String decisionReason, BigDecimal bookImbalance, BigDecimal depthImbalance,
+                                BigDecimal takerFlowImbalance, BigDecimal returnBps, BigDecimal rangeBps,
+                                Long selloffAgeMs, BigDecimal selloffLowMid) { }
 }

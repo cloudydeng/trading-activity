@@ -39,6 +39,9 @@ public class BinanceProperties {
         private double minTakerFlowImbalance = -0.20;
         private double maxDownwardMoveBps = 8;
         private double maxShortTermVolatilityBps = 20;
+        /** After a detected sell-off, require a quiet period and a measured reclaim before bidding again. */
+        private long postSelloffCooldownMs = 1_500;
+        private double minPostSelloffReclaimBps = 3;
         /** Conservative production guards. Values are denominated in the quote asset (USDT). */
         private BigDecimal maxInventoryUsdt = new BigDecimal("40");
         private BigDecimal maxDailyRealizedLossUsdt = new BigDecimal("5");
