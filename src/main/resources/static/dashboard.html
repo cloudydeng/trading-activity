@@ -1,5 +1,26 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Trading Activity 控制台</title>
-<style>body{font-family:system-ui;max-width:900px;margin:32px auto;padding:20px;background:#101827;color:#e5e7eb}button{padding:10px 14px;margin-right:8px;border:0;border-radius:6px}pre{background:#172033;padding:16px;overflow:auto}.start{background:#16a34a;color:white}.stop{background:#dc2626;color:white}</style></head>
-<body><h2>Trading Activity 控制台</h2><p><button class="start" onclick="control('start')">启动</button><button class="stop" onclick="control('stop')">停止</button><form method="post" action="/logout" style="display:inline"><button>退出登录</button></form></p><pre id="status">加载中…</pre>
-<script>async function status(){let r=await fetch('/api/bot/status');if(r.status===401){location='/login.html';return}document.querySelector('#status').textContent=JSON.stringify(await r.json(),null,2)}async function control(x){if(!confirm('确认'+(x==='start'?'启动':'停止')+'？'))return;let r=await fetch('/api/bot/'+x,{method:'POST'});if(!r.ok)alert('操作失败：'+r.status);await status()}status();setInterval(status,5000)</script></body></html>
+<style>
+:root{color-scheme:dark}body{font-family:system-ui,-apple-system,sans-serif;max-width:1080px;margin:28px auto;padding:0 18px;background:#101827;color:#e5e7eb}.head{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}button{padding:9px 13px;border:0;border-radius:7px;font-size:14px;cursor:pointer}.start{background:#16a34a;color:#fff}.stop{background:#dc2626;color:#fff}.muted{color:#a5b4c7;font-size:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin:18px 0}.card{background:#172033;border:1px solid #28364e;border-radius:10px;padding:15px}.label{color:#9aabc2;font-size:13px}.value{font-size:21px;font-weight:650;margin-top:6px}.ok{color:#4ade80}.warn{color:#fbbf24}.bad{color:#fb7185}section{background:#172033;border:1px solid #28364e;border-radius:10px;padding:16px;margin-top:12px}h1{font-size:23px}h2{font-size:16px;margin:0 0 12px}dl{display:grid;grid-template-columns:max-content 1fr;gap:9px 16px;margin:0}dt{color:#9aabc2}dd{margin:0;word-break:break-word}details{margin-top:14px}pre{white-space:pre-wrap;overflow:auto;background:#0d1422;padding:12px;border-radius:7px;font-size:12px}.error{color:#fb7185}
+</style></head>
+<body><div class="head"><div><h1>Trading Activity 控制台</h1><div id="updated" class="muted">正在加载…</div></div><p><button class="start" onclick="control('start')">启动观察</button><button class="stop" onclick="control('stop')">停止</button><form method="post" action="/logout" style="display:inline"><button>退出登录</button></form></p></div>
+<div class="grid" id="summary"></div>
+<section><h2>当前入场判断</h2><dl id="signal"></dl></section>
+<section><h2>风险与仓位</h2><dl id="risk"></dl></section>
+<section><h2>观察样本（用于验证策略，不代表真实成交）</h2><dl id="outcomes"></dl></section>
+<details><summary>查看原始技术数据</summary><pre id="raw">加载中…</pre></details>
+<script>
+const reasonMap={ALLOWED:'条件通过，可记录观察候选',WEAK_TOP_OF_BOOK:'盘口买方优势不足',WEAK_DEPTH:'深度买方优势不足',WEAK_TAKER_FLOW:'主动买盘不足',SELL_OFF_COOLDOWN:'刚发生下跌，仍在冷却期',NO_RECLAIM_AFTER_SELLOFF:'下跌后尚未收复，暂不入场',VOLATILITY_TOO_HIGH:'短时波动过大',INSUFFICIENT_MARKET_DATA:'行情数据不足'};
+const n=v=>v===null||v===undefined?'—':Number(v).toLocaleString('zh-CN',{maximumFractionDigits:4});
+const bps=v=>v===null||v===undefined?'—':`${n(v)} bps`;
+const set=(id,items)=>document.querySelector(id).innerHTML=items.map(([k,v])=>`<dt>${k}</dt><dd>${v}</dd>`).join('');
+function render(s){const e=s.entrySignal||{},r=s.risk||{},o=s.postFillOutcomes||{};const observing=s.executionMode==='OBSERVE';
+ document.querySelector('#summary').innerHTML=[['运行状态',s.running?'运行中':'已停止',s.running?'ok':'warn'],['运行模式',observing?'仅观察（不下单）':s.executionMode,observing?'ok':'warn'],['交易对',s.symbol||'—',''],['当前状态',s.status||'—',''],['API 负载（1 分钟）',n(s.usedApiWeight1m),''],['完成回合',n(s.roundTripsCompleted),'']].map(([k,v,c])=>`<div class="card"><div class="label">${k}</div><div class="value ${c}">${v}</div></div>`).join('');
+ set('#signal',[['是否允许入场',e.allowed?'<span class="ok">允许</span>':'<span class="warn">暂不入场</span>'],['原因',reasonMap[e.reason]||e.reason||'—'],['盘口买卖力量差',bps(e.bookImbalance)],['深度买卖力量差',bps(e.depthImbalance)],['主动成交买卖差',bps(e.takerFlowImbalance)],['短期价格变化',bps(e.returnBps)],['短期波动范围',bps(e.rangeBps)]]);
+ set('#risk',[['新开仓限制',r.entryBlockReason||'<span class="ok">无</span>'],['持仓数量',n(r.positionQty)],['持仓成本（USDT）',n(r.positionCostUsdt)],['标记价格',n(r.markPrice)],['已实现盈亏（USDT）',n(r.realizedPnlUsdt)],['浮动盈亏（USDT）',n(r.unrealizedPnlUsdt)],['预估净盈亏（含手续费）',n(r.estimatedNetPnlUsdt)],['预估手续费（USDT）',n(r.estimatedFeesUsdt)]]);
+ set('#outcomes',[['进行中的观察',n(o.activeObservations)],['已完成 60 秒观察',`${n(o.completedObservations)} / 至少 ${n(s.minimumPaperObservations)} 条`],['60 秒后未跌破入场价概率',o.bounceProbability60s===null||o.bounceProbability60s===undefined?'样本不足':`${n(Number(o.bounceProbability60s)*100)}%`],['中位最大回撤',bps(o.medianMaxAdverseBps)],['中位最大有利变化',bps(o.medianMaxFavorableBps)],['中位首次回本时间',o.medianRecoveryMs===null||o.medianRecoveryMs===undefined?'—':`${n(Number(o.medianRecoveryMs)/1000)} 秒`]]);
+ document.querySelector('#raw').textContent=JSON.stringify(s,null,2);document.querySelector('#updated').textContent=`自动刷新：每 5 秒一次 · 上次更新 ${new Date().toLocaleTimeString('zh-CN')}`;
+}
+async function status(){try{const r=await fetch('/api/bot/status',{cache:'no-store'});if(r.status===401){location='/login.html';return}if(!r.ok)throw Error(r.status);render(await r.json())}catch(e){document.querySelector('#updated').innerHTML=`<span class="error">状态读取失败：${e.message}，将自动重试</span>`}}
+async function control(x){if(!confirm(`确认${x==='start'?'启动观察':'停止'}？`))return;const r=await fetch('/api/bot/'+x,{method:'POST'});if(!r.ok)alert('操作失败：'+r.status);await status()}status();setInterval(status,5000);
+</script></body></html>
