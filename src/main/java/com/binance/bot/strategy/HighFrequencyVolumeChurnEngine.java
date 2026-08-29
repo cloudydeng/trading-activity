@@ -37,7 +37,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final PostFillOutcomeTracker postFillOutcomeTracker;
     private final TradingRiskGuard riskGuard;
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final AtomicReference<BigDecimal> lastBestBid = new AtomicReference<>();
     private final AtomicReference<BigDecimal> lastBestAsk = new AtomicReference<>();
+    private final AtomicReference<BigDecimal> lastMidPrice = new AtomicReference<>();
+    private final AtomicLong lastMarketDataTimestamp = new AtomicLong(0);
 
     public enum ChurnStatus { IDLE, BUYING, SELLING, HALTED }
 
@@ -183,9 +186,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 BigDecimal bidQty = new BigDecimal(node.get("B").asText());
                 BigDecimal ask = new BigDecimal(node.get("a").asText());
                 BigDecimal askQty = new BigDecimal(node.get("A").asText());
-                lastBestAsk.set(ask);
                 long now = System.currentTimeMillis();
                 BigDecimal mid = bid.add(ask).divide(BigDecimal.valueOf(2), RoundingMode.HALF_UP);
+                lastBestBid.set(bid);
+                lastBestAsk.set(ask);
+                lastMidPrice.set(mid);
+                lastMarketDataTimestamp.set(now);
                 postFillOutcomeTracker.recordMarketPrice(mid, now);
                 riskGuard.recordMark(mid, now, properties.getStrategy());
                 marketSignalEvaluator.recordQuote(bid, bidQty, ask, askQty, now, properties.getStrategy());
@@ -350,4 +356,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public String getRiskBlockReason() { return riskGuard.getEntryBlockReason(); }
     public String getExecutionMode() { return properties.getStrategy().getExecutionMode(); }
     public int getMinimumPaperObservations() { return properties.getStrategy().getMinPaperObservations(); }
+    public MarketDataSnapshot getMarketDataSnapshot() {
+        return new MarketDataSnapshot(lastBestBid.get(), lastBestAsk.get(), lastMidPrice.get(), lastMarketDataTimestamp.get());
+    }
+
+    public record MarketDataSnapshot(BigDecimal bestBid, BigDecimal bestAsk, BigDecimal midPrice, long updatedAtMs) { }
 }
