@@ -31,9 +31,9 @@ binance:
   strategy:
     # OBSERVE: 只消费公开行情并记录虚拟入场结果，绝不发认证请求或订单。LIVE 必须显式设置。
     execution-mode: "OBSERVE"
-    symbol: "PYTHUSDT"
-    # 单笔下单金额 (USDT, 建议 $15~$25，化整为零抗单边)
-    order-amount-usdt: 20.0
+    symbol: "ENSOUSDT"
+    # 观察及未来模拟的名义单笔金额；ENSOUSDT 的 Binance 最小名义额为 5 USDT。
+    order-amount-usdt: 6.0
     # 买单挂单深度偏移 (避开买一，挂在 Bid 2 ~ Bid 3 吃插针)
     bid-depth-offset-ticks: 2
     # 卖单挂单深度 (接到货后贴紧卖一快速回本出货)
@@ -65,7 +65,8 @@ binance:
     # 观测模式最多每 1.5 秒记录一次候选入场；至少积累 500 个完整 60 秒样本再人工评估。
     paper-entry-interval-ms: 1500
     min-paper-observations: 500
-    observation-output-file: "data/paper-outcomes.jsonl"
+    # 每个交易对单独留存观察样本，防止切换交易对后混入旧样本。
+    observation-output-file: "data/enso-paper-outcomes.jsonl"
 
 logging:
   level:
