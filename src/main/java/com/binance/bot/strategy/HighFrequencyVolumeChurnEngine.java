@@ -58,6 +58,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicReference<String> activeEntrySignalReason = new AtomicReference<>("UNKNOWN");
     private final AtomicReference<MarketSignalEvaluator.MarketContext> activeEntryContext = new AtomicReference<>();
     private final StringBuilder inboundMarketMessage = new StringBuilder();
+    private final AtomicLong lastBenchmarkObservationTimestamp = new AtomicLong(0);
     private final AtomicLong lastPaperCandidateTimestamp = new AtomicLong(0);
 
     public HighFrequencyVolumeChurnEngine(BinanceProperties properties, BinanceOptimizedTradeService tradeService,
@@ -195,6 +196,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 postFillOutcomeTracker.recordMarketPrice(mid, now);
                 riskGuard.recordMark(mid, now, properties.getStrategy());
                 marketSignalEvaluator.recordQuote(bid, bidQty, ask, askQty, now, properties.getStrategy());
+                if (isRunning.get() && properties.getStrategy().isObserveMode()) recordMarketBaseline(mid, now);
                 if (isRunning.get()) driveChurnStateMachine(bid, ask);
             } else if (node.has("q") && node.has("m")) {
                 marketSignalEvaluator.recordAggTrade(new BigDecimal(node.get("q").asText()), node.get("m").asBoolean(), System.currentTimeMillis(), properties.getStrategy());
@@ -345,13 +347,21 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         postFillOutcomeTracker.recordPaperCandidate(price, activeEntrySignalReason.get(), activeEntryContext.get(), nowMs);
         log.info("记录虚拟候选入场 @ {}；当前仅观测，不发送订单", price);
     }
+    private void recordMarketBaseline(BigDecimal midPrice, long nowMs) {
+        long previous = lastBenchmarkObservationTimestamp.get();
+        if (nowMs - previous < properties.getStrategy().getBenchmarkObservationIntervalMs()) return;
+        if (!lastBenchmarkObservationTimestamp.compareAndSet(previous, nowMs)) return;
+        var context = marketSignalEvaluator.getMarketContext(nowMs);
+        postFillOutcomeTracker.recordMarketBaseline(midPrice, context.decisionReason(), context, nowMs);
+    }
     private void halt(String reason) { isRunning.set(false); currentStatus.set(ChurnStatus.HALTED); log.error("引擎进入保护停机: {}", reason); }
     private BigDecimal applyJitter(BigDecimal qty) { double j = properties.getStrategy().getRandomSizeJitter(); return j <= 0 ? qty : qty.multiply(BigDecimal.valueOf(1 + ThreadLocalRandom.current().nextDouble(-j, j))); }
     private void calibrateHoldings() { String base = properties.getStrategy().getSymbol().replace("USDT", "").replace("FDUSD", "").replace("USDC", ""); holdingInventory.set(tradeService.getFreeAssetBalance(base)); }
     public String getSymbol() { return properties.getStrategy().getSymbol(); }
     public int getUsedApiWeight() { return tradeService.getUsedWeight1m().get(); }
     public MarketSignalEvaluator.EntryDecision getLastEntryDecision() { return marketSignalEvaluator.getLastDecision(); }
-    public PostFillOutcomeTracker.OutcomeSummary getPostFillOutcomes() { return postFillOutcomeTracker.getSummary(); }
+    public PostFillOutcomeTracker.OutcomeSummary getBaselineOutcomes() { return postFillOutcomeTracker.getBaselineSummary(); }
+    public PostFillOutcomeTracker.OutcomeSummary getQualifiedSignalOutcomes() { return postFillOutcomeTracker.getQualifiedSignalSummary(); }
     public TradingRiskGuard.RiskSnapshot getRiskSnapshot() { return riskGuard.snapshot(); }
     public String getRiskBlockReason() { return riskGuard.getEntryBlockReason(); }
     public String getExecutionMode() { return properties.getStrategy().getExecutionMode(); }

@@ -52,6 +52,8 @@ public class BinanceProperties {
         private long maxInventoryAgeMs = 60_000;
         /** A pessimistic fee estimate, until actual commission events are accounted for. */
         private BigDecimal assumedMakerFeeBps = new BigDecimal("10");
+        /** Unconditional OBSERVE-only market baseline cadence; kept separate from qualified signal samples. */
+        private long benchmarkObservationIntervalMs = 2_000;
         private long paperEntryIntervalMs = 1_500;
         private int minPaperObservations = 500;
         private String observationOutputFile = "data/paper-outcomes.jsonl";

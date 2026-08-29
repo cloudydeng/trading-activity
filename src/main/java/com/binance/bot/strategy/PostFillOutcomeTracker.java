@@ -47,6 +47,12 @@ public class PostFillOutcomeTracker {
         recordEntry(entryPrice, entryReason, entryContext, "PAPER_CANDIDATE", timestampMs);
     }
 
+    /** Unconditional OBSERVE-only reference point for measuring the market, not an executable order. */
+    public synchronized void recordMarketBaseline(BigDecimal entryPrice, String decisionReason,
+                                                  MarketSignalEvaluator.MarketContext entryContext, long timestampMs) {
+        recordEntry(entryPrice, decisionReason, entryContext, "MARKET_BASELINE", timestampMs);
+    }
+
     private void recordEntry(BigDecimal entryPrice, String entryReason, MarketSignalEvaluator.MarketContext entryContext,
                              String entryType, long timestampMs) {
         if (entryPrice == null || entryPrice.signum() <= 0) return;
@@ -70,12 +76,20 @@ public class PostFillOutcomeTracker {
     }
 
     public synchronized OutcomeSummary getSummary() {
-        if (completed.isEmpty()) return OutcomeSummary.empty(active.size());
-        List<Outcome> outcomes = new ArrayList<>(completed);
+        return summarize(null);
+    }
+
+    public synchronized OutcomeSummary getBaselineSummary() { return summarize("MARKET_BASELINE"); }
+    public synchronized OutcomeSummary getQualifiedSignalSummary() { return summarize("PAPER_CANDIDATE"); }
+
+    private OutcomeSummary summarize(String entryType) {
+        int activeCount = (int) active.stream().filter(o -> entryType == null || entryType.equals(o.entryType)).count();
+        List<Outcome> outcomes = completed.stream().filter(o -> entryType == null || entryType.equals(o.entryType)).toList();
+        if (outcomes.isEmpty()) return OutcomeSummary.empty(activeCount);
         long bounceCount = outcomes.stream().filter(o -> o.returnBps()[3] != null && o.returnBps()[3].signum() >= 0).count();
         Map<String, Integer> byReason = new TreeMap<>();
         for (Outcome outcome : outcomes) byReason.merge(outcome.entryReason(), 1, Integer::sum);
-        return new OutcomeSummary(active.size(), outcomes.size(), BigDecimal.valueOf(bounceCount).divide(BigDecimal.valueOf(outcomes.size()), MC),
+        return new OutcomeSummary(activeCount, outcomes.size(), BigDecimal.valueOf(bounceCount).divide(BigDecimal.valueOf(outcomes.size()), MC),
                 median(outcomes.stream().map(Outcome::maxAdverseBps).toList()),
                 median(outcomes.stream().map(Outcome::maxFavorableBps).toList()),
                 median(outcomes.stream().map(Outcome::firstRecoveryMs).filter(v -> v != null).toList()), byReason,

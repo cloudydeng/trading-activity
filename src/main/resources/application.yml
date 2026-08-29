@@ -62,7 +62,9 @@ binance:
     max-inventory-age-ms: 60000
     # 在尚未接入交易所实际 commission 字段前，保守估算 Maker 手续费。
     assumed-maker-fee-bps: 10
-    # 观测模式最多每 1.5 秒记录一次候选入场；至少积累 500 个完整 60 秒样本再人工评估。
+    # OBSERVE 下每 2 秒保留一条无条件市场基准；合格信号候选最多每 1.5 秒一条。
+    # 两组各自至少积累 500 个完整 60 秒样本再人工评估。
+    benchmark-observation-interval-ms: 2000
     paper-entry-interval-ms: 1500
     min-paper-observations: 500
     # 每个交易对单独留存观察样本，防止切换交易对后混入旧样本。
