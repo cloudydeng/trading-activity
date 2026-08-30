@@ -15,9 +15,11 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
@@ -45,6 +47,8 @@ class HighFrequencyVolumeChurnEngineTest {
         properties.getStrategy().setMaxLiveOrderNotionalUsdt(new BigDecimal("6"));
         properties.getStrategy().setOrderTtlMs(1_200);
         properties.getStrategy().setMinEntryOrderRestMs(800);
+        properties.getStrategy().setMakerEntryFallbackMs(2_000);
+        properties.getStrategy().setEntryIocMaxSlippageTicks(1);
 
         tradeService = mock(BinanceOptimizedTradeService.class);
         ruleManager = mock(SymbolRuleManager.class);
@@ -187,6 +191,118 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING, engine.getCurrentStatus().get());
     }
 
+    @Test
+    void stillValidSignalFallsBackFromMakerToPriceCappedIoc() throws Exception {
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
+        atomic("activeOrderId", Long.class).set(42L);
+        atomic("activeClientOrderId", String.class).set("churn-BUY-maker");
+        atomic("targetEntryQuantity", BigDecimal.class).set(new BigDecimal("7.00"));
+        atomic("filledEntryQuantity", BigDecimal.class).set(BigDecimal.ZERO);
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis() - 2_500);
+        when(marketSignalEvaluator.evaluate(any(Long.class), eq(properties.getStrategy())))
+                .thenReturn(MarketSignalEvaluator.EntryDecision.allow(
+                        new BigDecimal("0.2"), new BigDecimal("0.1"), new BigDecimal("0.1"),
+                        BigDecimal.ZERO, BigDecimal.ZERO));
+        ObjectMapper mapper = new ObjectMapper();
+        when(tradeService.cancelOrder("ENSOUSDT", 42L))
+                .thenReturn(mapper.readTree("{\"orderId\":42,\"status\":\"CANCELED\"}"));
+        when(tradeService.getOrder("ENSOUSDT", 42L))
+                .thenReturn(mapper.readTree("{\"orderId\":42,\"status\":\"CANCELED\",\"executedQty\":\"0\"}"));
+        when(tradeService.placeLimitIocBuy(eq("ENSOUSDT"), decimalEquals("6.9"),
+                decimalEquals("0.8631"), anyString()))
+                .thenReturn(mapper.readTree("{\"orderId\":88}"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.862"), new BigDecimal("0.863"));
+
+        verify(tradeService).cancelOrder("ENSOUSDT", 42L);
+        verify(tradeService).placeLimitIocBuy(eq("ENSOUSDT"), decimalEquals("6.9"),
+                decimalEquals("0.8631"), anyString());
+        assertEquals(88L, atomic("activeOrderId", Long.class).get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING, engine.getCurrentStatus().get());
+    }
+
+    @Test
+    void riskGuardIsRecheckedBeforeIocFallback() throws Exception {
+        prepareRestingMakerOrder();
+        ObjectMapper mapper = new ObjectMapper();
+        when(tradeService.cancelOrder("ENSOUSDT", 42L))
+                .thenReturn(mapper.readTree("{\"orderId\":42,\"status\":\"CANCELED\"}"));
+        when(tradeService.getOrder("ENSOUSDT", 42L))
+                .thenReturn(mapper.readTree("{\"orderId\":42,\"status\":\"CANCELED\",\"executedQty\":\"0\"}"));
+        ((TradingRiskGuard) ReflectionTestUtils.getField(engine, "riskGuard")).trip("TEST_RISK_BLOCK");
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.862"), new BigDecimal("0.863"));
+
+        verify(tradeService, never()).placeLimitIocBuy(anyString(), any(), any(), anyString());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+        assertNull(atomic("activeOrderId", Long.class).get());
+    }
+
+    @Test
+    void deterministicIocRejectionReturnsToIdleWithoutFailClosedHalt() throws Exception {
+        prepareRestingMakerOrder();
+        engine.getLiveArmed().set(true);
+        ObjectMapper mapper = new ObjectMapper();
+        when(tradeService.cancelOrder("ENSOUSDT", 42L))
+                .thenReturn(mapper.readTree("{\"orderId\":42,\"status\":\"CANCELED\"}"));
+        when(tradeService.getOrder("ENSOUSDT", 42L))
+                .thenReturn(mapper.readTree("{\"orderId\":42,\"status\":\"CANCELED\",\"executedQty\":\"0\"}"));
+        when(tradeService.placeLimitIocBuy(eq("ENSOUSDT"), any(), any(), anyString()))
+                .thenReturn(mapper.readTree("{\"code\":-1013,\"msg\":\"Filter failure\"}"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.862"), new BigDecimal("0.863"));
+
+        assertTrue(engine.getIsRunning().get());
+        assertTrue(engine.getLiveArmed().get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+        assertNull(atomic("activeOrderId", Long.class).get());
+    }
+
+    @Test
+    void makerFillDiscoveredDuringCancelWaitsForUserStreamInsteadOfSubmittingIoc() throws Exception {
+        prepareRestingMakerOrder();
+        ObjectMapper mapper = new ObjectMapper();
+        when(tradeService.cancelOrder("ENSOUSDT", 42L))
+                .thenReturn(mapper.readTree("{\"orderId\":42,\"status\":\"CANCELED\"}"));
+        when(tradeService.getOrder("ENSOUSDT", 42L))
+                .thenReturn(mapper.readTree("{\"orderId\":42,\"status\":\"CANCELED\",\"executedQty\":\"1.0\"}"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.862"), new BigDecimal("0.863"));
+
+        verify(tradeService, never()).placeLimitIocBuy(anyString(), any(), any(), anyString());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING, engine.getCurrentStatus().get());
+        assertEquals(42L, atomic("activeOrderId", Long.class).get());
+
+        orderUpdate(42L, "churn-BUY-maker", "BUY", "TRADE", "PARTIALLY_FILLED",
+                "1.0", "0.862", "0", "USDT");
+        orderUpdate(42L, "churn-BUY-maker", "BUY", "CANCELED", "CANCELED",
+                "0", "0", "0", "USDT");
+
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
+        assertNull(atomic("activeOrderId", Long.class).get());
+    }
+
+    private void prepareRestingMakerOrder() {
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
+        atomic("activeOrderId", Long.class).set(42L);
+        atomic("activeClientOrderId", String.class).set("churn-BUY-maker");
+        atomic("targetEntryQuantity", BigDecimal.class).set(new BigDecimal("7.00"));
+        atomic("filledEntryQuantity", BigDecimal.class).set(BigDecimal.ZERO);
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis() - 2_500);
+        when(marketSignalEvaluator.evaluate(any(Long.class), eq(properties.getStrategy())))
+                .thenReturn(MarketSignalEvaluator.EntryDecision.allow(
+                        new BigDecimal("0.2"), new BigDecimal("0.1"), new BigDecimal("0.1"),
+                        BigDecimal.ZERO, BigDecimal.ZERO));
+    }
+
     @SuppressWarnings("unchecked")
     private <T> AtomicReference<T> atomic(String field, Class<T> ignored) {
         return (AtomicReference<T>) ReflectionTestUtils.getField(engine, field);
@@ -196,5 +312,10 @@ class HighFrequencyVolumeChurnEngineTest {
                              String status, String qty, String price, String commission, String commissionAsset) {
         ReflectionTestUtils.invokeMethod(engine, "onOrderUpdate", orderId, clientOrderId, side, executionType,
                 status, new BigDecimal(qty), new BigDecimal(price), new BigDecimal(commission), commissionAsset);
+    }
+
+    private BigDecimal decimalEquals(String expected) {
+        BigDecimal value = new BigDecimal(expected);
+        return argThat(actual -> actual != null && actual.compareTo(value) == 0);
     }
 }

@@ -38,6 +38,10 @@ public class BinanceProperties {
         private long orderTtlMs;
         /** Soft signal noise cannot cancel a fresh entry before this resting time. */
         private long minEntryOrderRestMs = 800;
+        /** After this maker-only window, a still-valid signal may use a capped IOC limit buy. */
+        private long makerEntryFallbackMs = 2_000;
+        /** Maximum IOC buy limit above the observed best ask. */
+        private int entryIocMaxSlippageTicks = 1;
         private double randomSizeJitter;
         private long signalLookbackMs = 3000;
         private long marketDataStaleMs = 1000;

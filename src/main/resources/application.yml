@@ -42,11 +42,14 @@ binance:
     # 卖单挂单深度 (接到货后贴紧卖一快速回本出货)
     ask-depth-offset-ticks: 1
     # 挂单超时时间 (毫秒，超时后跟随最新盘口位移)
-    order-ttl-ms: 1200
+    order-ttl-ms: 5000
     # 盘口/深度的瞬时噪声不会立即撤单；强卖压、快速下跌等硬风险不受此限制。
     min-entry-order-rest-ms: 800
-    # 数量随机扰动比例 (如 0.05 表示 +-5% 随机数量，打破机器人特征)
-    random-size-jitter: 0.05
+    # Maker 两秒仍未成交且信号仍有效时，撤单确认后以受限 IOC 买入，最多越过卖一 1 tick。
+    maker-entry-fallback-ms: 2000
+    entry-ioc-max-slippage-ticks: 1
+    # 每笔固定 6U；数量仅按交易所 stepSize 向下取整，不再随机放大/缩小。
+    random-size-jitter: 0
     # 新开仓信号窗口与保护阈值；均应先在 Testnet 回测和验证后调整
     signal-lookback-ms: 3000
     market-data-stale-ms: 1000
