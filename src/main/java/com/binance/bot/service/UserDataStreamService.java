@@ -16,7 +16,6 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
 @Slf4j
 @Service
@@ -27,18 +26,24 @@ public class UserDataStreamService implements WebSocket.Listener {
     private final BinanceSigner signer;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    private final AtomicReference<String> currentListenKey = new AtomicReference<>();
     private final AtomicBoolean connectInProgress = new AtomicBoolean(false);
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
     private final AtomicBoolean acceptingConnections = new AtomicBoolean(true);
     private final AtomicBoolean ready = new AtomicBoolean(false);
     private final StringBuilder inboundMessage = new StringBuilder();
-    private ExecutionCallback executionCallback;
+    private volatile ExecutionCallback executionCallback;
+    private volatile StreamLifecycleCallback streamLifecycleCallback;
 
     @FunctionalInterface
     public interface ExecutionCallback {
-        void onOrderUpdate(long orderId, String side, String executionType, String orderStatus,
-                           BigDecimal lastExecutedQty, BigDecimal lastExecutedPrice);
+        void onOrderUpdate(long orderId, String clientOrderId, String side, String executionType,
+                           String orderStatus, BigDecimal lastExecutedQty, BigDecimal lastExecutedPrice,
+                           BigDecimal commission, String commissionAsset);
+    }
+
+    @FunctionalInterface
+    public interface StreamLifecycleCallback {
+        void onUnavailable(String reason);
     }
 
     public UserDataStreamService(BinanceOptimizedTradeService tradeService, BinanceProperties properties, BinanceSigner signer) {
@@ -49,6 +54,10 @@ public class UserDataStreamService implements WebSocket.Listener {
 
     public void setExecutionCallback(ExecutionCallback executionCallback) {
         this.executionCallback = executionCallback;
+    }
+
+    public void setStreamLifecycleCallback(StreamLifecycleCallback streamLifecycleCallback) {
+        this.streamLifecycleCallback = streamLifecycleCallback;
     }
 
     @PostConstruct
@@ -106,9 +115,8 @@ public class UserDataStreamService implements WebSocket.Listener {
                     ready.set(true);
                     log.info("已成功订阅币安账户 User Data Stream");
                 } else {
-                    ready.set(false);
+                    markUnavailable("账户流签名订阅失败: " + root.path("error").path("msg").asText("unknown"));
                     webSocket.abort();
-                    scheduleReconnect("账户流签名订阅失败: " + root.path("error").path("msg").asText("unknown"));
                 }
                 return CompletableFuture.completedFuture(null);
             }
@@ -121,17 +129,21 @@ public class UserDataStreamService implements WebSocket.Listener {
                 String currentExecutionType = node.get("x").asText();
                 String orderStatus = node.get("X").asText();
                 long orderId = node.get("i").asLong();
+                String clientOrderId = node.path("c").asText("");
                 BigDecimal lastFilledQty = new BigDecimal(node.get("l").asText());
                 BigDecimal lastFilledPrice = new BigDecimal(node.get("L").asText());
+                BigDecimal commission = new BigDecimal(node.path("n").asText("0"));
+                String commissionAsset = node.path("N").asText("");
 
                 if ("TRADE".equals(currentExecutionType) && lastFilledQty.compareTo(BigDecimal.ZERO) > 0) {
                     log.info("【订单成交】{} {} | 数量: {} @ 价格: {}", symbol, side, lastFilledQty, lastFilledPrice);
                 }
                 if (executionCallback != null && properties.getStrategy().getSymbol().equalsIgnoreCase(symbol)) {
-                    executionCallback.onOrderUpdate(orderId, side, currentExecutionType, orderStatus, lastFilledQty, lastFilledPrice);
+                    executionCallback.onOrderUpdate(orderId, clientOrderId, side, currentExecutionType, orderStatus,
+                            lastFilledQty, lastFilledPrice, commission, commissionAsset);
                 }
             } else if ("eventStreamTerminated".equals(eventType)) {
-                scheduleReconnect("账户事件流已终止");
+                markUnavailable("账户事件流已终止");
             }
         } catch (Exception e) {
             log.error("解析 UserDataStream 消息异常", e);
@@ -141,15 +153,25 @@ public class UserDataStreamService implements WebSocket.Listener {
 
     @Override
     public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
-        ready.set(false);
-        scheduleReconnect("账户流关闭 " + statusCode + ": " + reason);
+        markUnavailable("账户流关闭 " + statusCode + ": " + reason);
         return CompletableFuture.completedFuture(null);
     }
 
     @Override
     public void onError(WebSocket webSocket, Throwable error) {
-        ready.set(false);
-        scheduleReconnect("账户流错误: " + error.getMessage());
+        markUnavailable("账户流错误: " + error.getMessage());
+    }
+
+    private void markUnavailable(String reason) {
+        boolean wasReady = ready.getAndSet(false);
+        if (wasReady && streamLifecycleCallback != null) {
+            try {
+                streamLifecycleCallback.onUnavailable(reason);
+            } catch (Exception e) {
+                log.error("账户流断线保护回调异常", e);
+            }
+        }
+        scheduleReconnect(reason);
     }
 
     private void scheduleReconnect(String reason) {

@@ -27,8 +27,10 @@ public class BotDashboardController {
         return Map.ofEntries(
                 Map.entry("running", engine.getIsRunning().get()),
                 Map.entry("status", engine.getCurrentStatus().get().name()),
+                Map.entry("statusReason", engine.getStatusReason().get()),
                 Map.entry("executionMode", engine.getExecutionMode()),
                 Map.entry("liveArmed", engine.getLiveArmed().get()),
+                Map.entry("accountStreamReady", engine.isAccountStreamReady()),
                 Map.entry("minimumPaperObservations", engine.getMinimumPaperObservations()),
                 Map.entry("symbol", engine.getSymbol()),
                 Map.entry("totalVolumeUsdt", engine.getTotalVolumeUsdt().get()),
@@ -43,14 +45,16 @@ public class BotDashboardController {
     }
 
     @PostMapping("/start")
-    public String startEngine() {
-        return engine.startTrading() ? "引擎已启动" : "引擎拒绝启动；请检查 status 的状态与风险日志";
+    public ResponseEntity<String> startEngine() {
+        return engine.startTrading() ? ResponseEntity.ok("引擎已启动")
+                : ResponseEntity.status(409).body("引擎拒绝启动；请查看控制台的当前状态说明");
     }
 
     @PostMapping("/stop")
-    public String stopEngine() {
-        engine.disarmLiveTrading();
-        return "引擎已停止，LIVE 已解除，已清理活动订单";
+    public ResponseEntity<String> stopEngine() {
+        boolean clean = engine.disarmLiveTrading();
+        return clean ? ResponseEntity.ok("引擎已停止，LIVE 已解除，交易所确认无活动订单和标的持仓")
+                : ResponseEntity.status(409).body("LIVE 已解除，但未能确认安全空仓；系统已保护停机，请人工对账");
     }
 
     @PostMapping("/live/arm")
@@ -60,13 +64,14 @@ public class BotDashboardController {
                 expected.getBytes(StandardCharsets.UTF_8), request.password().getBytes(StandardCharsets.UTF_8));
         if (!passwordMatches || !"ENABLE LIVE".equals(request.confirmation())) return ResponseEntity.status(401).body("二次验证失败");
         return engine.armLiveTrading() ? ResponseEntity.ok("LIVE 已临时解锁；服务重启或停止后自动解除")
-                : ResponseEntity.status(409).body("服务器未配置 LIVE 双开关");
+                : ResponseEntity.status(409).body("无法解锁：LIVE 双开关未配置或账户成交流未就绪");
     }
 
     @PostMapping("/live/disarm")
-    public String disarmLive() {
-        engine.disarmLiveTrading();
-        return "LIVE 已解除";
+    public ResponseEntity<String> disarmLive() {
+        boolean clean = engine.disarmLiveTrading();
+        return clean ? ResponseEntity.ok("LIVE 已解除，交易所状态已确认")
+                : ResponseEntity.status(409).body("LIVE 已解除，但订单或持仓仍需人工核对");
     }
 
     public record LiveArmRequest(String password, String confirmation) { }

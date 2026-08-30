@@ -42,7 +42,8 @@ public class BinanceOptimizedTradeService {
     /**
      * POST /api/v3/order/cancelReplace 原子级撤换单
      */
-    public JsonNode cancelAndReplaceOrder(String symbol, String side, BigDecimal price, BigDecimal quantity, Long cancelOrderId) {
+    public JsonNode cancelAndReplaceOrder(String symbol, String side, BigDecimal price, BigDecimal quantity,
+                                          Long cancelOrderId, String clientOrderId) {
         if (usedWeight1m.get() > 1000 && System.currentTimeMillis() - lastWeightUpdateMs.get() < 60_000) {
             log.warn("⚠️ API 权重过高 (used: {})，节流保护", usedWeight1m.get());
             return null;
@@ -56,6 +57,7 @@ public class BinanceOptimizedTradeService {
         params.put("type", "LIMIT_MAKER");
         params.put("quantity", quantity.toPlainString());
         params.put("price", price.toPlainString());
+        params.put("newClientOrderId", clientOrderId);
         if (cancelOrderId != null && cancelOrderId > 0) {
             params.put("cancelOrderId", String.valueOf(cancelOrderId));
             // Never create a replacement if cancelling the tracked order failed.
@@ -81,18 +83,20 @@ public class BinanceOptimizedTradeService {
                             usedWeight1m.set(Integer.parseInt(weightStr));
                             lastWeightUpdateMs.set(System.currentTimeMillis());
                         }
-                        if (response.getStatusCode().is2xxSuccessful()) {
-                            return objectMapper.readTree(response.getBody());
+                        JsonNode body = objectMapper.readTree(response.getBody());
+                        if (!response.getStatusCode().is2xxSuccessful()) {
+                            log.warn("报单请求失败: HTTP {}, code={}, msg={}", response.getStatusCode().value(),
+                                    body.path("code").asText("unknown"), body.path("msg").asText("unknown"));
                         }
-                        return null;
+                        return body;
                     });
         } catch (Exception e) {
-            log.debug("做市报单被保护拦截或失效: {}", e.getMessage());
+            log.warn("报单请求状态未知: {}", e.getMessage());
             return null;
         }
     }
 
-    public boolean cancelOrder(String symbol, long orderId) {
+    public JsonNode cancelOrder(String symbol, long orderId) {
         long timestamp = System.currentTimeMillis();
         Map<String, String> params = new LinkedHashMap<>();
         params.put("symbol", symbol);
@@ -104,16 +108,54 @@ public class BinanceOptimizedTradeService {
         String uri = "/api/v3/order?" + queryString + "&signature=" + signature;
 
         try {
-            var response = restClient.delete()
+            return restClient.delete()
                     .uri(uri)
-                    .retrieve()
-                    .toBodilessEntity();
-            updateWeight(response.getHeaders());
-            log.debug("已撤单: ID={}", orderId);
-            return true;
+                    .exchange((request, response) -> {
+                        updateWeight(response.getHeaders());
+                        JsonNode body = objectMapper.readTree(response.getBody());
+                        if (!response.getStatusCode().is2xxSuccessful()) {
+                            log.warn("撤单失败: ID={}, HTTP {}, code={}, msg={}", orderId,
+                                    response.getStatusCode().value(), body.path("code").asText("unknown"),
+                                    body.path("msg").asText("unknown"));
+                        }
+                        return body;
+                    });
         } catch (Exception e) {
-            log.debug("撤单异常: {}", e.getMessage());
-            return false;
+            log.warn("撤单请求状态未知: ID={}, {}", orderId, e.getMessage());
+            return null;
+        }
+    }
+
+    /** Emergency reducing order. Callers must use it only for an existing position. */
+    public JsonNode placeMarketSell(String symbol, BigDecimal quantity, String clientOrderId) {
+        long timestamp = System.currentTimeMillis();
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("symbol", symbol.toUpperCase());
+        params.put("side", "SELL");
+        params.put("type", "MARKET");
+        params.put("quantity", quantity.toPlainString());
+        params.put("newClientOrderId", clientOrderId);
+        params.put("newOrderRespType", "ACK");
+        params.put("selfTradePreventionMode", "EXPIRE_BOTH");
+        params.put("timestamp", String.valueOf(timestamp));
+        String queryString = buildQueryString(params);
+        String signature = signer.sign(queryString, properties.getApi().getSecretKey());
+        try {
+            return restClient.post()
+                    .uri("/api/v3/order?" + queryString + "&signature=" + signature)
+                    .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                    .exchange((request, response) -> {
+                        updateWeight(response.getHeaders());
+                        JsonNode body = objectMapper.readTree(response.getBody());
+                        if (!response.getStatusCode().is2xxSuccessful()) {
+                            log.error("紧急市价卖单失败: HTTP {}, code={}, msg={}", response.getStatusCode().value(),
+                                    body.path("code").asText("unknown"), body.path("msg").asText("unknown"));
+                        }
+                        return body;
+                    });
+        } catch (Exception e) {
+            log.error("紧急市价卖单请求状态未知: {}", e.getMessage());
+            return null;
         }
     }
 
@@ -136,7 +178,7 @@ public class BinanceOptimizedTradeService {
         } catch (Exception e) {
             log.error("查询账户余额失败", e);
         }
-        return BigDecimal.ZERO;
+        return null;
     }
 
     /** Returns null on an indeterminate API failure; callers must fail closed in that case. */
@@ -173,32 +215,6 @@ public class BinanceOptimizedTradeService {
         } catch (Exception e) {
             log.error("查询订单最终状态失败: {}", e.getMessage());
             return null;
-        }
-    }
-
-    public String createListenKey() {
-        try {
-            String response = restClient.post()
-                    .uri("/api/v3/userDataStream")
-                    .retrieve()
-                    .body(String.class);
-            JsonNode jsonNode = objectMapper.readTree(response);
-            return jsonNode.get("listenKey").asText();
-        } catch (Exception e) {
-            log.error("创建 ListenKey 失败", e);
-            return null;
-        }
-    }
-
-    public void keepAliveListenKey(String listenKey) {
-        try {
-            restClient.put()
-                    .uri("/api/v3/userDataStream?listenKey=" + listenKey)
-                    .retrieve()
-                    .toBodilessEntity();
-            log.debug("刷新 ListenKey 保活");
-        } catch (Exception e) {
-            log.error("ListenKey 保活失败: {}", e.getMessage());
         }
     }
 
