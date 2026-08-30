@@ -251,7 +251,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         String symbol = properties.getStrategy().getSymbol();
         switch (currentStatus.get()) {
             case IDLE -> {
-                if (bestAsk.subtract(bestBid).compareTo(rule.tickSize().multiply(BigDecimal.valueOf(properties.getStrategy().getMinSpreadTicks()))) < 0) return;
                 MarketSignalEvaluator.EntryDecision decision = marketSignalEvaluator.evaluate(now, properties.getStrategy());
                 if (!decision.allowed()) {
                     log.debug("新开仓被信号层阻止: {} (book={}, depth={}, flow={}, returnBps={}, rangeBps={})", decision.reason(), decision.bookImbalance(), decision.depthImbalance(), decision.takerFlowImbalance(), decision.returnBps(), decision.rangeBps());

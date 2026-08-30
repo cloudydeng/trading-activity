@@ -36,7 +36,6 @@ public class BinanceProperties {
         private int bidDepthOffsetTicks;
         private int askDepthOffsetTicks;
         private long orderTtlMs;
-        private int minSpreadTicks;
         private double randomSizeJitter;
         private long signalLookbackMs = 3000;
         private long marketDataStaleMs = 1000;
