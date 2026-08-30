@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.mockito.ArgumentCaptor;
 
 import java.math.BigDecimal;
 import java.util.concurrent.atomic.AtomicReference;
@@ -16,7 +17,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -27,6 +30,7 @@ class HighFrequencyVolumeChurnEngineTest {
     private BinanceOptimizedTradeService tradeService;
     private SymbolRuleManager ruleManager;
     private UserDataStreamService userDataStreamService;
+    private MarketSignalEvaluator marketSignalEvaluator;
     private HighFrequencyVolumeChurnEngine engine;
 
     @BeforeEach
@@ -39,14 +43,17 @@ class HighFrequencyVolumeChurnEngineTest {
         properties.getStrategy().setSymbol("ENSOUSDT");
         properties.getStrategy().setOrderAmountUsdt(new BigDecimal("6"));
         properties.getStrategy().setMaxLiveOrderNotionalUsdt(new BigDecimal("6"));
+        properties.getStrategy().setOrderTtlMs(1_200);
+        properties.getStrategy().setMinEntryOrderRestMs(800);
 
         tradeService = mock(BinanceOptimizedTradeService.class);
         ruleManager = mock(SymbolRuleManager.class);
         userDataStreamService = mock(UserDataStreamService.class);
+        marketSignalEvaluator = mock(MarketSignalEvaluator.class);
         when(ruleManager.getRule("ENSOUSDT")).thenReturn(new SymbolRuleManager.SymbolRule(
                 "ENSOUSDT", new BigDecimal("0.0001"), new BigDecimal("0.1"), new BigDecimal("5")));
         engine = new HighFrequencyVolumeChurnEngine(properties, tradeService, ruleManager, userDataStreamService,
-                mock(MarketSignalEvaluator.class), mock(PostFillOutcomeTracker.class), new TradingRiskGuard());
+                marketSignalEvaluator, mock(PostFillOutcomeTracker.class), new TradingRiskGuard());
     }
 
     @Test
@@ -131,6 +138,53 @@ class HighFrequencyVolumeChurnEngineTest {
         verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
                 org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.any(), anyString());
+    }
+
+    @Test
+    void classifiesOnlyImmediateSafetyConditionsAsHardEntryRisk() {
+        assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("SELL_TAKER_PRESSURE"));
+        assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("SHORT_TERM_DOWNMOVE"));
+        assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("STALE_MARKET_DATA"));
+        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("WEAK_TOP_OF_BOOK"));
+        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("WEAK_MULTI_LEVEL_BIDS"));
+        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("MICROPRICE_NOT_SUPPORTIVE"));
+    }
+
+    @Test
+    void initialMakerBuyIsPlacedAtBestBid() throws Exception {
+        engine.getIsRunning().set(true);
+        when(marketSignalEvaluator.evaluate(any(Long.class), eq(properties.getStrategy())))
+                .thenReturn(MarketSignalEvaluator.EntryDecision.allow(
+                        new BigDecimal("0.2"), new BigDecimal("0.1"), new BigDecimal("0.1"),
+                        BigDecimal.ZERO, BigDecimal.ZERO));
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString()))
+                .thenReturn(new ObjectMapper().readTree("{\"orderId\":101}"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine", new BigDecimal("0.862"), new BigDecimal("0.863"));
+
+        ArgumentCaptor<BigDecimal> price = ArgumentCaptor.forClass(BigDecimal.class);
+        verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), price.capture(), any(), isNull(), anyString());
+        assertEquals(0, new BigDecimal("0.862").compareTo(price.getValue()));
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING, engine.getCurrentStatus().get());
+    }
+
+    @Test
+    void softSignalNoiseDoesNotImmediatelyCancelFreshBuy() {
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
+        atomic("activeOrderId", Long.class).set(42L);
+        atomic("activeClientOrderId", String.class).set("churn-BUY-soft");
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis());
+        when(marketSignalEvaluator.evaluate(any(Long.class), eq(properties.getStrategy())))
+                .thenReturn(MarketSignalEvaluator.EntryDecision.block("WEAK_TOP_OF_BOOK",
+                        new BigDecimal("-0.01"), BigDecimal.ZERO, BigDecimal.ZERO,
+                        BigDecimal.ZERO, BigDecimal.ZERO));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine", new BigDecimal("0.862"), new BigDecimal("0.863"));
+
+        verify(tradeService, never()).cancelOrder("ENSOUSDT", 42L);
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING, engine.getCurrentStatus().get());
     }
 
     @SuppressWarnings("unchecked")

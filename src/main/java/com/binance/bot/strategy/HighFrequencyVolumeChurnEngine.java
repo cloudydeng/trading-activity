@@ -350,10 +350,22 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 if (orderId == null) { halt("买单状态没有活动订单"); return; }
                 MarketSignalEvaluator.EntryDecision decision = marketSignalEvaluator.evaluate(now, properties.getStrategy());
                 if (!decision.allowed()) {
-                    cancelActiveEntryOrder("入场信号转为 " + decision.reason());
+                    long restingMs = now - orderPlacedTimestamp.get();
+                    long softCancelAfterMs = Math.max(properties.getStrategy().getOrderTtlMs(),
+                            properties.getStrategy().getMinEntryOrderRestMs());
+                    if (isHardEntryRisk(decision.reason())) {
+                        cancelActiveEntryOrder("入场硬风险转为 " + decision.reason());
+                    } else if (restingMs >= softCancelAfterMs) {
+                        cancelActiveEntryOrder("软信号转弱且挂单已到 TTL: " + decision.reason());
+                    } else {
+                        log.debug("忽略买单短时软信号噪声: {}，已驻留 {} ms", decision.reason(), restingMs);
+                    }
                     return;
                 }
-                if (entryCancellationPending.get() || now - orderPlacedTimestamp.get() <= properties.getStrategy().getOrderTtlMs()) return;
+                long restingMs = now - orderPlacedTimestamp.get();
+                if (entryCancellationPending.get()
+                        || restingMs < properties.getStrategy().getMinEntryOrderRestMs()
+                        || restingMs <= properties.getStrategy().getOrderTtlMs()) return;
                 BigDecimal qty = PrecisionUtil.roundDownToStep(
                         targetEntryQuantity.get().subtract(filledEntryQuantity.get()).max(BigDecimal.ZERO), rule.stepSize());
                 BigDecimal price = PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(BigDecimal.valueOf(properties.getStrategy().getBidDepthOffsetTicks()))), rule.tickSize());
@@ -481,6 +493,15 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
     private boolean isValidOrder(BigDecimal qty, BigDecimal price, SymbolRuleManager.SymbolRule rule) {
         return qty != null && qty.compareTo(rule.stepSize()) >= 0 && price != null && price.signum() > 0 && qty.multiply(price).compareTo(rule.minNotional()) >= 0;
+    }
+
+    static boolean isHardEntryRisk(String reason) {
+        return switch (reason) {
+            case "STALE_MARKET_DATA", "STALE_DEPTH_DATA", "EMPTY_TOP_OF_BOOK", "EMPTY_DEPTH_BOOK",
+                    "SELL_TAKER_PRESSURE", "SHORT_TERM_DOWNMOVE", "EXCESS_SHORT_TERM_VOLATILITY",
+                    "POST_SELLOFF_COOLDOWN" -> true;
+            default -> false;
+        };
     }
 
     private void submitMakerOrder(String symbol, String side, BigDecimal price, BigDecimal qty,

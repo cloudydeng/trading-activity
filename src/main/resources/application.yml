@@ -37,12 +37,14 @@ binance:
     # 观察及未来模拟的名义单笔金额；ENSOUSDT 的 Binance 最小名义额为 5 USDT。
     order-amount-usdt: 6.0
     max-live-order-notional-usdt: 6.0
-    # 买单挂单深度偏移 (避开买一，挂在 Bid 2 ~ Bid 3 吃插针)
-    bid-depth-offset-ticks: 2
+    # 买单挂在买一以提高 Maker 成交率；LIMIT_MAKER 仍会阻止意外 Taker 成交。
+    bid-depth-offset-ticks: 0
     # 卖单挂单深度 (接到货后贴紧卖一快速回本出货)
     ask-depth-offset-ticks: 1
     # 挂单超时时间 (毫秒，超时后跟随最新盘口位移)
     order-ttl-ms: 1200
+    # 盘口/深度的瞬时噪声不会立即撤单；强卖压、快速下跌等硬风险不受此限制。
+    min-entry-order-rest-ms: 800
     # 数量随机扰动比例 (如 0.05 表示 +-5% 随机数量，打破机器人特征)
     random-size-jitter: 0.05
     # 新开仓信号窗口与保护阈值；均应先在 Testnet 回测和验证后调整

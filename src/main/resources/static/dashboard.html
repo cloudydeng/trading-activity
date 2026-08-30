@@ -9,7 +9,7 @@
 <section><h2>风险与仓位</h2><dl id="risk"></dl></section>
 <details><summary>查看原始技术数据</summary><pre id="raw">加载中…</pre></details>
 <script>
-const reasonMap={ALLOWED:'条件通过，可以入场',WEAK_MULTI_LEVEL_BIDS:'多档买盘力量不足',SELL_TAKER_PRESSURE:'主动卖盘压力过强',MICROPRICE_NOT_SUPPORTIVE:'微观价格不支持买入',SHORT_TERM_DOWNMOVE:'短线仍在下跌',EXCESS_SHORT_TERM_VOLATILITY:'短时波动过大',POST_SELLOFF_COOLDOWN:'下跌后仍在冷却期',WAIT_FOR_PRICE_RECLAIM:'下跌后尚未收复',STALE_BOOK:'最优盘口数据过期',STALE_DEPTH:'深度数据过期',STALE_TAKER_FLOW:'主动成交数据过期',INSUFFICIENT_MARKET_DATA:'行情数据不足'};
+const reasonMap={ALLOWED:'条件通过，可以入场',AWAITING_MARKET_DATA:'等待行情数据',STALE_MARKET_DATA:'最优盘口数据过期',STALE_DEPTH_DATA:'深度数据过期',INSUFFICIENT_SIGNAL_HISTORY:'信号历史不足',EMPTY_TOP_OF_BOOK:'买一卖一数量为空',EMPTY_DEPTH_BOOK:'多档深度为空',WEAK_TOP_OF_BOOK:'买一力量不足',WEAK_MULTI_LEVEL_BIDS:'多档买盘力量不足',SELL_TAKER_PRESSURE:'主动卖盘压力过强',MICROPRICE_NOT_SUPPORTIVE:'微观价格不支持买入',SHORT_TERM_DOWNMOVE:'短线仍在下跌',EXCESS_SHORT_TERM_VOLATILITY:'短时波动过大',POST_SELLOFF_COOLDOWN:'下跌后仍在冷却期',WAIT_FOR_PRICE_RECLAIM:'下跌后尚未收复'};
 const n=v=>v===null||v===undefined?'—':Number(v).toLocaleString('zh-CN',{maximumFractionDigits:4});
 const bps=v=>v===null||v===undefined?'—':`${n(v)} bps`;
 const pct=v=>v===null||v===undefined?'—':`${n(Number(v)*100)}%`;

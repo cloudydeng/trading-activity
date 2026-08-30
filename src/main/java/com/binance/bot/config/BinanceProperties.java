@@ -36,6 +36,8 @@ public class BinanceProperties {
         private int bidDepthOffsetTicks;
         private int askDepthOffsetTicks;
         private long orderTtlMs;
+        /** Soft signal noise cannot cancel a fresh entry before this resting time. */
+        private long minEntryOrderRestMs = 800;
         private double randomSizeJitter;
         private long signalLookbackMs = 3000;
         private long marketDataStaleMs = 1000;
