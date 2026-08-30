@@ -25,7 +25,7 @@ binance:
   api:
     base-url: "https://api.binance.com"
     ws-market-url: "wss://stream.binance.com:9443/ws"
-    ws-user-url: "wss://stream.binance.com:9443/ws"
+    ws-user-url: "wss://ws-api.binance.com:443/ws-api/v3"
     api-key: "${BINANCE_API_API_KEY:}"
     secret-key: "${BINANCE_API_SECRET_KEY:}"
   strategy:

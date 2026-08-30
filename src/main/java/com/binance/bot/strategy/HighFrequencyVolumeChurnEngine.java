@@ -187,6 +187,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     public synchronized boolean armLiveTrading() {
         if (!properties.getStrategy().isLiveMode() || !properties.getStrategy().isLiveTradingEnabled()) return false;
+        if (!userDataStreamService.isReady()) return false;
         liveArmed.set(true);
         return true;
     }

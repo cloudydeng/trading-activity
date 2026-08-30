@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -25,12 +24,14 @@ public class UserDataStreamService implements WebSocket.Listener {
 
     private final BinanceOptimizedTradeService tradeService;
     private final BinanceProperties properties;
+    private final BinanceSigner signer;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final AtomicReference<String> currentListenKey = new AtomicReference<>();
     private final AtomicBoolean connectInProgress = new AtomicBoolean(false);
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
     private final AtomicBoolean acceptingConnections = new AtomicBoolean(true);
+    private final AtomicBoolean ready = new AtomicBoolean(false);
     private final StringBuilder inboundMessage = new StringBuilder();
     private ExecutionCallback executionCallback;
 
@@ -40,9 +41,10 @@ public class UserDataStreamService implements WebSocket.Listener {
                            BigDecimal lastExecutedQty, BigDecimal lastExecutedPrice);
     }
 
-    public UserDataStreamService(BinanceOptimizedTradeService tradeService, BinanceProperties properties) {
+    public UserDataStreamService(BinanceOptimizedTradeService tradeService, BinanceProperties properties, BinanceSigner signer) {
         this.tradeService = tradeService;
         this.properties = properties;
+        this.signer = signer;
     }
 
     public void setExecutionCallback(ExecutionCallback executionCallback) {
@@ -60,27 +62,32 @@ public class UserDataStreamService implements WebSocket.Listener {
 
     public synchronized void connect() {
         if (!acceptingConnections.get() || !connectInProgress.compareAndSet(false, true)) return;
-        String listenKey = tradeService.createListenKey();
-        if (listenKey == null) {
-            connectInProgress.set(false);
-            log.error("无法获取 ListenKey，UserDataStream 启动失败");
-            scheduleReconnect("无法获取 ListenKey");
-            return;
-        }
-        this.currentListenKey.set(listenKey);
-        String wsUrl = properties.getApi().getWsUserUrl() + "/" + listenKey;
-
         HttpClient.newHttpClient().newWebSocketBuilder()
-                .buildAsync(URI.create(wsUrl), this)
+                .buildAsync(URI.create(properties.getApi().getWsUserUrl()), this)
                 .thenAccept(ws -> {
                     connectInProgress.set(false);
-                    log.info("已成功连入币安账户 User Data Stream!");
+                    subscribe(ws);
                 })
                 .exceptionally(ex -> {
                     connectInProgress.set(false);
                     scheduleReconnect("连接异常: " + ex.getMessage());
                     return null;
                 });
+    }
+
+    private void subscribe(WebSocket webSocket) {
+        long timestamp = System.currentTimeMillis();
+        String apiKey = properties.getApi().getApiKey();
+        String payload = "apiKey=" + apiKey + "&recvWindow=5000&timestamp=" + timestamp;
+        var root = objectMapper.createObjectNode();
+        root.put("id", "account-events");
+        root.put("method", "userDataStream.subscribe.signature");
+        var params = root.putObject("params");
+        params.put("apiKey", apiKey);
+        params.put("recvWindow", 5000);
+        params.put("timestamp", timestamp);
+        params.put("signature", signer.sign(payload, properties.getApi().getSecretKey()));
+        webSocket.sendText(root.toString(), true);
     }
 
     @Override
@@ -93,7 +100,19 @@ public class UserDataStreamService implements WebSocket.Listener {
                 payload = inboundMessage.toString();
                 inboundMessage.setLength(0);
             }
-            JsonNode node = objectMapper.readTree(payload);
+            JsonNode root = objectMapper.readTree(payload);
+            if (root.has("id") && "account-events".equals(root.get("id").asText())) {
+                if (root.path("status").asInt() == 200) {
+                    ready.set(true);
+                    log.info("已成功订阅币安账户 User Data Stream");
+                } else {
+                    ready.set(false);
+                    webSocket.abort();
+                    scheduleReconnect("账户流签名订阅失败: " + root.path("error").path("msg").asText("unknown"));
+                }
+                return CompletableFuture.completedFuture(null);
+            }
+            JsonNode node = root.has("event") ? root.get("event") : root;
             String eventType = node.has("e") ? node.get("e").asText() : "";
 
             if ("executionReport".equals(eventType)) {
@@ -111,8 +130,8 @@ public class UserDataStreamService implements WebSocket.Listener {
                 if (executionCallback != null && properties.getStrategy().getSymbol().equalsIgnoreCase(symbol)) {
                     executionCallback.onOrderUpdate(orderId, side, currentExecutionType, orderStatus, lastFilledQty, lastFilledPrice);
                 }
-            } else if ("listenKeyExpired".equals(eventType)) {
-                scheduleReconnect("ListenKey 已失效");
+            } else if ("eventStreamTerminated".equals(eventType)) {
+                scheduleReconnect("账户事件流已终止");
             }
         } catch (Exception e) {
             log.error("解析 UserDataStream 消息异常", e);
@@ -122,12 +141,14 @@ public class UserDataStreamService implements WebSocket.Listener {
 
     @Override
     public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
+        ready.set(false);
         scheduleReconnect("账户流关闭 " + statusCode + ": " + reason);
         return CompletableFuture.completedFuture(null);
     }
 
     @Override
     public void onError(WebSocket webSocket, Throwable error) {
+        ready.set(false);
         scheduleReconnect("账户流错误: " + error.getMessage());
     }
 
@@ -142,16 +163,11 @@ public class UserDataStreamService implements WebSocket.Listener {
         }
     }
 
-    @Scheduled(fixedRate = 1800000)
-    public void keepAlive() {
-        String key = currentListenKey.get();
-        if (key != null) {
-            tradeService.keepAliveListenKey(key);
-        }
-    }
+    public boolean isReady() { return ready.get(); }
 
     @PreDestroy
     public void shutdown() {
         acceptingConnections.set(false);
+        ready.set(false);
     }
 }
