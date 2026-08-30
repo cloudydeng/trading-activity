@@ -53,14 +53,19 @@ public class BinanceProperties {
         private BigDecimal maxDailyRealizedLossUsdt = new BigDecimal("5");
         private BigDecimal maxDailyDrawdownUsdt = new BigDecimal("8");
         private long maxInventoryAgeMs = 60_000;
+        /** Signal-driven exit defaults: target must cover both estimated maker fees. */
+        private double takeProfitBps = 35;
+        private double stopLossBps = 80;
+        private long maxHoldingMs = 600_000;
         /** A pessimistic fee estimate, until actual commission events are accounted for. */
         private BigDecimal assumedMakerFeeBps = new BigDecimal("10");
         /** Unconditional OBSERVE-only market baseline cadence; kept separate from qualified signal samples. */
         private long benchmarkObservationIntervalMs = 2_000;
         private long paperEntryIntervalMs = 1_500;
         private int minPaperObservations = 500;
-        private int minQualifiedObservationsForLive = 500;
-        private int minBaselineObservationsForLive = 500;
+        private int minQualifiedObservationsForLive = 0;
+        private int minBaselineObservationsForLive = 0;
+        private boolean collectObservations = false;
         private String observationOutputFile = "data/paper-outcomes.jsonl";
 
         public boolean isObserveMode() {

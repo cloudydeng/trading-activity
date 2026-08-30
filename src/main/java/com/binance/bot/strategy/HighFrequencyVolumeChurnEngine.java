@@ -215,7 +215,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 postFillOutcomeTracker.recordMarketPrice(mid, now);
                 riskGuard.recordMark(mid, now, properties.getStrategy());
                 marketSignalEvaluator.recordQuote(bid, bidQty, ask, askQty, now, properties.getStrategy());
-                if (isRunning.get() && properties.getStrategy().isObserveMode()) recordMarketBaseline(mid, now);
+                if (isRunning.get() && properties.getStrategy().isObserveMode() && properties.getStrategy().isCollectObservations()) recordMarketBaseline(mid, now);
                 if (isRunning.get()) driveChurnStateMachine(bid, ask);
             } else if (node.has("q") && node.has("m")) {
                 marketSignalEvaluator.recordAggTrade(new BigDecimal(node.get("q").asText()), node.get("m").asBoolean(), System.currentTimeMillis(), properties.getStrategy());
@@ -250,7 +250,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 BigDecimal price = PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(BigDecimal.valueOf(properties.getStrategy().getBidDepthOffsetTicks()))), rule.tickSize());
                 if (!isValidOrder(qty, price, rule)) return;
                 if (properties.getStrategy().isObserveMode()) {
-                    recordPaperCandidate(price, now);
+                    if (properties.getStrategy().isCollectObservations()) recordPaperCandidate(price, now);
                     return;
                 }
                 if (!riskGuard.permitsNewEntry(qty, price, now, properties.getStrategy())) {
@@ -280,9 +280,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 if (res != null && res.has("newOrderResponse")) trackOrder(res.get("newOrderResponse").get("orderId").asLong(), ChurnStatus.BUYING);
             }
             case SELLING -> {
+                if (!shouldExit(bestBid, now)) return;
                 if (now - orderPlacedTimestamp.get() <= properties.getStrategy().getOrderTtlMs()) return;
                 BigDecimal qty = PrecisionUtil.roundDownToStep(holdingInventory.get(), rule.stepSize());
-                BigDecimal price = askPrice(bestAsk, rule);
+                BigDecimal price = exitPrice(bestBid, bestAsk, rule);
                 if (!isValidOrder(qty, price, rule)) { halt("持仓不足以创建有效卖单"); return; }
                 JsonNode res = tradeService.cancelAndReplaceOrder(symbol, "SELL", price, qty, activeOrderId.get());
                 if (res != null && res.has("newOrderResponse")) trackOrder(res.get("newOrderResponse").get("orderId").asLong(), ChurnStatus.SELLING);
@@ -301,7 +302,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             totalVolumeUsdt.accumulateAndGet(lastFilledQty.multiply(lastFilledPrice), BigDecimal::add);
             if ("BUY".equalsIgnoreCase(side)) {
                 holdingInventory.accumulateAndGet(lastFilledQty, BigDecimal::add);
-                postFillOutcomeTracker.recordBuyFill(lastFilledPrice, activeEntrySignalReason.get(), activeEntryContext.get(), System.currentTimeMillis());
+                if (properties.getStrategy().isCollectObservations()) postFillOutcomeTracker.recordBuyFill(lastFilledPrice, activeEntrySignalReason.get(), activeEntryContext.get(), System.currentTimeMillis());
             }
             else holdingInventory.accumulateAndGet(lastFilledQty, BigDecimal::subtract);
             riskGuard.recordFill(side, lastFilledQty, lastFilledPrice, System.currentTimeMillis(), properties.getStrategy());
@@ -311,24 +312,37 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 && ("FILLED".equals(orderStatus) || "CANCELED".equals(orderStatus) || "EXPIRED".equals(orderStatus))) {
             entryCancellationPending.set(false);
             activeOrderId.set(null);
-            placeRecoverySell(rule, lastFilledPrice);
+            if (holdingInventory.get().compareTo(rule.stepSize()) >= 0) currentStatus.set(ChurnStatus.SELLING);
+            else currentStatus.set(ChurnStatus.IDLE);
         } else if ("SELL".equalsIgnoreCase(side) && currentStatus.get() == ChurnStatus.SELLING && "FILLED".equals(orderStatus)) {
             activeOrderId.set(null);
             if (holdingInventory.get().compareTo(rule.stepSize()) < 0) {
                 holdingInventory.set(BigDecimal.ZERO);
                 roundTripsCompleted.incrementAndGet();
                 currentStatus.set(ChurnStatus.IDLE);
-            } else placeRecoverySell(rule, lastFilledPrice);
+            } else {
+                // A partial fill leaves one position and no active order; the next market tick
+                // routes it through the same target/stop/time exit policy.
+                currentStatus.set(ChurnStatus.SELLING);
+            }
         }
     }
 
-    private void placeRecoverySell(SymbolRuleManager.SymbolRule rule, BigDecimal fallbackPrice) {
-        BigDecimal qty = PrecisionUtil.roundDownToStep(holdingInventory.get(), rule.stepSize());
-        BigDecimal price = lastBestAsk.get() == null ? fallbackPrice.add(rule.tickSize()) : askPrice(lastBestAsk.get(), rule);
-        if (!isValidOrder(qty, price, rule)) { halt("成交后无法创建有效平仓单"); return; }
-        JsonNode res = tradeService.cancelAndReplaceOrder(properties.getStrategy().getSymbol(), "SELL", price, qty, null);
-        if (res != null && res.has("orderId")) trackOrder(res.get("orderId").asLong(), ChurnStatus.SELLING);
-        else halt("成交后的平仓单被交易所拒绝");
+    private boolean shouldExit(BigDecimal bestBid, long nowMs) {
+        var risk = riskGuard.snapshot();
+        if (risk.positionQty() == null || risk.positionQty().signum() <= 0 || risk.positionCostUsdt() == null) return false;
+        BigDecimal cost = risk.positionCostUsdt().divide(risk.positionQty(), java.math.MathContext.DECIMAL64);
+        BigDecimal takeProfit = cost.multiply(BigDecimal.ONE.add(BigDecimal.valueOf(properties.getStrategy().getTakeProfitBps()).movePointLeft(4)));
+        BigDecimal stopLoss = cost.multiply(BigDecimal.ONE.subtract(BigDecimal.valueOf(properties.getStrategy().getStopLossBps()).movePointLeft(4)));
+        boolean timedOut = risk.positionOpenedAtMs() > 0 && nowMs - risk.positionOpenedAtMs() >= properties.getStrategy().getMaxHoldingMs();
+        return bestBid.compareTo(takeProfit) >= 0 || bestBid.compareTo(stopLoss) <= 0 || timedOut;
+    }
+    private BigDecimal exitPrice(BigDecimal bestBid, BigDecimal ask, SymbolRuleManager.SymbolRule rule) {
+        var risk = riskGuard.snapshot();
+        BigDecimal cost = risk.positionCostUsdt().divide(risk.positionQty(), java.math.MathContext.DECIMAL64);
+        BigDecimal target = cost.multiply(BigDecimal.ONE.add(BigDecimal.valueOf(properties.getStrategy().getTakeProfitBps()).movePointLeft(4)));
+        // At target, preserve the desired minimum gain; on stop/time exit, stay passive at best ask.
+        return PrecisionUtil.roundDownToStep(bestBid.compareTo(target) >= 0 ? ask.max(target) : ask, rule.tickSize());
     }
 
     private BigDecimal buyQuantity(BigDecimal bid, SymbolRuleManager.SymbolRule rule) {
