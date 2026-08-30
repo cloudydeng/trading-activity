@@ -157,6 +157,25 @@ public class BinanceOptimizedTradeService {
         }
     }
 
+    /** Queries the authoritative final state of one order after a cancel acknowledgement. */
+    public JsonNode getOrder(String symbol, long orderId) {
+        long timestamp = System.currentTimeMillis();
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("symbol", symbol.toUpperCase());
+        params.put("orderId", String.valueOf(orderId));
+        params.put("timestamp", String.valueOf(timestamp));
+        String queryString = buildQueryString(params);
+        String signature = signer.sign(queryString, properties.getApi().getSecretKey());
+        try {
+            String response = restClient.get().uri("/api/v3/order?" + queryString + "&signature=" + signature)
+                    .retrieve().body(String.class);
+            return objectMapper.readTree(response);
+        } catch (Exception e) {
+            log.error("查询订单最终状态失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
     public String createListenKey() {
         try {
             String response = restClient.post()

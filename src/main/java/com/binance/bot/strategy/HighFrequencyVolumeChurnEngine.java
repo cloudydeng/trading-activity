@@ -379,9 +379,28 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (orderId == null || !entryCancellationPending.compareAndSet(false, true)) return;
         if (tradeService.cancelOrder(properties.getStrategy().getSymbol(), orderId)) {
             log.info("撤销活动买单 {}: {}", orderId, reason);
+            CompletableFuture.delayedExecutor(500, TimeUnit.MILLISECONDS)
+                    .execute(() -> reconcileCancelledEntry(orderId));
         } else {
             entryCancellationPending.set(false);
             log.error("撤销活动买单 {} 失败: {}", orderId, reason);
+        }
+    }
+    private synchronized void reconcileCancelledEntry(long orderId) {
+        if (!Long.valueOf(orderId).equals(activeOrderId.get()) || currentStatus.get() != ChurnStatus.BUYING) return;
+        JsonNode order = tradeService.getOrder(properties.getStrategy().getSymbol(), orderId);
+        if (order == null) { halt("撤单后无法确认订单最终状态"); return; }
+        String status = order.path("status").asText();
+        BigDecimal executedQty = new BigDecimal(order.path("executedQty").asText("0"));
+        if (executedQty.signum() > 0) {
+            halt("撤单回报遗漏了部分成交，需人工核对持仓");
+            return;
+        }
+        if ("CANCELED".equals(status) || "EXPIRED".equals(status) || "EXPIRED_IN_MATCH".equals(status)) {
+            activeOrderId.set(null);
+            entryCancellationPending.set(false);
+            currentStatus.set(ChurnStatus.IDLE);
+            log.info("撤单 {} 已确认零成交，状态机恢复 IDLE", orderId);
         }
     }
     private void trackOrder(long orderId, ChurnStatus status) { activeOrderId.set(orderId); entryCancellationPending.set(false); orderPlacedTimestamp.set(System.currentTimeMillis()); currentStatus.set(status); }
