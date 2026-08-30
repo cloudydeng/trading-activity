@@ -21,6 +21,6 @@ function render(s){const e=s.entrySignal||{},r=s.risk||{},m=s.marketData||{};con
  document.querySelector('#raw').textContent=JSON.stringify(s,null,2);document.querySelector('#updated').textContent=`自动刷新：每 1 秒一次 · 上次更新 ${new Date().toLocaleTimeString('zh-CN')}`;
 }
 async function status(){try{const r=await fetch('/api/bot/status',{cache:'no-store'});if(r.status===401){location='/login.html';return}if(!r.ok)throw Error(r.status);render(await r.json())}catch(e){document.querySelector('#updated').innerHTML=`<span class="error">状态读取失败：${e.message}，将自动重试</span>`}}
-async function armLive(){const password=prompt('再次输入管理密码');if(!password)return;const confirmation=prompt('输入 ENABLE LIVE 确认真正资金风险');if(confirmation!=='ENABLE LIVE')return;const r=await fetch('/api/bot/live/arm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password,confirmation})});alert(await r.text());await status()}
+async function armLive(){const r=await fetch('/api/bot/live/arm',{method:'POST'});alert(await r.text());await status()}
 async function control(x){if(!confirm(`确认${x==='start'?'启动策略（LIVE 解锁时会真实下单）':'停止并解除 LIVE'}？`))return;const r=await fetch('/api/bot/'+x,{method:'POST'});alert(await r.text());await status()}status();setInterval(status,1000);
 </script></body></html>

@@ -58,11 +58,9 @@ public class BotDashboardController {
     }
 
     @PostMapping("/live/arm")
-    public ResponseEntity<String> armLive(@RequestBody LiveArmRequest request) {
-        String expected = properties.getSecurity().getAdminPassword();
-        boolean passwordMatches = expected != null && request.password() != null && MessageDigest.isEqual(
-                expected.getBytes(StandardCharsets.UTF_8), request.password().getBytes(StandardCharsets.UTF_8));
-        if (!passwordMatches || !"ENABLE LIVE".equals(request.confirmation())) return ResponseEntity.status(401).body("二次验证失败");
+    public ResponseEntity<String> armLive() {
+        // The authenticated dashboard session or admin-token filter remains the authorization
+        // boundary. LIVE arming intentionally has no additional password/confirmation prompt.
         return engine.armLiveTrading() ? ResponseEntity.ok("LIVE 已临时解锁；服务重启或停止后自动解除")
                 : ResponseEntity.status(409).body("无法解锁：LIVE 双开关未配置或账户成交流未就绪");
     }
@@ -91,6 +89,5 @@ public class BotDashboardController {
                 expected.getBytes(StandardCharsets.UTF_8), provided.getBytes(StandardCharsets.UTF_8));
     }
 
-    public record LiveArmRequest(String password, String confirmation) { }
     public record LiquidationRequest(String password, String confirmation) { }
 }
