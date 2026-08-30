@@ -231,6 +231,8 @@ class HighFrequencyVolumeChurnEngineTest {
         atomic("activeMarketWebSocket", WebSocket.class).set(socket);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
                 .set(System.currentTimeMillis() - 6_000);
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
+                .set(System.currentTimeMillis() - 6_000);
         ((java.util.concurrent.atomic.AtomicBoolean) ReflectionTestUtils.getField(engine, "reconnectScheduled"))
                 .set(true);
 

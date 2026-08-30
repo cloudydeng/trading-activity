@@ -222,9 +222,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             liveArmed.set(false);
             return false;
         }
-        long marketAgeMs = System.currentTimeMillis() - lastMarketDataTimestamp.get();
+        long marketAgeMs = System.currentTimeMillis() - lastMarketFrameTimestamp.get();
         long startupMaxAgeMs = Math.max(5_000, properties.getStrategy().getMarketDataStaleMs());
-        if (lastMarketDataTimestamp.get() <= 0 || marketAgeMs > startupMaxAgeMs) {
+        if (lastMarketFrameTimestamp.get() <= 0 || lastMarketDataTimestamp.get() <= 0
+                || marketAgeMs > startupMaxAgeMs) {
             isRunning.set(false);
             currentStatus.set(ChurnStatus.HALTED);
             statusReason.set("盘口行情正在重连，请稍后再次启动");
@@ -1093,8 +1094,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public boolean isAccountStreamReady() { return userDataStreamService.isReady(); }
     public int getMinimumPaperObservations() { return properties.getStrategy().getMinPaperObservations(); }
     public MarketDataSnapshot getMarketDataSnapshot() {
-        return new MarketDataSnapshot(lastBestBid.get(), lastBestAsk.get(), lastMidPrice.get(), lastMarketDataTimestamp.get());
+        return new MarketDataSnapshot(lastBestBid.get(), lastBestAsk.get(), lastMidPrice.get(),
+                lastMarketDataTimestamp.get(), lastMarketFrameTimestamp.get());
     }
 
-    public record MarketDataSnapshot(BigDecimal bestBid, BigDecimal bestAsk, BigDecimal midPrice, long updatedAtMs) { }
+    public record MarketDataSnapshot(BigDecimal bestBid, BigDecimal bestAsk, BigDecimal midPrice,
+                                     long updatedAtMs, long lastFrameAtMs) { }
 }
