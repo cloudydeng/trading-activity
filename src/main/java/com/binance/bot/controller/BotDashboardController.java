@@ -74,5 +74,23 @@ public class BotDashboardController {
                 : ResponseEntity.status(409).body("LIVE 已解除，但订单或持仓仍需人工核对");
     }
 
+    @PostMapping("/liquidate")
+    public ResponseEntity<HighFrequencyVolumeChurnEngine.LiquidationResult> liquidate(
+            @RequestBody LiquidationRequest request) {
+        if (!passwordMatches(request.password()) || !"SELL ALL BASE ASSET".equals(request.confirmation())) {
+            return ResponseEntity.status(401).body(new HighFrequencyVolumeChurnEngine.LiquidationResult(
+                    false, null, java.math.BigDecimal.ZERO, "二次验证失败"));
+        }
+        HighFrequencyVolumeChurnEngine.LiquidationResult result = engine.liquidateExistingPosition();
+        return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
+    }
+
+    private boolean passwordMatches(String provided) {
+        String expected = properties.getSecurity().getAdminPassword();
+        return expected != null && provided != null && MessageDigest.isEqual(
+                expected.getBytes(StandardCharsets.UTF_8), provided.getBytes(StandardCharsets.UTF_8));
+    }
+
     public record LiveArmRequest(String password, String confirmation) { }
+    public record LiquidationRequest(String password, String confirmation) { }
 }

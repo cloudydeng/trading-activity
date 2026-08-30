@@ -146,6 +146,26 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void operatorLiquidationSellsVerifiedFreeBalanceWithoutStartingEntryEngine() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        when(userDataStreamService.isReady()).thenReturn(true);
+        when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
+        when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(new BigDecimal("7.08"));
+        when(tradeService.placeMarketSell(eq("ENSOUSDT"), decimalEquals("7.0"), anyString()))
+                .thenReturn(mapper.readTree("{\"orderId\":90}"));
+
+        HighFrequencyVolumeChurnEngine.LiquidationResult result = engine.liquidateExistingPosition();
+
+        assertTrue(result.accepted());
+        assertEquals(90L, result.orderId());
+        assertEquals(0, new BigDecimal("7.0").compareTo(result.quantity()));
+        assertFalse(engine.getIsRunning().get());
+        assertFalse(engine.getLiveArmed().get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
+        verify(tradeService).placeMarketSell(eq("ENSOUSDT"), decimalEquals("7.0"), anyString());
+    }
+
+    @Test
     void classifiesOnlyImmediateSafetyConditionsAsHardEntryRisk() {
         assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("SELL_TAKER_PRESSURE"));
         assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("SHORT_TERM_DOWNMOVE"));

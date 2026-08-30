@@ -251,6 +251,56 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return stopped;
     }
 
+    /** Operator-authorized, reduce-only-style liquidation of the currently free base-asset balance. */
+    public synchronized LiquidationResult liquidateExistingPosition() {
+        isRunning.set(false);
+        liveArmed.set(false);
+        if (!properties.getStrategy().isLiveMode() || !properties.getStrategy().isLiveTradingEnabled()) {
+            return LiquidationResult.rejected("服务器未配置 LIVE 双开关");
+        }
+        if (!userDataStreamService.isReady()) {
+            halt("账户成交流未就绪，拒绝提交清仓单");
+            return LiquidationResult.rejected(statusReason.get());
+        }
+        String symbol = properties.getStrategy().getSymbol();
+        JsonNode openOrders = tradeService.getOpenOrders(symbol);
+        if (openOrders == null || !openOrders.isEmpty()) {
+            halt(openOrders == null ? "无法确认活动订单，拒绝清仓" : "仍有活动订单，拒绝重复提交清仓单");
+            return LiquidationResult.rejected(statusReason.get());
+        }
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule(symbol);
+        BigDecimal freeBalance = tradeService.getFreeAssetBalance(baseAsset());
+        if (rule == null || freeBalance == null) {
+            halt("无法确认交易规则或可卖余额，拒绝清仓");
+            return LiquidationResult.rejected(statusReason.get());
+        }
+        BigDecimal qty = PrecisionUtil.roundDownToStep(freeBalance, rule.stepSize());
+        if (qty.compareTo(rule.stepSize()) < 0) {
+            holdingInventory.set(freeBalance);
+            currentStatus.set(ChurnStatus.IDLE);
+            statusReason.set("账户已无可卖标的余额");
+            return LiquidationResult.rejected(statusReason.get());
+        }
+        holdingInventory.set(freeBalance);
+        String clientOrderId = nextClientOrderId("SELLM");
+        pendingClientOrderIds.add(clientOrderId);
+        activeClientOrderId.set(clientOrderId);
+        JsonNode response = tradeService.placeMarketSell(symbol, qty, clientOrderId);
+        if (response != null && response.has("orderId")) {
+            long orderId = response.get("orderId").asLong();
+            trackOrder(orderId, clientOrderId, ChurnStatus.SELLING);
+            statusReason.set("已提交人工授权市价清仓单，等待账户成交流确认");
+            log.warn("人工授权清仓：已提交市价卖单 ID={} qty={} {}", orderId, qty, baseAsset());
+            return new LiquidationResult(true, orderId, qty, statusReason.get());
+        }
+        pendingClientOrderIds.remove(clientOrderId);
+        activeClientOrderId.compareAndSet(clientOrderId, null);
+        halt(response == null ? "市价清仓单结果未知，需人工核对" :
+                "市价清仓单被交易所拒绝: " + response.path("code").asText("unknown") + " "
+                        + response.path("msg").asText("unknown"));
+        return LiquidationResult.rejected(statusReason.get());
+    }
+
     @PreDestroy public void onShutdown() {
         acceptingMarketConnections.set(false);
         stopTrading();
@@ -450,8 +500,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             clearActiveOrder();
             if (holdingInventory.get().compareTo(rule.stepSize()) < 0) {
                 holdingInventory.set(BigDecimal.ZERO);
-                roundTripsCompleted.incrementAndGet();
+                if (isRunning.get()) roundTripsCompleted.incrementAndGet();
                 currentStatus.set(ChurnStatus.IDLE);
+                if (!isRunning.get()) statusReason.set("人工授权市价清仓已完成");
                 resetEntryTarget();
             } else {
                 // A partial fill leaves one position and no active order; the next market tick
@@ -828,6 +879,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         NONE(false), TAKE_PROFIT(false), STOP_LOSS(true), MAX_HOLDING(true);
         private final boolean emergency;
         ExitReason(boolean emergency) { this.emergency = emergency; }
+    }
+
+    public record LiquidationResult(boolean accepted, Long orderId, BigDecimal quantity, String message) {
+        private static LiquidationResult rejected(String message) {
+            return new LiquidationResult(false, null, BigDecimal.ZERO, message);
+        }
     }
     private void recordPaperCandidate(BigDecimal price, long nowMs) {
         long previous = lastPaperCandidateTimestamp.get();
