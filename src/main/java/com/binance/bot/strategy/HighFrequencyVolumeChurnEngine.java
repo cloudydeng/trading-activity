@@ -45,6 +45,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public enum ChurnStatus { IDLE, BUYING, SELLING, HALTED }
 
     @Getter private final AtomicBoolean isRunning = new AtomicBoolean(false);
+    @Getter private final AtomicBoolean liveArmed = new AtomicBoolean(false);
     @Getter private final AtomicReference<ChurnStatus> currentStatus = new AtomicReference<>(ChurnStatus.IDLE);
     @Getter private final AtomicReference<BigDecimal> totalVolumeUsdt = new AtomicReference<>(BigDecimal.ZERO);
     @Getter private final AtomicLong roundTripsCompleted = new AtomicLong(0);
@@ -131,7 +132,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             log.info("OBSERVE 模式已启动：只记录虚拟候选入场，不发送订单");
             return true;
         }
-        if (!properties.getStrategy().isLiveMode() || !properties.getStrategy().isLiveTradingEnabled()) {
+        if (!properties.getStrategy().isLiveMode() || !properties.getStrategy().isLiveTradingEnabled() || !liveArmed.get()) {
             log.error("拒绝启动：真实执行必须同时设置 execution-mode=LIVE 与 live-trading-enabled=true");
             return false;
         }
@@ -182,6 +183,17 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         activeOrderId.set(null);
         currentStatus.set(ChurnStatus.IDLE);
         log.info("引擎已停止。总交易量: {} USDT, 闭环轮数: {}", totalVolumeUsdt.get(), roundTripsCompleted.get());
+    }
+
+    public synchronized boolean armLiveTrading() {
+        if (!properties.getStrategy().isLiveMode() || !properties.getStrategy().isLiveTradingEnabled()) return false;
+        liveArmed.set(true);
+        return true;
+    }
+
+    public synchronized void disarmLiveTrading() {
+        stopTrading();
+        liveArmed.set(false);
     }
 
     @PreDestroy public void onShutdown() {
