@@ -4,6 +4,7 @@ import com.binance.bot.config.BinanceProperties;
 import com.binance.bot.manager.SymbolRuleManager;
 import com.binance.bot.service.BinanceOptimizedTradeService;
 import com.binance.bot.service.UserDataStreamService;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -286,6 +287,45 @@ class HighFrequencyVolumeChurnEngineTest {
 
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
         assertNull(atomic("activeOrderId", Long.class).get());
+    }
+
+    @Test
+    void nestedCancelReplaceFailureIsInterpretedWithoutAmbiguousHalt() throws Exception {
+        prepareRestingMakerOrder();
+        atomic("activeClientOrderId", String.class).set("churn-BUY-replacement");
+        JsonNode response = new ObjectMapper().readTree("""
+                {"code":-2022,"msg":"Order cancel-replace failed.","data":{
+                  "cancelResult":"SUCCESS","newOrderResult":"FAILURE",
+                  "cancelResponse":{"orderId":42,"status":"CANCELED","executedQty":"0"},
+                  "newOrderResponse":{"code":-1013,"msg":"Filter failure"}}}
+                """);
+
+        ReflectionTestUtils.invokeMethod(engine, "handleMakerResponse", response, 42L,
+                "churn-BUY-replacement", HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
+
+        assertTrue(engine.getIsRunning().get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+        assertNull(atomic("activeOrderId", Long.class).get());
+    }
+
+    @Test
+    void nestedCancelFailureKeepsOriginalOrderTracked() throws Exception {
+        prepareRestingMakerOrder();
+        atomic("activeClientOrderId", String.class).set("churn-BUY-replacement");
+        JsonNode response = new ObjectMapper().readTree("""
+                {"code":-2022,"msg":"Order cancel-replace failed.","data":{
+                  "cancelResult":"FAILURE","newOrderResult":"NOT_ATTEMPTED",
+                  "cancelResponse":{"code":-2011,"msg":"Unknown order sent."},
+                  "newOrderResponse":null}}
+                """);
+
+        ReflectionTestUtils.invokeMethod(engine, "handleMakerResponse", response, 42L,
+                "churn-BUY-replacement", HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
+
+        assertTrue(engine.getIsRunning().get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING, engine.getCurrentStatus().get());
+        assertEquals(42L, atomic("activeOrderId", Long.class).get());
+        assertNull(atomic("activeClientOrderId", String.class).get());
     }
 
     private void prepareRestingMakerOrder() {

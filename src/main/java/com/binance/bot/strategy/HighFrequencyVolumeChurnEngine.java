@@ -546,7 +546,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 if (filledEntryQuantity.get().compareTo(exchangeExecuted) < 0) {
                     nextOrderAttemptAt.set(System.currentTimeMillis() + 1_000);
                     CompletableFuture.delayedExecutor(750, TimeUnit.MILLISECONDS)
-                            .execute(() -> reconcileMakerFillAfterFallback(makerOrderId, exchangeExecuted));
+                            .execute(() -> reconcileMakerFillFromExchange(makerOrderId, exchangeExecuted));
                     log.info("Maker 撤单终态包含成交 {}，等待账户成交流完成本地对账，不再追加 IOC", exchangeExecuted);
                 } else {
                     clearActiveOrder();
@@ -599,7 +599,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
     }
 
-    private synchronized void reconcileMakerFillAfterFallback(long makerOrderId, BigDecimal exchangeExecuted) {
+    private synchronized void reconcileMakerFillFromExchange(long makerOrderId, BigDecimal exchangeExecuted) {
         if (!Long.valueOf(makerOrderId).equals(activeOrderId.get())
                 || currentStatus.get() != ChurnStatus.BUYING) return;
         if (filledEntryQuantity.get().compareTo(exchangeExecuted) >= 0
@@ -634,16 +634,30 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             reconcileAmbiguousSubmission(clientOrderId, status, "报单请求结果未知");
             return;
         }
-        JsonNode order = oldOrderId == null ? response : response.path("newOrderResponse");
+        // Binance wraps cancelReplace failure details in `data`, while successful responses
+        // expose the same result fields at the root. Normalize both shapes before deciding.
+        JsonNode result = response.path("data").isObject() ? response.path("data") : response;
+        JsonNode order = oldOrderId == null ? response : result.path("newOrderResponse");
         boolean newOrderSucceeded = oldOrderId == null ? response.has("orderId")
-                : "SUCCESS".equals(response.path("newOrderResult").asText()) && order.has("orderId");
+                : "SUCCESS".equals(result.path("newOrderResult").asText()) && order.has("orderId");
         if (newOrderSucceeded) {
             long orderId = order.get("orderId").asLong();
             if (clientOrderId.equals(activeClientOrderId.get())) trackOrder(orderId, clientOrderId, status);
             return;
         }
         pendingClientOrderIds.remove(clientOrderId);
-        if (oldOrderId != null && "SUCCESS".equals(response.path("cancelResult").asText())) {
+        if (oldOrderId != null && "SUCCESS".equals(result.path("cancelResult").asText())) {
+            BigDecimal exchangeExecuted = new BigDecimal(
+                    result.path("cancelResponse").path("executedQty").asText("0"));
+            if (exchangeExecuted.signum() > 0
+                    && filledEntryQuantity.get().compareTo(exchangeExecuted) < 0) {
+                activeClientOrderId.compareAndSet(clientOrderId, null);
+                nextOrderAttemptAt.set(System.currentTimeMillis() + 1_000);
+                CompletableFuture.delayedExecutor(750, TimeUnit.MILLISECONDS)
+                        .execute(() -> reconcileMakerFillFromExchange(oldOrderId, exchangeExecuted));
+                log.info("撤换单的原订单终态包含成交 {}，等待账户成交流对账", exchangeExecuted);
+                return;
+            }
             knownOrderIds.remove(oldOrderId);
             clearActiveOrder();
             nextOrderAttemptAt.set(System.currentTimeMillis() + 1_000);
@@ -658,7 +672,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     response.path("code").asText("unknown"), response.path("msg").asText("unknown"));
             return;
         }
-        if (oldOrderId != null && "FAILURE".equals(response.path("cancelResult").asText())) {
+        if (oldOrderId != null && "FAILURE".equals(result.path("cancelResult").asText())) {
             activeClientOrderId.set(null);
             nextOrderAttemptAt.set(System.currentTimeMillis() + 1_000);
             log.warn("撤换单中的撤单失败；保留旧订单 {} 并退避", oldOrderId);
