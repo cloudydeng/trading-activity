@@ -15,11 +15,14 @@ import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.nio.ByteBuffer;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -39,10 +42,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final PostFillOutcomeTracker postFillOutcomeTracker;
     private final TradingRiskGuard riskGuard;
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final HttpClient httpClient = HttpClient.newHttpClient();
     private final AtomicReference<BigDecimal> lastBestBid = new AtomicReference<>();
     private final AtomicReference<BigDecimal> lastBestAsk = new AtomicReference<>();
     private final AtomicReference<BigDecimal> lastMidPrice = new AtomicReference<>();
     private final AtomicLong lastMarketDataTimestamp = new AtomicLong(0);
+    private final AtomicLong lastMarketFrameTimestamp = new AtomicLong(0);
 
     public enum ChurnStatus { IDLE, BUYING, SELLING, HALTED }
 
@@ -59,7 +64,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicReference<Long> replacingOrderId = new AtomicReference<>();
     @Getter private final AtomicReference<String> statusReason = new AtomicReference<>("等待启动");
     private final Set<Long> knownOrderIds = ConcurrentHashMap.newKeySet();
+    private final Set<Long> restReconciledOrderIds = ConcurrentHashMap.newKeySet();
     private final Set<String> pendingClientOrderIds = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<Long, BigDecimal> accountedOrderQty = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, BigDecimal> accountedOrderQuote = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, Integer> orderReconcileFailures = new ConcurrentHashMap<>();
     private final AtomicLong orderPlacedTimestamp = new AtomicLong(0);
     private final AtomicLong nextOrderAttemptAt = new AtomicLong(0);
     private final AtomicLong clientOrderSequence = new AtomicLong(0);
@@ -67,6 +76,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicBoolean marketConnectInProgress = new AtomicBoolean(false);
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
     private final AtomicBoolean acceptingMarketConnections = new AtomicBoolean(true);
+    private final AtomicReference<WebSocket> activeMarketWebSocket = new AtomicReference<>();
+    private final ScheduledExecutorService marketWatchdog = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread thread = new Thread(r, "binance-market-stream-watchdog");
+        thread.setDaemon(true);
+        return thread;
+    });
     private final AtomicReference<String> activeEntrySignalReason = new AtomicReference<>("UNKNOWN");
     private final AtomicReference<MarketSignalEvaluator.MarketContext> activeEntryContext = new AtomicReference<>();
     private final StringBuilder inboundMarketMessage = new StringBuilder();
@@ -91,6 +106,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         userDataStreamService.setExecutionCallback(this::onOrderUpdate);
         userDataStreamService.setStreamLifecycleCallback(this::handleUserStreamLoss);
         connectMarketData();
+        marketWatchdog.scheduleWithFixedDelay(this::checkMarketStreamHealth, 1, 1, TimeUnit.SECONDS);
     }
 
     private void connectMarketData() {
@@ -99,9 +115,17 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         String symbol = properties.getStrategy().getSymbol().toLowerCase();
         String baseUrl = properties.getApi().getWsMarketUrl().replaceFirst("/ws/?$", "");
         String wsUrl = baseUrl + "/stream?streams=" + symbol + "@bookTicker/" + symbol + "@aggTrade/" + symbol + "@depth5@100ms";
-        HttpClient.newHttpClient().newWebSocketBuilder().buildAsync(URI.create(wsUrl), this)
+        httpClient.newWebSocketBuilder().buildAsync(URI.create(wsUrl), this)
                 .thenAccept(ws -> {
                     marketConnectInProgress.set(false);
+                    if (!acceptingMarketConnections.get()) {
+                        ws.abort();
+                        return;
+                    }
+                    lastMarketFrameTimestamp.set(System.currentTimeMillis());
+                    lastMarketDataTimestamp.set(0);
+                    WebSocket previous = activeMarketWebSocket.getAndSet(ws);
+                    if (previous != null && previous != ws) previous.abort();
                     log.info("已连接盘口数据流: {}", wsUrl);
                 })
                 .exceptionally(ex -> {
@@ -113,13 +137,29 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     @Override
     public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
-        handleMarketStreamLoss("连接关闭 " + statusCode + ": " + reason);
+        if (activeMarketWebSocket.compareAndSet(webSocket, null)) {
+            handleMarketStreamLoss("连接关闭 " + statusCode + ": " + reason);
+        }
         return CompletableFuture.completedFuture(null);
     }
 
     @Override
     public void onError(WebSocket webSocket, Throwable error) {
-        handleMarketStreamLoss("连接错误: " + error.getMessage());
+        if (activeMarketWebSocket.compareAndSet(webSocket, null)) {
+            handleMarketStreamLoss("连接错误: " + error.getMessage());
+        }
+    }
+
+    @Override
+    public CompletionStage<?> onPing(WebSocket webSocket, ByteBuffer message) {
+        if (webSocket.equals(activeMarketWebSocket.get())) lastMarketFrameTimestamp.set(System.currentTimeMillis());
+        return WebSocket.Listener.super.onPing(webSocket, message);
+    }
+
+    @Override
+    public CompletionStage<?> onPong(WebSocket webSocket, ByteBuffer message) {
+        if (webSocket.equals(activeMarketWebSocket.get())) lastMarketFrameTimestamp.set(System.currentTimeMillis());
+        return WebSocket.Listener.super.onPong(webSocket, message);
     }
 
     private void handleMarketStreamLoss(String reason) {
@@ -133,6 +173,29 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 connectMarketData();
             });
         }
+    }
+
+    private void checkMarketStreamHealth() {
+        if (!acceptingMarketConnections.get()) return;
+        WebSocket socket = activeMarketWebSocket.get();
+        long lastFrame = lastMarketFrameTimestamp.get();
+        long timeoutMs = Math.max(5_000, properties.getStrategy().getMarketDataStaleMs() * 5);
+        if (socket != null && lastFrame > 0 && System.currentTimeMillis() - lastFrame > timeoutMs) {
+            if (activeMarketWebSocket.compareAndSet(socket, null)) {
+                socket.abort();
+                lastMarketDataTimestamp.set(0);
+                handleMarketStreamLoss("连续 " + timeoutMs + " ms 未收到行情帧");
+            }
+        } else if (socket == null && !marketConnectInProgress.get()) {
+            handleMarketStreamLoss("行情连接不存在");
+        }
+    }
+
+    private void forceMarketReconnect(String reason) {
+        WebSocket socket = activeMarketWebSocket.getAndSet(null);
+        if (socket != null) socket.abort();
+        lastMarketDataTimestamp.set(0);
+        handleMarketStreamLoss(reason);
     }
 
     public synchronized boolean startTrading() {
@@ -160,9 +223,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return false;
         }
         long marketAgeMs = System.currentTimeMillis() - lastMarketDataTimestamp.get();
-        if (lastMarketDataTimestamp.get() <= 0 || marketAgeMs > properties.getStrategy().getMarketDataStaleMs()) {
-            halt("盘口行情未就绪或已过期，拒绝启动");
-            liveArmed.set(false);
+        long startupMaxAgeMs = Math.max(5_000, properties.getStrategy().getMarketDataStaleMs());
+        if (lastMarketDataTimestamp.get() <= 0 || marketAgeMs > startupMaxAgeMs) {
+            isRunning.set(false);
+            currentStatus.set(ChurnStatus.HALTED);
+            statusReason.set("盘口行情正在重连，请稍后再次启动");
+            forceMarketReconnect("启动检查发现行情已过期");
             return false;
         }
         if (properties.getStrategy().getOrderAmountUsdt().compareTo(properties.getStrategy().getMaxLiveOrderNotionalUsdt()) > 0) {
@@ -303,6 +369,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     @PreDestroy public void onShutdown() {
         acceptingMarketConnections.set(false);
+        WebSocket socket = activeMarketWebSocket.getAndSet(null);
+        if (socket != null) socket.abort();
+        marketWatchdog.shutdownNow();
         stopTrading();
     }
 
@@ -325,10 +394,15 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     @Override
     public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
+        WebSocket activeSocket = activeMarketWebSocket.get();
+        if (activeSocket != null && webSocket != activeSocket) {
+            return WebSocket.Listener.super.onText(webSocket, data, last);
+        }
+        lastMarketFrameTimestamp.set(System.currentTimeMillis());
         String payload;
         synchronized (inboundMarketMessage) {
             inboundMarketMessage.append(data);
-            if (!last) return CompletableFuture.completedFuture(null);
+            if (!last) return WebSocket.Listener.super.onText(webSocket, data, false);
             payload = inboundMarketMessage.toString();
             inboundMarketMessage.setLength(0);
         }
@@ -455,6 +529,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private synchronized void onOrderUpdate(long orderId, String clientOrderId, String side, String executionType,
                                             String orderStatus, BigDecimal lastFilledQty, BigDecimal lastFilledPrice,
                                             BigDecimal commission, String commissionAsset) {
+        if (restReconciledOrderIds.contains(orderId)) {
+            if (isTerminal(orderStatus)) restReconciledOrderIds.remove(orderId);
+            return;
+        }
         boolean replacingOldEvent = Long.valueOf(orderId).equals(replacingOrderId.get())
                 && (clientOrderId == null || !clientOrderId.equals(activeClientOrderId.get()));
         boolean activeEvent = !replacingOldEvent && (Long.valueOf(orderId).equals(activeOrderId.get())
@@ -473,6 +551,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         var rule = ruleManager.getRule(properties.getStrategy().getSymbol());
         if (rule == null) { halt("未加载交易规则"); return; }
         if ("TRADE".equals(executionType) && lastFilledQty.signum() > 0) {
+            accountedOrderQty.merge(orderId, lastFilledQty, BigDecimal::add);
+            accountedOrderQuote.merge(orderId, lastFilledQty.multiply(lastFilledPrice), BigDecimal::add);
             totalVolumeUsdt.accumulateAndGet(lastFilledQty.multiply(lastFilledPrice), BigDecimal::add);
             if ("BUY".equalsIgnoreCase(side)) {
                 filledEntryQuantity.accumulateAndGet(lastFilledQty, BigDecimal::add);
@@ -512,6 +592,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         if (isTerminal(orderStatus)) {
             knownOrderIds.remove(orderId);
+            accountedOrderQty.remove(orderId);
+            accountedOrderQuote.remove(orderId);
+            orderReconcileFailures.remove(orderId);
             if (clientOrderId != null) pendingClientOrderIds.remove(clientOrderId);
         }
     }
@@ -842,6 +925,86 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         entryCancellationPending.set(false);
         orderPlacedTimestamp.set(System.currentTimeMillis());
         currentStatus.set(status);
+        scheduleOrderReconciliation(orderId);
+    }
+
+    private void scheduleOrderReconciliation(long orderId) {
+        CompletableFuture.delayedExecutor(1_500, TimeUnit.MILLISECONDS)
+                .execute(() -> reconcileTrackedOrder(orderId));
+    }
+
+    private synchronized void reconcileTrackedOrder(long orderId) {
+        if (!Long.valueOf(orderId).equals(activeOrderId.get())) return;
+        JsonNode order = tradeService.getOrder(properties.getStrategy().getSymbol(), orderId);
+        if (order == null) {
+            int failures = orderReconcileFailures.merge(orderId, 1, Integer::sum);
+            if (failures >= 3) {
+                liveArmed.set(false);
+                halt("连续三次无法查询活动订单 " + orderId + "，已停止真实交易");
+            } else {
+                scheduleOrderReconciliation(orderId);
+            }
+            return;
+        }
+        orderReconcileFailures.remove(orderId);
+        String orderStatus = order.path("status").asText();
+        if (!isTerminal(orderStatus)) {
+            scheduleOrderReconciliation(orderId);
+            return;
+        }
+
+        String side = order.path("side").asText();
+        BigDecimal executedQty = new BigDecimal(order.path("executedQty").asText("0"));
+        BigDecimal cumulativeQuote = new BigDecimal(order.path("cummulativeQuoteQty").asText("0"));
+        BigDecimal alreadyQty = accountedOrderQty.getOrDefault(orderId, BigDecimal.ZERO);
+        BigDecimal alreadyQuote = accountedOrderQuote.getOrDefault(orderId, BigDecimal.ZERO);
+        BigDecimal missingQty = executedQty.subtract(alreadyQty).max(BigDecimal.ZERO);
+        BigDecimal missingQuote = cumulativeQuote.subtract(alreadyQuote).max(BigDecimal.ZERO);
+        if (missingQty.signum() > 0) {
+            BigDecimal fallbackPrice = missingQuote.signum() > 0
+                    ? missingQuote.divide(missingQty, java.math.MathContext.DECIMAL64)
+                    : new BigDecimal(order.path("price").asText("0"));
+            if (fallbackPrice.signum() <= 0) {
+                liveArmed.set(false);
+                halt("订单 " + orderId + " 成交但无法确定成交价格，需人工对账");
+                return;
+            }
+            totalVolumeUsdt.accumulateAndGet(missingQty.multiply(fallbackPrice), BigDecimal::add);
+            if ("BUY".equalsIgnoreCase(side)) {
+                filledEntryQuantity.accumulateAndGet(missingQty, BigDecimal::add);
+            }
+            riskGuard.recordFill(side, missingQty, fallbackPrice, System.currentTimeMillis(),
+                    properties.getStrategy());
+            log.warn("账户成交流遗漏订单 {} 的成交，REST 已补记: side={} qty={} price={}",
+                    orderId, side, missingQty, fallbackPrice);
+        }
+
+        BigDecimal freeBalance = tradeService.getFreeAssetBalance(baseAsset());
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule(properties.getStrategy().getSymbol());
+        if (freeBalance == null || rule == null) {
+            liveArmed.set(false);
+            halt("订单终态已确认，但无法核对标的余额");
+            return;
+        }
+        holdingInventory.set(freeBalance);
+        restReconciledOrderIds.add(orderId);
+        clearActiveOrder();
+        accountedOrderQty.remove(orderId);
+        accountedOrderQuote.remove(orderId);
+        if ("BUY".equalsIgnoreCase(side)) {
+            if (freeBalance.compareTo(rule.stepSize()) >= 0) currentStatus.set(ChurnStatus.SELLING);
+            else { currentStatus.set(ChurnStatus.IDLE); resetEntryTarget(); }
+        } else if (freeBalance.compareTo(rule.stepSize()) < 0) {
+            holdingInventory.set(BigDecimal.ZERO);
+            if (isRunning.get()) roundTripsCompleted.incrementAndGet();
+            currentStatus.set(ChurnStatus.IDLE);
+            if (!isRunning.get()) statusReason.set("人工授权市价清仓已完成（REST 对账）");
+            resetEntryTarget();
+        } else {
+            currentStatus.set(ChurnStatus.SELLING);
+        }
+        CompletableFuture.delayedExecutor(60, TimeUnit.SECONDS)
+                .execute(() -> restReconciledOrderIds.remove(orderId));
     }
 
     private void clearActiveOrder() {
@@ -857,6 +1020,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         clearActiveOrder();
         knownOrderIds.clear();
         pendingClientOrderIds.clear();
+        restReconciledOrderIds.clear();
+        accountedOrderQty.clear();
+        accountedOrderQuote.clear();
+        orderReconcileFailures.clear();
         replacingOrderId.set(null);
     }
 

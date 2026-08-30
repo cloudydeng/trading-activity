@@ -9,13 +9,18 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.nio.ByteBuffer;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 @Slf4j
 @Service
@@ -25,11 +30,19 @@ public class UserDataStreamService implements WebSocket.Listener {
     private final BinanceProperties properties;
     private final BinanceSigner signer;
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final HttpClient httpClient = HttpClient.newHttpClient();
 
     private final AtomicBoolean connectInProgress = new AtomicBoolean(false);
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
     private final AtomicBoolean acceptingConnections = new AtomicBoolean(true);
     private final AtomicBoolean ready = new AtomicBoolean(false);
+    private final AtomicReference<WebSocket> activeWebSocket = new AtomicReference<>();
+    private final AtomicLong lastFrameTimestamp = new AtomicLong(0);
+    private final ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread thread = new Thread(r, "binance-user-stream-watchdog");
+        thread.setDaemon(true);
+        return thread;
+    });
     private final StringBuilder inboundMessage = new StringBuilder();
     private volatile ExecutionCallback executionCallback;
     private volatile StreamLifecycleCallback streamLifecycleCallback;
@@ -67,14 +80,23 @@ public class UserDataStreamService implements WebSocket.Listener {
             return;
         }
         connect();
+        watchdog.scheduleWithFixedDelay(this::checkStreamHealth, 10, 10, TimeUnit.SECONDS);
     }
 
     public synchronized void connect() {
         if (!acceptingConnections.get() || !connectInProgress.compareAndSet(false, true)) return;
-        HttpClient.newHttpClient().newWebSocketBuilder()
+        httpClient.newWebSocketBuilder()
                 .buildAsync(URI.create(properties.getApi().getWsUserUrl()), this)
                 .thenAccept(ws -> {
                     connectInProgress.set(false);
+                    if (!acceptingConnections.get()) {
+                        ws.abort();
+                        return;
+                    }
+                    ready.set(false);
+                    lastFrameTimestamp.set(System.currentTimeMillis());
+                    WebSocket previous = activeWebSocket.getAndSet(ws);
+                    if (previous != null && previous != ws) previous.abort();
                     subscribe(ws);
                 })
                 .exceptionally(ex -> {
@@ -101,11 +123,16 @@ public class UserDataStreamService implements WebSocket.Listener {
 
     @Override
     public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
+        WebSocket active = activeWebSocket.get();
+        if (active != null && webSocket != active) {
+            return WebSocket.Listener.super.onText(webSocket, data, last);
+        }
+        lastFrameTimestamp.set(System.currentTimeMillis());
         try {
             String payload;
             synchronized (inboundMessage) {
                 inboundMessage.append(data);
-                if (!last) return CompletableFuture.completedFuture(null);
+                if (!last) return WebSocket.Listener.super.onText(webSocket, data, false);
                 payload = inboundMessage.toString();
                 inboundMessage.setLength(0);
             }
@@ -115,10 +142,12 @@ public class UserDataStreamService implements WebSocket.Listener {
                     ready.set(true);
                     log.info("已成功订阅币安账户 User Data Stream");
                 } else {
-                    markUnavailable("账户流签名订阅失败: " + root.path("error").path("msg").asText("unknown"));
-                    webSocket.abort();
+                    markUnavailable(webSocket,
+                            "账户流签名订阅失败: " + root.path("error").path("msg").asText("unknown"));
                 }
-                return CompletableFuture.completedFuture(null);
+                // The JDK WebSocket API is demand-driven. Request the next message after
+                // the subscription ACK, otherwise no execution reports are ever delivered.
+                return WebSocket.Listener.super.onText(webSocket, data, true);
             }
             JsonNode node = root.has("event") ? root.get("event") : root;
             String eventType = node.has("e") ? node.get("e").asText() : "";
@@ -143,7 +172,7 @@ public class UserDataStreamService implements WebSocket.Listener {
                             lastFilledQty, lastFilledPrice, commission, commissionAsset);
                 }
             } else if ("eventStreamTerminated".equals(eventType)) {
-                markUnavailable("账户事件流已终止");
+                markUnavailable(webSocket, "账户事件流已终止");
             }
         } catch (Exception e) {
             log.error("解析 UserDataStream 消息异常", e);
@@ -153,16 +182,30 @@ public class UserDataStreamService implements WebSocket.Listener {
 
     @Override
     public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
-        markUnavailable("账户流关闭 " + statusCode + ": " + reason);
+        markUnavailable(webSocket, "账户流关闭 " + statusCode + ": " + reason);
         return CompletableFuture.completedFuture(null);
     }
 
     @Override
     public void onError(WebSocket webSocket, Throwable error) {
-        markUnavailable("账户流错误: " + error.getMessage());
+        markUnavailable(webSocket, "账户流错误: " + error.getMessage());
     }
 
-    private void markUnavailable(String reason) {
+    @Override
+    public CompletionStage<?> onPing(WebSocket webSocket, ByteBuffer message) {
+        lastFrameTimestamp.set(System.currentTimeMillis());
+        return WebSocket.Listener.super.onPing(webSocket, message);
+    }
+
+    @Override
+    public CompletionStage<?> onPong(WebSocket webSocket, ByteBuffer message) {
+        lastFrameTimestamp.set(System.currentTimeMillis());
+        return WebSocket.Listener.super.onPong(webSocket, message);
+    }
+
+    private void markUnavailable(WebSocket source, String reason) {
+        if (source != null && !activeWebSocket.compareAndSet(source, null)) return;
+        if (source != null) source.abort();
         boolean wasReady = ready.getAndSet(false);
         if (wasReady && streamLifecycleCallback != null) {
             try {
@@ -172,6 +215,17 @@ public class UserDataStreamService implements WebSocket.Listener {
             }
         }
         scheduleReconnect(reason);
+    }
+
+    private void checkStreamHealth() {
+        if (!acceptingConnections.get()) return;
+        WebSocket socket = activeWebSocket.get();
+        long lastFrame = lastFrameTimestamp.get();
+        if (socket != null && lastFrame > 0 && System.currentTimeMillis() - lastFrame > 45_000) {
+            markUnavailable(socket, "账户流 45 秒未收到任何帧");
+        } else if (socket == null && !connectInProgress.get()) {
+            scheduleReconnect("账户流连接不存在");
+        }
     }
 
     private void scheduleReconnect(String reason) {
@@ -191,5 +245,8 @@ public class UserDataStreamService implements WebSocket.Listener {
     public void shutdown() {
         acceptingConnections.set(false);
         ready.set(false);
+        WebSocket socket = activeWebSocket.getAndSet(null);
+        if (socket != null) socket.abort();
+        watchdog.shutdownNow();
     }
 }

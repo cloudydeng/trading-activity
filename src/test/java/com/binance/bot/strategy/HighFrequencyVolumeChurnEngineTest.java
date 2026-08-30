@@ -12,6 +12,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import org.mockito.ArgumentCaptor;
 
 import java.math.BigDecimal;
+import java.net.http.WebSocket;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -163,6 +164,81 @@ class HighFrequencyVolumeChurnEngineTest {
         assertFalse(engine.getLiveArmed().get());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
         verify(tradeService).placeMarketSell(eq("ENSOUSDT"), decimalEquals("7.0"), anyString());
+    }
+
+    @Test
+    void restFallbackRepairsMissedMarketSellExecutionReport() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("7.08"));
+        ReflectionTestUtils.invokeMethod(engine, "trackOrder", 90L, "churn-SELLM-1",
+                HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        when(tradeService.getOrder("ENSOUSDT", 90L)).thenReturn(mapper.readTree("""
+                {"orderId":90,"status":"FILLED","side":"SELL","executedQty":"7.08",
+                 "cummulativeQuoteQty":"6.018","price":"0"}
+                """));
+        when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(BigDecimal.ZERO);
+
+        ReflectionTestUtils.invokeMethod(engine, "reconcileTrackedOrder", 90L);
+
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+        assertNull(atomic("activeOrderId", Long.class).get());
+        assertTrue(engine.getStatusReason().get().contains("REST 对账"));
+    }
+
+    @Test
+    void restFallbackRepairsMissedBuyExecutionReportAndStartsExitManagement() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        atomic("targetEntryQuantity", BigDecimal.class).set(new BigDecimal("7.08"));
+        ReflectionTestUtils.invokeMethod(engine, "trackOrder", 91L, "churn-BUYI-1",
+                HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
+        when(tradeService.getOrder("ENSOUSDT", 91L)).thenReturn(mapper.readTree("""
+                {"orderId":91,"status":"FILLED","side":"BUY","executedQty":"7.08",
+                 "cummulativeQuoteQty":"6.018","price":"0"}
+                """));
+        when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(new BigDecimal("7.08"));
+
+        ReflectionTestUtils.invokeMethod(engine, "reconcileTrackedOrder", 91L);
+
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
+        assertNull(atomic("activeOrderId", Long.class).get());
+        assertEquals(0, new BigDecimal("7.08").compareTo(engine.getRiskSnapshot().positionQty()));
+
+        orderUpdate(91L, "churn-BUYI-1", "BUY", "TRADE", "FILLED",
+                "7.08", "0.85", "0.006", "USDT");
+        assertEquals(0, new BigDecimal("7.08").compareTo(engine.getRiskSnapshot().positionQty()));
+    }
+
+    @Test
+    void staleMarketWatchdogAbortsHalfOpenSocket() {
+        WebSocket socket = mock(WebSocket.class);
+        atomic("activeMarketWebSocket", WebSocket.class).set(socket);
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
+                .set(System.currentTimeMillis() - 6_000);
+        ((java.util.concurrent.atomic.AtomicBoolean) ReflectionTestUtils.getField(engine, "reconnectScheduled"))
+                .set(true);
+
+        ReflectionTestUtils.invokeMethod(engine, "checkMarketStreamHealth");
+
+        verify(socket).abort();
+        assertNull(atomic("activeMarketWebSocket", WebSocket.class).get());
+    }
+
+    @Test
+    void staleMarketOnStartReconnectsWithoutDiscardingOperatorArm() {
+        WebSocket socket = mock(WebSocket.class);
+        engine.getLiveArmed().set(true);
+        when(userDataStreamService.isReady()).thenReturn(true);
+        atomic("activeMarketWebSocket", WebSocket.class).set(socket);
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
+                .set(System.currentTimeMillis() - 6_000);
+        ((java.util.concurrent.atomic.AtomicBoolean) ReflectionTestUtils.getField(engine, "reconnectScheduled"))
+                .set(true);
+
+        assertFalse(engine.startTrading());
+
+        verify(socket).abort();
+        assertTrue(engine.getLiveArmed().get());
+        assertTrue(engine.getStatusReason().get().contains("正在重连"));
     }
 
     @Test
