@@ -45,6 +45,11 @@ public class BinanceProperties {
         private double randomSizeJitter;
         private long signalLookbackMs = 3000;
         private long marketDataStaleMs = 1000;
+        /**
+         * Connection-liveness timeout. Binance sends WebSocket ping frames about every 20 seconds,
+         * so this must be substantially longer than the trading-data freshness threshold.
+         */
+        private long marketStreamWatchdogMs = 45_000;
         private double minBookImbalance = 0.05;
         private double minDepthImbalance = -0.10;
         private double minTakerFlowImbalance = -0.20;

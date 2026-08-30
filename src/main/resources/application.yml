@@ -53,6 +53,8 @@ binance:
     # 新开仓信号窗口与保护阈值；均应先在 Testnet 回测和验证后调整
     signal-lookback-ms: 3000
     market-data-stale-ms: 1000
+    # 连接存活与下单行情新鲜度分离：Binance 约每 20 秒发 Ping，45 秒无任何入站帧才重连。
+    market-stream-watchdog-ms: 45000
     min-book-imbalance: 0.05
     min-depth-imbalance: -0.10
     min-taker-flow-imbalance: -0.20

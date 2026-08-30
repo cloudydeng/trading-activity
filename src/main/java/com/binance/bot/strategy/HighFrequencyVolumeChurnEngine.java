@@ -117,8 +117,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         String wsUrl = baseUrl + "/stream?streams=" + symbol + "@bookTicker/" + symbol + "@aggTrade/" + symbol + "@depth5@100ms";
         httpClient.newWebSocketBuilder().buildAsync(URI.create(wsUrl), this)
                 .thenAccept(ws -> {
-                    marketConnectInProgress.set(false);
                     if (!acceptingMarketConnections.get()) {
+                        marketConnectInProgress.set(false);
+                        reconnectScheduled.set(false);
                         ws.abort();
                         return;
                     }
@@ -126,10 +127,15 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     lastMarketDataTimestamp.set(0);
                     WebSocket previous = activeMarketWebSocket.getAndSet(ws);
                     if (previous != null && previous != ws) previous.abort();
+                    // Publish the active socket before clearing the connection guards so the
+                    // watchdog can never observe a false "no connection" gap and queue a duplicate.
+                    marketConnectInProgress.set(false);
+                    reconnectScheduled.set(false);
                     log.info("已连接盘口数据流: {}", wsUrl);
                 })
                 .exceptionally(ex -> {
                     marketConnectInProgress.set(false);
+                    reconnectScheduled.set(false);
                     handleMarketStreamLoss("连接失败: " + ex.getMessage());
                     return null;
                 });
@@ -169,7 +175,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (isRunning.get() && !properties.getStrategy().isObserveMode()) protectOnStreamLoss("行情流不可用: " + reason);
         if (reconnectScheduled.compareAndSet(false, true)) {
             CompletableFuture.delayedExecutor(1, TimeUnit.SECONDS).execute(() -> {
-                reconnectScheduled.set(false);
+                if (!acceptingMarketConnections.get()) {
+                    reconnectScheduled.set(false);
+                    return;
+                }
                 connectMarketData();
             });
         }
@@ -179,14 +188,17 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (!acceptingMarketConnections.get()) return;
         WebSocket socket = activeMarketWebSocket.get();
         long lastFrame = lastMarketFrameTimestamp.get();
-        long timeoutMs = Math.max(5_000, properties.getStrategy().getMarketDataStaleMs() * 5);
+        // Business data can legitimately be quiet for several seconds. Connection liveness is
+        // based on any inbound frame (including Binance's ~20-second ping), while signal freshness
+        // remains independently guarded by marketDataStaleMs in MarketSignalEvaluator.
+        long timeoutMs = Math.max(45_000, properties.getStrategy().getMarketStreamWatchdogMs());
         if (socket != null && lastFrame > 0 && System.currentTimeMillis() - lastFrame > timeoutMs) {
             if (activeMarketWebSocket.compareAndSet(socket, null)) {
                 socket.abort();
                 lastMarketDataTimestamp.set(0);
                 handleMarketStreamLoss("连续 " + timeoutMs + " ms 未收到行情帧");
             }
-        } else if (socket == null && !marketConnectInProgress.get()) {
+        } else if (socket == null && !marketConnectInProgress.get() && !reconnectScheduled.get()) {
             handleMarketStreamLoss("行情连接不存在");
         }
     }
@@ -223,7 +235,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return false;
         }
         long marketAgeMs = System.currentTimeMillis() - lastMarketFrameTimestamp.get();
-        long startupMaxAgeMs = Math.max(5_000, properties.getStrategy().getMarketDataStaleMs());
+        long startupMaxAgeMs = Math.max(45_000, properties.getStrategy().getMarketStreamWatchdogMs());
         if (lastMarketFrameTimestamp.get() <= 0 || lastMarketDataTimestamp.get() <= 0
                 || marketAgeMs > startupMaxAgeMs) {
             isRunning.set(false);

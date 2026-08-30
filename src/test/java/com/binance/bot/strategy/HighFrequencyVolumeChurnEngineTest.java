@@ -213,7 +213,7 @@ class HighFrequencyVolumeChurnEngineTest {
         WebSocket socket = mock(WebSocket.class);
         atomic("activeMarketWebSocket", WebSocket.class).set(socket);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
-                .set(System.currentTimeMillis() - 6_000);
+                .set(System.currentTimeMillis() - 46_000);
         ((java.util.concurrent.atomic.AtomicBoolean) ReflectionTestUtils.getField(engine, "reconnectScheduled"))
                 .set(true);
 
@@ -224,15 +224,28 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void quietMarketForSixSecondsDoesNotAbortHealthySocket() {
+        WebSocket socket = mock(WebSocket.class);
+        atomic("activeMarketWebSocket", WebSocket.class).set(socket);
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
+                .set(System.currentTimeMillis() - 6_000);
+
+        ReflectionTestUtils.invokeMethod(engine, "checkMarketStreamHealth");
+
+        verify(socket, never()).abort();
+        assertEquals(socket, atomic("activeMarketWebSocket", WebSocket.class).get());
+    }
+
+    @Test
     void staleMarketOnStartReconnectsWithoutDiscardingOperatorArm() {
         WebSocket socket = mock(WebSocket.class);
         engine.getLiveArmed().set(true);
         when(userDataStreamService.isReady()).thenReturn(true);
         atomic("activeMarketWebSocket", WebSocket.class).set(socket);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
-                .set(System.currentTimeMillis() - 6_000);
+                .set(System.currentTimeMillis() - 46_000);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
-                .set(System.currentTimeMillis() - 6_000);
+                .set(System.currentTimeMillis() - 46_000);
         ((java.util.concurrent.atomic.AtomicBoolean) ReflectionTestUtils.getField(engine, "reconnectScheduled"))
                 .set(true);
 
