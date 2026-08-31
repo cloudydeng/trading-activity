@@ -32,7 +32,7 @@ public class BinanceProperties {
         private boolean liveTradingEnabled = false;
         private String symbol;
         private BigDecimal orderAmountUsdt;
-        private BigDecimal maxLiveOrderNotionalUsdt = new BigDecimal("6");
+        private BigDecimal maxLiveOrderNotionalUsdt = new BigDecimal("11");
         private int bidDepthOffsetTicks;
         private int askDepthOffsetTicks;
         private long orderTtlMs;

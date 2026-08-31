@@ -35,8 +35,8 @@ binance:
     live-trading-enabled: "${BINANCE_LIVE_TRADING_ENABLED:false}"
     symbol: "ENSOUSDT"
     # 观察及未来模拟的名义单笔金额；ENSOUSDT 的 Binance 最小名义额为 5 USDT。
-    order-amount-usdt: 6.0
-    max-live-order-notional-usdt: 6.0
+    order-amount-usdt: 11.0
+    max-live-order-notional-usdt: 11.0
     # 买单挂在买一以提高 Maker 成交率；LIMIT_MAKER 仍会阻止意外 Taker 成交。
     bid-depth-offset-ticks: 0
     # 卖单挂单深度 (接到货后贴紧卖一快速回本出货)
@@ -48,7 +48,7 @@ binance:
     # Maker 两秒仍未成交且信号仍有效时，撤单确认后以受限 IOC 买入，最多越过卖一 1 tick。
     maker-entry-fallback-ms: 2000
     entry-ioc-max-slippage-ticks: 1
-    # 每笔固定 6U；数量仅按交易所 stepSize 向下取整，不再随机放大/缩小。
+    # 每笔固定 11U；数量仅按交易所 stepSize 向下取整，不再随机放大/缩小。
     random-size-jitter: 0
     # 新开仓信号窗口与保护阈值；均应先在 Testnet 回测和验证后调整
     signal-lookback-ms: 3000
