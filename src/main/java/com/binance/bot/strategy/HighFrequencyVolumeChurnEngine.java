@@ -869,12 +869,20 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (makerOrderId != null) {
             JsonNode cancel = tradeService.cancelOrder(symbol, makerOrderId);
             JsonNode finalOrder = tradeService.getOrder(symbol, makerOrderId);
-            if (cancel == null || finalOrder == null || !isTerminal(finalOrder.path("status").asText())) {
+            // A cancel response of -2011 often means the maker order filled between the
+            // cancel request and the response. The authoritative order query must be
+            // reconciled before clearing local tracking, otherwise the late executionReport
+            // is incorrectly treated as an unrelated external order.
+            if (finalOrder == null || !isTerminal(finalOrder.path("status").asText())) {
                 liveArmed.set(false);
                 halt("紧急退出前无法确认原卖单已撤销");
                 return;
             }
-            clearActiveOrder();
+            if (cancel == null || cancel.has("code")) {
+                log.info("紧急退出撤单响应未成功，但订单 {} 已处于终态 {}；先按 REST 对账",
+                        makerOrderId, finalOrder.path("status").asText());
+            }
+            reconcileTrackedOrder(makerOrderId);
         }
         BigDecimal freeBalance = tradeService.getFreeAssetBalance(baseAsset());
         if (freeBalance == null) {
@@ -884,6 +892,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         BigDecimal qty = PrecisionUtil.roundDownToStep(freeBalance.min(requestedQty), rule.stepSize());
         if (qty.compareTo(rule.stepSize()) < 0) {
+            // REST reconciliation may have confirmed that the original sell filled the
+            // entire position while its account-stream report was still in flight.
+            if (holdingInventory.get().signum() == 0) return;
             halt("紧急退出余额不足，需人工核对");
             return;
         }

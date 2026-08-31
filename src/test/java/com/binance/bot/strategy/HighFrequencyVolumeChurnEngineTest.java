@@ -147,6 +147,38 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void emergencyExitReconcilesAlreadyFilledMakerBeforeLateAccountEvent() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("7.02"));
+        TradingRiskGuard guard = (TradingRiskGuard) ReflectionTestUtils.getField(engine, "riskGuard");
+        guard.recordFill("BUY", new BigDecimal("7.02"), new BigDecimal("0.854"), 1, properties.getStrategy());
+        atomic("activeOrderId", Long.class).set(215889731L);
+        atomic("activeClientOrderId", String.class).set("churn-SELL-1");
+        ((java.util.Set<Long>) ReflectionTestUtils.getField(engine, "knownOrderIds")).add(215889731L);
+        when(tradeService.cancelOrder("ENSOUSDT", 215889731L))
+                .thenReturn(mapper.readTree("{\"code\":-2011,\"msg\":\"Unknown order sent.\"}"));
+        when(tradeService.getOrder("ENSOUSDT", 215889731L)).thenReturn(mapper.readTree("""
+                {"orderId":215889731,"status":"FILLED","side":"SELL","executedQty":"7.02",
+                 "cummulativeQuoteQty":"5.97546","price":"0.851"}
+                """));
+        when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(BigDecimal.ZERO);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.850"), new BigDecimal("0.851"));
+
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+        assertEquals(0, engine.getRiskSnapshot().positionQty().signum());
+        verify(tradeService, never()).placeMarketSell(anyString(), any(), anyString());
+
+        // The delayed account-stream reports for the same reconciled order are harmless.
+        orderUpdate(215889731L, "churn-SELL-1", "SELL", "TRADE", "FILLED",
+                "7.02", "0.851", "0", "USDT");
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+    }
+
+    @Test
     void operatorLiquidationSellsVerifiedFreeBalanceWithoutStartingEntryEngine() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         when(userDataStreamService.isReady()).thenReturn(true);
