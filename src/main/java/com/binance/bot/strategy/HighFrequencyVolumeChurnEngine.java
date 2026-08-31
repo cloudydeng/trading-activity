@@ -57,6 +57,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     @Getter private final AtomicReference<BigDecimal> totalVolumeUsdt = new AtomicReference<>(BigDecimal.ZERO);
     @Getter private final AtomicLong roundTripsCompleted = new AtomicLong(0);
     private final AtomicReference<Long> activeOrderId = new AtomicReference<>();
+    private final AtomicReference<BigDecimal> activeOrderPrice = new AtomicReference<>();
     private final AtomicReference<BigDecimal> holdingInventory = new AtomicReference<>(BigDecimal.ZERO);
     private final AtomicReference<BigDecimal> targetEntryQuantity = new AtomicReference<>(BigDecimal.ZERO);
     private final AtomicReference<BigDecimal> filledEntryQuantity = new AtomicReference<>(BigDecimal.ZERO);
@@ -73,6 +74,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicLong nextOrderAttemptAt = new AtomicLong(0);
     private final AtomicLong clientOrderSequence = new AtomicLong(0);
     private final AtomicBoolean entryCancellationPending = new AtomicBoolean(false);
+    private final AtomicBoolean exitIocPending = new AtomicBoolean(false);
     private final AtomicBoolean marketConnectInProgress = new AtomicBoolean(false);
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
     private final AtomicBoolean acceptingMarketConnections = new AtomicBoolean(true);
@@ -525,15 +527,30 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 ExitReason exitReason = exitReason(bestBid, now);
                 BigDecimal qty = PrecisionUtil.roundDownToStep(holdingInventory.get(), rule.stepSize());
                 if (qty.compareTo(rule.stepSize()) < 0) { halt("持仓不足以创建有效卖单"); return; }
-                if (exitReason.emergency) {
+                if (exitReason == ExitReason.STOP_LOSS) {
                     emergencyExit(symbol, qty, rule, exitReason);
                     return;
                 }
-                // Keep one passive exit resting from the first tick after the buy completes.
-                // Replacing an unchanged sell every TTL loses queue priority and burns API
-                // weight; stop-loss/max-holding still cancel it through emergencyExit().
-                if (activeOrderId.get() != null) return;
-                BigDecimal price = exitPrice(bestBid, bestAsk, rule);
+                if (exitReason == ExitReason.MAX_HOLDING) {
+                    if (!exitIocPending.get()) cappedIocExit(symbol, qty, bestBid, rule);
+                    return;
+                }
+                var risk = riskGuard.snapshot();
+                long holdingAgeMs = risk.positionOpenedAtMs() > 0 ? now - risk.positionOpenedAtMs() : 0;
+                Long activeId = activeOrderId.get();
+                if (activeId != null) {
+                    BigDecimal currentPrice = activeOrderPrice.get();
+                    if (holdingAgeMs < properties.getStrategy().getExitRepriceAfterMs()
+                            || currentPrice == null
+                            || now - orderPlacedTimestamp.get() < properties.getStrategy().getExitRepriceIntervalMs()) return;
+                    BigDecimal passivePrice = passiveExitPrice(bestBid, bestAsk, rule);
+                    // Only move a stale sell toward the market. Never chase the ask upward
+                    // and never cancel/recreate an order at the same price.
+                    if (passivePrice.compareTo(currentPrice) >= 0) return;
+                    submitMakerOrder(symbol, "SELL", passivePrice, qty, activeId, ChurnStatus.SELLING);
+                    return;
+                }
+                BigDecimal price = initialExitPrice(bestAsk, rule);
                 if (!isValidOrder(qty, price, rule)) { halt("止盈卖单低于交易所最小名义额"); return; }
                 submitMakerOrder(symbol, "SELL", price, qty, null, ChurnStatus.SELLING);
             }
@@ -629,7 +646,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (bestBid.compareTo(takeProfit) >= 0) return ExitReason.TAKE_PROFIT;
         return ExitReason.NONE;
     }
-    private BigDecimal exitPrice(BigDecimal bestBid, BigDecimal ask, SymbolRuleManager.SymbolRule rule) {
+    private BigDecimal initialExitPrice(BigDecimal ask, SymbolRuleManager.SymbolRule rule) {
         var risk = riskGuard.snapshot();
         BigDecimal cost = risk.positionCostUsdt().divide(risk.positionQty(), java.math.MathContext.DECIMAL64);
         BigDecimal target = cost.multiply(BigDecimal.ONE.add(BigDecimal.valueOf(properties.getStrategy().getTakeProfitBps()).movePointLeft(4)));
@@ -637,6 +654,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         // use best ask so LIMIT_MAKER cannot cross the current bid. Round upward so tick
         // normalization never erodes the configured minimum exit margin.
         return PrecisionUtil.roundUpToStep(ask.max(target), rule.tickSize());
+    }
+
+    private BigDecimal passiveExitPrice(BigDecimal bestBid, BigDecimal bestAsk,
+                                        SymbolRuleManager.SymbolRule rule) {
+        BigDecimal minimumPostOnly = bestBid.add(rule.tickSize());
+        return PrecisionUtil.roundUpToStep(bestAsk.max(minimumPostOnly), rule.tickSize());
     }
 
     private BigDecimal buyQuantity(BigDecimal bid, SymbolRuleManager.SymbolRule rule) {
@@ -675,8 +698,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             JsonNode acceptedOrder = cancelOrderId == null ? response
                     : response == null ? null : response.path("newOrderResponse");
             if (acceptedOrder != null && acceptedOrder.has("orderId")) {
+                long acceptedOrderId = acceptedOrder.get("orderId").asLong();
+                if (Long.valueOf(acceptedOrderId).equals(activeOrderId.get())) activeOrderPrice.set(price);
                 log.info("Maker 报单已接受: ID={} side={} qty={} price={} clientOrderId={}",
-                        acceptedOrder.get("orderId").asLong(), side, qty, price, clientOrderId);
+                        acceptedOrderId, side, qty, price, clientOrderId);
                 if ("SELL".equalsIgnoreCase(side)) {
                     statusReason.set("持仓退出中：Maker 卖单已挂出 @ " + price.toPlainString());
                 }
@@ -866,6 +891,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         if (matched != null) {
             trackOrder(matched.path("orderId").asLong(), clientOrderId, status);
+            BigDecimal matchedPrice = new BigDecimal(matched.path("price").asText("0"));
+            if (matchedPrice.signum() > 0) activeOrderPrice.set(matchedPrice);
             return;
         }
         pendingClientOrderIds.remove(clientOrderId);
@@ -918,6 +945,65 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             log.warn("触发 {}，已提交紧急市价减仓 {} {}", reason, qty, baseAsset());
         } else {
             reconcileAmbiguousSubmission(clientOrderId, ChurnStatus.SELLING, "紧急市价单结果未知");
+        }
+    }
+
+    private void cappedIocExit(String symbol, BigDecimal requestedQty, BigDecimal bestBid,
+                               SymbolRuleManager.SymbolRule rule) {
+        if (!exitIocPending.compareAndSet(false, true)) return;
+        Long makerOrderId = activeOrderId.get();
+        if (makerOrderId != null) {
+            JsonNode cancel = tradeService.cancelOrder(symbol, makerOrderId);
+            JsonNode finalOrder = tradeService.getOrder(symbol, makerOrderId);
+            if (finalOrder == null || !isTerminal(finalOrder.path("status").asText())) {
+                exitIocPending.set(false);
+                liveArmed.set(false);
+                halt("受限 IOC 退出前无法确认原卖单已撤销");
+                return;
+            }
+            if (cancel == null || cancel.has("code")) {
+                log.info("IOC 退出撤单响应未成功，但订单 {} 已处于终态 {}；先按 REST 对账",
+                        makerOrderId, finalOrder.path("status").asText());
+            }
+            reconcileTrackedOrder(makerOrderId);
+            // reconcileTrackedOrder clears all active-order flags. This exit flow is
+            // still in progress and must remain single-flight while the IOC is sent.
+            exitIocPending.set(true);
+        }
+        BigDecimal freeBalance = tradeService.getFreeAssetBalance(baseAsset());
+        if (freeBalance == null) {
+            exitIocPending.set(false);
+            liveArmed.set(false);
+            halt("受限 IOC 退出前无法确认可卖余额");
+            return;
+        }
+        BigDecimal qty = PrecisionUtil.roundDownToStep(freeBalance.min(requestedQty), rule.stepSize());
+        if (qty.compareTo(rule.stepSize()) < 0) {
+            exitIocPending.set(false);
+            if (holdingInventory.get().signum() == 0) return;
+            halt("受限 IOC 退出余额不足，需人工核对");
+            return;
+        }
+        BigDecimal limitPrice = PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(
+                BigDecimal.valueOf(Math.max(0, properties.getStrategy().getExitIocMaxSlippageTicks())))), rule.tickSize());
+        String clientOrderId = nextClientOrderId("SELLI");
+        pendingClientOrderIds.add(clientOrderId);
+        activeClientOrderId.set(clientOrderId);
+        JsonNode response = tradeService.placeLimitIocSell(symbol, qty, limitPrice, clientOrderId);
+        if (response != null && response.has("orderId")) {
+            trackOrder(response.get("orderId").asLong(), clientOrderId, ChurnStatus.SELLING);
+            activeOrderPrice.set(limitPrice);
+            statusReason.set("持仓受限 IOC 退出中 @ " + limitPrice.toPlainString());
+            log.warn("达到最长持仓，已提交受限 IOC 卖单: qty={} limitPrice={}", qty, limitPrice);
+        } else if (response != null && response.has("code")) {
+            pendingClientOrderIds.remove(clientOrderId);
+            activeClientOrderId.compareAndSet(clientOrderId, null);
+            exitIocPending.set(false);
+            nextOrderAttemptAt.set(System.currentTimeMillis() + 1_000);
+            log.warn("受限 IOC 卖单被交易所拒绝，已退避 1 秒: code={}, msg={}",
+                    response.path("code").asText("unknown"), response.path("msg").asText("unknown"));
+        } else {
+            reconcileAmbiguousSubmission(clientOrderId, ChurnStatus.SELLING, "受限 IOC 卖单结果未知");
         }
     }
 
@@ -1048,6 +1134,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         String clientOrderId = activeClientOrderId.getAndSet(null);
         if (clientOrderId != null) pendingClientOrderIds.remove(clientOrderId);
         entryCancellationPending.set(false);
+        exitIocPending.set(false);
+        activeOrderPrice.set(null);
         orderPlacedTimestamp.set(0);
     }
 

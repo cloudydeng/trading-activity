@@ -168,9 +168,64 @@ class HighFrequencyVolumeChurnEngineTest {
         ArgumentCaptor<BigDecimal> price = ArgumentCaptor.forClass(BigDecimal.class);
         verify(tradeService, times(1)).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
                 price.capture(), decimalEquals("10"), isNull(), anyString());
-        assertEquals(0, new BigDecimal("0.6016").compareTo(price.getValue()));
+        assertEquals(0, new BigDecimal("0.6010").compareTo(price.getValue()));
         assertEquals(77L, atomic("activeOrderId", Long.class).get());
         assertTrue(engine.getStatusReason().get().contains("Maker 卖单已挂出"));
+    }
+
+    @Test
+    void staleMakerExitOnlyRepricesDownTowardBestAsk() throws Exception {
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("activeOrderId", Long.class).set(77L);
+        atomic("activeClientOrderId", String.class).set("churn-SELL-old");
+        atomic("activeOrderPrice", BigDecimal.class).set(new BigDecimal("0.6030"));
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis() - 6_000);
+        TradingRiskGuard guard = (TradingRiskGuard) ReflectionTestUtils.getField(engine, "riskGuard");
+        guard.recordFill("BUY", new BigDecimal("10"), new BigDecimal("0.60"),
+                System.currentTimeMillis() - 61_000, properties.getStrategy());
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), decimalEquals("0.6001"),
+                decimalEquals("10"), eq(77L), anyString())).thenReturn(new ObjectMapper().readTree("""
+                {"cancelResult":"SUCCESS","newOrderResult":"SUCCESS",
+                 "cancelResponse":{"orderId":77,"status":"CANCELED","executedQty":"0"},
+                 "newOrderResponse":{"orderId":78,"price":"0.6001"}}
+                """));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+
+        verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), decimalEquals("0.6001"),
+                decimalEquals("10"), eq(77L), anyString());
+        assertEquals(78L, atomic("activeOrderId", Long.class).get());
+        assertEquals(0, new BigDecimal("0.6001").compareTo(
+                atomic("activeOrderPrice", BigDecimal.class).get()));
+    }
+
+    @Test
+    void maxHoldingUsesPriceBoundedIocSellInsteadOfMarket() throws Exception {
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
+        TradingRiskGuard guard = (TradingRiskGuard) ReflectionTestUtils.getField(engine, "riskGuard");
+        guard.recordFill("BUY", new BigDecimal("10"), new BigDecimal("0.60"),
+                System.currentTimeMillis() - 91_000, properties.getStrategy());
+        when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(new BigDecimal("10"));
+        when(tradeService.placeLimitIocSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.5999"), anyString()))
+                .thenReturn(new ObjectMapper().readTree("{\"orderId\":88}"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+
+        verify(tradeService, times(1)).placeLimitIocSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.5999"), anyString());
+        verify(tradeService, never()).placeMarketSell(anyString(), any(), anyString());
+        assertEquals(88L, atomic("activeOrderId", Long.class).get());
+        assertTrue(engine.getStatusReason().get().contains("IOC"));
     }
 
     @Test

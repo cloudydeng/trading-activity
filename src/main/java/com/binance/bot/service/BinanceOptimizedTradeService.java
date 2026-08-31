@@ -194,6 +194,41 @@ public class BinanceOptimizedTradeService {
         }
     }
 
+    /** Price-bounded reducing exit: crosses only down to the supplied sell limit, then expires. */
+    public JsonNode placeLimitIocSell(String symbol, BigDecimal quantity, BigDecimal limitPrice, String clientOrderId) {
+        long timestamp = System.currentTimeMillis();
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("symbol", symbol.toUpperCase());
+        params.put("side", "SELL");
+        params.put("type", "LIMIT");
+        params.put("timeInForce", "IOC");
+        params.put("quantity", quantity.toPlainString());
+        params.put("price", limitPrice.toPlainString());
+        params.put("newClientOrderId", clientOrderId);
+        params.put("newOrderRespType", "ACK");
+        params.put("selfTradePreventionMode", "EXPIRE_BOTH");
+        params.put("timestamp", String.valueOf(timestamp));
+        String queryString = buildQueryString(params);
+        String signature = signer.sign(queryString, properties.getApi().getSecretKey());
+        try {
+            return restClient.post()
+                    .uri("/api/v3/order?" + queryString + "&signature=" + signature)
+                    .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                    .exchange((request, response) -> {
+                        updateWeight(response.getHeaders());
+                        JsonNode body = objectMapper.readTree(response.getBody());
+                        if (!response.getStatusCode().is2xxSuccessful()) {
+                            log.error("IOC 卖单失败: HTTP {}, code={}, msg={}", response.getStatusCode().value(),
+                                    body.path("code").asText("unknown"), body.path("msg").asText("unknown"));
+                        }
+                        return body;
+                    });
+        } catch (Exception e) {
+            log.error("IOC 卖单请求状态未知: {}", e.getMessage());
+            return null;
+        }
+    }
+
     public BigDecimal getFreeAssetBalance(String asset) {
         long timestamp = System.currentTimeMillis();
         String queryString = "timestamp=" + timestamp;

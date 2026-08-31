@@ -68,11 +68,16 @@ binance:
     max-daily-realized-loss-usdt: 5
     max-daily-drawdown-usdt: 8
     max-inventory-age-ms: 600000
-    # 买入成本已包含估算入场手续费；再预留 15 bps 覆盖退出手续费和最小利润。
-    # ENSO 当前 tick 约 11 bps，向上取整后通常对应买入价上方约 3 ticks。
-    take-profit-bps: 15
+    # 买入成本已包含估算入场手续费；再预留 5 bps，向上取整后 ENSO 通常
+    # 对应买入价上方约 2 ticks，覆盖估算退出手续费并保留极小利润。
+    take-profit-bps: 5
     stop-loss-bps: 80
-    max-holding-ms: 600000
+    # 先给价格 60 秒恢复；之后每 5 秒仅向当前卖一方向下调 Maker 卖价。
+    exit-reprice-after-ms: 60000
+    exit-reprice-interval-ms: 5000
+    # 90 秒仍未成交时改用最多穿过买一 1 tick 的受限 IOC 卖单。
+    max-holding-ms: 90000
+    exit-ioc-max-slippage-ticks: 1
     # 在尚未接入交易所实际 commission 字段前，保守估算 Maker 手续费。
     assumed-maker-fee-bps: 10
     # Observation can be enabled for research; signal execution does not depend on it.
