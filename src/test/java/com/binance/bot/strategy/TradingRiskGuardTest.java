@@ -49,6 +49,23 @@ class TradingRiskGuardTest {
         assertEquals(decimal("1"), guard.snapshot().positionQty());
     }
 
+    @Test
+    void clearsInventoryAgeBlockAfterForcedExitAndAllowsNextEntry() {
+        BinanceProperties.Strategy config = defaults();
+        config.setMaxInventoryAgeMs(1_000);
+        TradingRiskGuard guard = new TradingRiskGuard();
+
+        guard.recordFill("BUY", decimal("1"), decimal("100"), 0, config);
+        guard.recordMark(decimal("100"), 1_000, config);
+        assertEquals("MAX_INVENTORY_AGE", guard.getEntryBlockReason());
+
+        guard.recordFill("SELL", decimal("1"), decimal("100"), 1_001, config);
+
+        assertEquals(null, guard.getEntryBlockReason());
+        assertEquals(BigDecimal.ZERO, guard.snapshot().positionQty());
+        assertTrue(guard.permitsNewEntry(decimal("0.1"), decimal("100"), 1_002, config));
+    }
+
     private static BinanceProperties.Strategy defaults() { return new BinanceProperties.Strategy(); }
     private static BigDecimal decimal(String value) { return new BigDecimal(value); }
 }

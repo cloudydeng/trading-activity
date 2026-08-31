@@ -51,6 +51,12 @@ public class TradingRiskGuard {
                 positionQty = BigDecimal.ZERO;
                 positionCostUsdt = BigDecimal.ZERO;
                 positionOpenedAtMs = -1;
+                // Inventory age is a position-scoped guard.  Once the forced
+                // exit has fully flattened the ledger, do not leave a stale
+                // MAX_INVENTORY_AGE latch blocking every future entry.  The
+                // following evaluate() still re-checks daily loss/drawdown,
+                // so a real account-level trip remains fail-closed.
+                entryBlockReason.compareAndSet("MAX_INVENTORY_AGE", null);
             }
         }
         evaluate(nowMs, config);
