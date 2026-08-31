@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -144,6 +145,32 @@ class HighFrequencyVolumeChurnEngineTest {
         verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
                 org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.any(), anyString());
+    }
+
+    @Test
+    void sellingImmediatelyRestsOneFeeAwareMakerWithoutTtlReplacements() throws Exception {
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
+        TradingRiskGuard guard = (TradingRiskGuard) ReflectionTestUtils.getField(engine, "riskGuard");
+        guard.recordFill("BUY", new BigDecimal("10"), new BigDecimal("0.60"),
+                System.currentTimeMillis(), properties.getStrategy());
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), any(), any(), isNull(), anyString()))
+                .thenReturn(new ObjectMapper().readTree("{\"orderId\":77}"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis() - 10_000);
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6002"), new BigDecimal("0.6003"));
+
+        ArgumentCaptor<BigDecimal> price = ArgumentCaptor.forClass(BigDecimal.class);
+        verify(tradeService, times(1)).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
+                price.capture(), decimalEquals("10"), isNull(), anyString());
+        assertEquals(0, new BigDecimal("0.6016").compareTo(price.getValue()));
+        assertEquals(77L, atomic("activeOrderId", Long.class).get());
+        assertTrue(engine.getStatusReason().get().contains("Maker 卖单已挂出"));
     }
 
     @Test

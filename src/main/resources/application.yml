@@ -68,7 +68,9 @@ binance:
     max-daily-realized-loss-usdt: 5
     max-daily-drawdown-usdt: 8
     max-inventory-age-ms: 600000
-    take-profit-bps: 35
+    # 买入成本已包含估算入场手续费；再预留 15 bps 覆盖退出手续费和最小利润。
+    # ENSO 当前 tick 约 11 bps，向上取整后通常对应买入价上方约 3 ticks。
+    take-profit-bps: 15
     stop-loss-bps: 80
     max-holding-ms: 600000
     # 在尚未接入交易所实际 commission 字段前，保守估算 Maker 手续费。

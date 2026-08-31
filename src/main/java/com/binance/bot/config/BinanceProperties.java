@@ -64,7 +64,7 @@ public class BinanceProperties {
         private BigDecimal maxDailyDrawdownUsdt = new BigDecimal("8");
         private long maxInventoryAgeMs = 60_000;
         /** Signal-driven exit defaults: target must cover both estimated maker fees. */
-        private double takeProfitBps = 35;
+        private double takeProfitBps = 15;
         private double stopLossBps = 80;
         private long maxHoldingMs = 600_000;
         /** A pessimistic fee estimate, until actual commission events are accounted for. */
