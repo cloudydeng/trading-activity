@@ -216,6 +216,22 @@ public class BinanceOptimizedTradeService {
         return null;
     }
 
+    /** Read the signed account snapshot used by the authenticated monitoring page. */
+    public JsonNode getAccountInfo() {
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("timestamp", String.valueOf(System.currentTimeMillis()));
+        return getSignedJson("/api/v3/account", params, "查询账户信息失败");
+    }
+
+    /** Read recent orders for one symbol; callers filter for executed orders for display. */
+    public JsonNode getAllOrders(String symbol, int limit) {
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("symbol", symbol.toUpperCase());
+        params.put("limit", String.valueOf(Math.max(1, Math.min(limit, 1000))));
+        params.put("timestamp", String.valueOf(System.currentTimeMillis()));
+        return getSignedJson("/api/v3/allOrders", params, "查询历史订单失败");
+    }
+
     /** Returns null on an indeterminate API failure; callers must fail closed in that case. */
     public JsonNode getOpenOrders(String symbol) {
         long timestamp = System.currentTimeMillis();
@@ -257,6 +273,27 @@ public class BinanceOptimizedTradeService {
         return params.entrySet().stream()
                 .map(e -> e.getKey() + "=" + e.getValue())
                 .collect(Collectors.joining("&"));
+    }
+
+    private JsonNode getSignedJson(String path, Map<String, String> params, String errorMessage) {
+        String queryString = buildQueryString(params);
+        String signature = signer.sign(queryString, properties.getApi().getSecretKey());
+        try {
+            return restClient.get().uri(path + "?" + queryString + "&signature=" + signature)
+                    .exchange((request, response) -> {
+                        updateWeight(response.getHeaders());
+                        JsonNode body = objectMapper.readTree(response.getBody());
+                        if (!response.getStatusCode().is2xxSuccessful()) {
+                            log.warn("{}: HTTP {}, code={}, msg={}", errorMessage,
+                                    response.getStatusCode().value(), body.path("code").asText("unknown"),
+                                    body.path("msg").asText("unknown"));
+                        }
+                        return body;
+                    });
+        } catch (Exception e) {
+            log.error("{}: {}", errorMessage, e.getMessage());
+            return null;
+        }
     }
 
     private void updateWeight(HttpHeaders headers) {

@@ -2,12 +2,17 @@ package com.binance.bot.controller;
 
 import com.binance.bot.strategy.HighFrequencyVolumeChurnEngine;
 import com.binance.bot.config.BinanceProperties;
+import com.binance.bot.service.BinanceOptimizedTradeService;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.http.ResponseEntity;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -16,10 +21,13 @@ public class BotDashboardController {
 
     private final HighFrequencyVolumeChurnEngine engine;
     private final BinanceProperties properties;
+    private final BinanceOptimizedTradeService tradeService;
 
-    public BotDashboardController(HighFrequencyVolumeChurnEngine engine, BinanceProperties properties) {
+    public BotDashboardController(HighFrequencyVolumeChurnEngine engine, BinanceProperties properties,
+                                  BinanceOptimizedTradeService tradeService) {
         this.engine = engine;
         this.properties = properties;
+        this.tradeService = tradeService;
     }
 
     @GetMapping("/status")
@@ -42,6 +50,73 @@ public class BotDashboardController {
                 Map.entry("qualifiedSignals", engine.getQualifiedSignalOutcomes()),
                 Map.entry("risk", engine.getRiskSnapshot())
         );
+    }
+
+    @GetMapping("/account")
+    public ResponseEntity<?> getAccountSnapshot() {
+        JsonNode account = tradeService.getAccountInfo();
+        JsonNode allOrders = tradeService.getAllOrders(engine.getSymbol(), 100);
+        JsonNode openOrders = tradeService.getOpenOrders(engine.getSymbol());
+        if (account == null || allOrders == null || openOrders == null) {
+            return ResponseEntity.status(502).body(Map.of("message", "账户或订单数据暂时不可用，请稍后重试"));
+        }
+        return ResponseEntity.ok(new AccountSnapshot(
+                engine.getSymbol(),
+                account.path("accountType").asText("SPOT"),
+                account.path("canTrade").asBoolean(false),
+                account.path("updateTime").asLong(0),
+                nonZeroBalances(account.path("balances")),
+                executedOrders(allOrders),
+                orderViews(openOrders),
+                engine.getUsedApiWeight()));
+    }
+
+    private List<BalanceView> nonZeroBalances(JsonNode balances) {
+        List<BalanceView> result = new ArrayList<>();
+        if (!balances.isArray()) return result;
+        for (JsonNode balance : balances) {
+            BigDecimal free = decimal(balance.path("free").asText("0"));
+            BigDecimal locked = decimal(balance.path("locked").asText("0"));
+            if (free.signum() == 0 && locked.signum() == 0) continue;
+            result.add(new BalanceView(balance.path("asset").asText(), balance.path("free").asText("0"),
+                    balance.path("locked").asText("0"), free.add(locked).toPlainString()));
+        }
+        result.sort(Comparator.comparing(BalanceView::total, this::compareDecimal).reversed());
+        return result;
+    }
+
+    private List<OrderView> executedOrders(JsonNode orders) {
+        List<OrderView> result = new ArrayList<>();
+        if (!orders.isArray()) return result;
+        for (JsonNode order : orders) {
+            if (decimal(order.path("executedQty").asText("0")).signum() > 0) result.add(orderView(order));
+        }
+        result.sort(Comparator.comparingLong(OrderView::timeMs).reversed());
+        return result;
+    }
+
+    private List<OrderView> orderViews(JsonNode orders) {
+        List<OrderView> result = new ArrayList<>();
+        if (!orders.isArray()) return result;
+        for (JsonNode order : orders) result.add(orderView(order));
+        result.sort(Comparator.comparingLong(OrderView::timeMs).reversed());
+        return result;
+    }
+
+    private OrderView orderView(JsonNode order) {
+        return new OrderView(order.path("orderId").asLong(0), order.path("clientOrderId").asText(""),
+                order.path("side").asText(""), order.path("type").asText(""), order.path("status").asText(""),
+                order.path("price").asText("0"), order.path("origQty").asText("0"),
+                order.path("executedQty").asText("0"), order.path("cummulativeQuoteQty").asText("0"),
+                order.path("time").asLong(order.path("updateTime").asLong(0)));
+    }
+
+    private BigDecimal decimal(String value) {
+        try { return new BigDecimal(value); } catch (Exception ignored) { return BigDecimal.ZERO; }
+    }
+
+    private int compareDecimal(String left, String right) {
+        return decimal(left).compareTo(decimal(right));
     }
 
     @PostMapping("/start")
@@ -90,4 +165,10 @@ public class BotDashboardController {
     }
 
     public record LiquidationRequest(String password, String confirmation) { }
+    public record AccountSnapshot(String symbol, String accountType, boolean canTrade, long accountUpdateTimeMs,
+                                  List<BalanceView> balances, List<OrderView> filledOrders,
+                                  List<OrderView> openOrders, int usedApiWeight1m) { }
+    public record BalanceView(String asset, String free, String locked, String total) { }
+    public record OrderView(long orderId, String clientOrderId, String side, String type, String status,
+                            String price, String originalQty, String executedQty, String quoteQty, long timeMs) { }
 }
