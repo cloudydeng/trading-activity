@@ -13,6 +13,9 @@ import org.mockito.ArgumentCaptor;
 
 import java.math.BigDecimal;
 import java.net.http.WebSocket;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -37,9 +40,15 @@ class HighFrequencyVolumeChurnEngineTest {
     private UserDataStreamService userDataStreamService;
     private MarketSignalEvaluator marketSignalEvaluator;
     private HighFrequencyVolumeChurnEngine engine;
+    private final AtomicLong testTradeId = new AtomicLong(7_000);
+    private final Map<Long, BigDecimal> cumulativeQuantity = new HashMap<>();
+    private final Map<Long, BigDecimal> cumulativeQuote = new HashMap<>();
 
     @BeforeEach
     void setUp() {
+        testTradeId.set(7_000);
+        cumulativeQuantity.clear();
+        cumulativeQuote.clear();
         properties = new BinanceProperties();
         properties.getApi().setApiKey("test-api-key");
         properties.getApi().setSecretKey("test-secret-key");
@@ -112,6 +121,46 @@ class HighFrequencyVolumeChurnEngineTest {
                 "10", "0.60", "0.01", "ENSO");
 
         assertEquals(0, new BigDecimal("9.99").compareTo(atomic("holdingInventory", BigDecimal.class).get()));
+    }
+
+    @Test
+    void partialBuyBelowMinimumExitNotionalKeepsAccumulatingInsteadOfCreatingDust() {
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
+        atomic("activeOrderId", Long.class).set(42L);
+        atomic("activeClientOrderId", String.class).set("churn-BUY-1");
+        atomic("lastBestAsk", BigDecimal.class).set(new BigDecimal("0.601"));
+
+        orderUpdate(42L, "churn-BUY-1", "BUY", "TRADE", "PARTIALLY_FILLED",
+                "1", "0.60", "0", "USDT");
+
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING, engine.getCurrentStatus().get());
+        assertEquals(42L, atomic("activeOrderId", Long.class).get());
+        assertTrue(engine.getStatusReason().get().contains("尚未达到最小可卖额"));
+        verify(tradeService, never()).cancelOrder("ENSOUSDT", 42L);
+        verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
+                any(), any(), any(), anyString());
+    }
+
+    @Test
+    void actualCommissionAndCostPerMillionAreRecordedOnceFromExecutionReport() {
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
+        atomic("activeOrderId", Long.class).set(42L);
+        atomic("activeClientOrderId", String.class).set("churn-BUY-1");
+        when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(new BigDecimal("10"));
+        UserDataStreamService.ExecutionUpdate fill = new UserDataStreamService.ExecutionUpdate(
+                42L, 7001L, "churn-BUY-1", "BUY", "TRADE", "FILLED",
+                new BigDecimal("10"), new BigDecimal("0.60"), new BigDecimal("10"),
+                new BigDecimal("6.00"), new BigDecimal("0.006"), "USDT");
+
+        ReflectionTestUtils.invokeMethod(engine, "onOrderUpdate", fill);
+        ReflectionTestUtils.invokeMethod(engine, "onOrderUpdate", fill);
+
+        TradeAccountingLedger.AccountingSnapshot accounting = engine.getAccountingSnapshot();
+        assertEquals(0, new BigDecimal("6.00").compareTo(accounting.totalVolumeQuote()));
+        assertEquals(0, new BigDecimal("0.006").compareTo(accounting.totalCommissionQuoteEquivalent()));
+        assertEquals(0, new BigDecimal("1000").compareTo(accounting.costPerMillionVolume()));
+        assertEquals(1, accounting.processedTradeCount());
+        assertEquals(0, new BigDecimal("6.006").compareTo(engine.getRiskSnapshot().positionCostUsdt()));
     }
 
     @Test
@@ -245,6 +294,10 @@ class HighFrequencyVolumeChurnEngineTest {
                 {"orderId":215889731,"status":"FILLED","side":"SELL","executedQty":"7.02",
                  "cummulativeQuoteQty":"5.97546","price":"0.851"}
                 """));
+        when(tradeService.getMyTrades("ENSOUSDT", 215889731L)).thenReturn(mapper.readTree("""
+                [{"id":7001,"orderId":215889731,"price":"0.851","qty":"7.02",
+                  "quoteQty":"5.97546","commission":"0","commissionAsset":"USDT","isBuyer":false}]
+                """));
         when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(BigDecimal.ZERO);
 
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
@@ -290,6 +343,10 @@ class HighFrequencyVolumeChurnEngineTest {
                 {"orderId":90,"status":"FILLED","side":"SELL","executedQty":"7.08",
                  "cummulativeQuoteQty":"6.018","price":"0"}
                 """));
+        when(tradeService.getMyTrades("ENSOUSDT", 90L)).thenReturn(mapper.readTree("""
+                [{"id":7001,"orderId":90,"price":"0.85","qty":"7.08",
+                  "quoteQty":"6.018","commission":"0.006018","commissionAsset":"USDT","isBuyer":false}]
+                """));
         when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(BigDecimal.ZERO);
 
         ReflectionTestUtils.invokeMethod(engine, "reconcileTrackedOrder", 90L);
@@ -308,6 +365,10 @@ class HighFrequencyVolumeChurnEngineTest {
         when(tradeService.getOrder("ENSOUSDT", 91L)).thenReturn(mapper.readTree("""
                 {"orderId":91,"status":"FILLED","side":"BUY","executedQty":"7.08",
                  "cummulativeQuoteQty":"6.018","price":"0"}
+                """));
+        when(tradeService.getMyTrades("ENSOUSDT", 91L)).thenReturn(mapper.readTree("""
+                [{"id":7001,"orderId":91,"price":"0.85","qty":"7.08",
+                  "quoteQty":"6.018","commission":"0.006","commissionAsset":"USDT","isBuyer":true}]
                 """));
         when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(new BigDecimal("7.08"));
 
@@ -490,13 +551,24 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void makerFillDiscoveredDuringCancelWaitsForUserStreamInsteadOfSubmittingIoc() throws Exception {
+    void partialMakerBuyCancelsRemainderAndImmediatelySubmitsOneSell() throws Exception {
         prepareRestingMakerOrder();
         ObjectMapper mapper = new ObjectMapper();
+        atomic("lastBestAsk", BigDecimal.class).set(new BigDecimal("0.863"));
         when(tradeService.cancelOrder("ENSOUSDT", 42L))
                 .thenReturn(mapper.readTree("{\"orderId\":42,\"status\":\"CANCELED\"}"));
         when(tradeService.getOrder("ENSOUSDT", 42L))
-                .thenReturn(mapper.readTree("{\"orderId\":42,\"status\":\"CANCELED\",\"executedQty\":\"1.0\"}"));
+                .thenReturn(mapper.readTree("""
+                        {"orderId":42,"status":"CANCELED","executedQty":"7.0",
+                         "cummulativeQuoteQty":"6.034"}
+                        """));
+        when(tradeService.getMyTrades("ENSOUSDT", 42L)).thenReturn(mapper.readTree("""
+                [{"id":7001,"orderId":42,"price":"0.862","qty":"7.0",
+                  "quoteQty":"6.034","commission":"0","commissionAsset":"USDT","isBuyer":true}]
+                """));
+        when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(new BigDecimal("7.0"));
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), any(), decimalEquals("7.0"),
+                isNull(), anyString())).thenReturn(mapper.readTree("{\"orderId\":99}"));
 
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
                 new BigDecimal("0.862"), new BigDecimal("0.863"));
@@ -505,13 +577,20 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING, engine.getCurrentStatus().get());
         assertEquals(42L, atomic("activeOrderId", Long.class).get());
 
-        orderUpdate(42L, "churn-BUY-maker", "BUY", "TRADE", "PARTIALLY_FILLED",
-                "1.0", "0.862", "0", "USDT");
+        UserDataStreamService.ExecutionUpdate partialFill = new UserDataStreamService.ExecutionUpdate(
+                42L, 7001L, "churn-BUY-maker", "BUY", "TRADE", "PARTIALLY_FILLED",
+                new BigDecimal("7.0"), new BigDecimal("0.862"), new BigDecimal("7.0"),
+                new BigDecimal("6.034"), BigDecimal.ZERO, "USDT");
+        ReflectionTestUtils.invokeMethod(engine, "onOrderUpdate", partialFill);
+        ReflectionTestUtils.invokeMethod(engine, "onOrderUpdate", partialFill);
         orderUpdate(42L, "churn-BUY-maker", "BUY", "CANCELED", "CANCELED",
                 "0", "0", "0", "USDT");
 
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
-        assertNull(atomic("activeOrderId", Long.class).get());
+        assertEquals(99L, atomic("activeOrderId", Long.class).get());
+        verify(tradeService, times(1)).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), any(),
+                decimalEquals("7.0"), isNull(), anyString());
+        assertEquals(1, engine.getAccountingSnapshot().processedTradeCount());
     }
 
     @Test
@@ -575,8 +654,21 @@ class HighFrequencyVolumeChurnEngineTest {
 
     private void orderUpdate(long orderId, String clientOrderId, String side, String executionType,
                              String status, String qty, String price, String commission, String commissionAsset) {
-        ReflectionTestUtils.invokeMethod(engine, "onOrderUpdate", orderId, clientOrderId, side, executionType,
-                status, new BigDecimal(qty), new BigDecimal(price), new BigDecimal(commission), commissionAsset);
+        BigDecimal executedQuantity = new BigDecimal(qty);
+        BigDecimal executedPrice = new BigDecimal(price);
+        long tradeId = -1;
+        if ("TRADE".equals(executionType) && executedQuantity.signum() > 0) {
+            tradeId = testTradeId.incrementAndGet();
+            cumulativeQuantity.merge(orderId, executedQuantity, BigDecimal::add);
+            cumulativeQuote.merge(orderId, executedQuantity.multiply(executedPrice), BigDecimal::add);
+        }
+        UserDataStreamService.ExecutionUpdate update = new UserDataStreamService.ExecutionUpdate(
+                orderId, tradeId, clientOrderId, side, executionType, status,
+                executedQuantity, executedPrice,
+                cumulativeQuantity.getOrDefault(orderId, BigDecimal.ZERO),
+                cumulativeQuote.getOrDefault(orderId, BigDecimal.ZERO),
+                new BigDecimal(commission), commissionAsset);
+        ReflectionTestUtils.invokeMethod(engine, "onOrderUpdate", update);
     }
 
     private BigDecimal decimalEquals(String expected) {

@@ -79,7 +79,7 @@ binance:
     # 90 秒仍未成交时改用最多穿过买一 1 tick 的受限 IOC 卖单。
     max-holding-ms: 90000
     exit-ioc-max-slippage-ticks: 1
-    # 在尚未接入交易所实际 commission 字段前，保守估算 Maker 手续费。
+    # 仅用于下单前的风险估算；成交后由 executionReport/myTrades 的真实 commission 覆盖记账。
     assumed-maker-fee-bps: 10
     # Observation can be enabled for research; signal execution does not depend on it.
     collect-observations: false

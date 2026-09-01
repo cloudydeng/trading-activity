@@ -49,10 +49,14 @@ public class UserDataStreamService implements WebSocket.Listener {
 
     @FunctionalInterface
     public interface ExecutionCallback {
-        void onOrderUpdate(long orderId, String clientOrderId, String side, String executionType,
-                           String orderStatus, BigDecimal lastExecutedQty, BigDecimal lastExecutedPrice,
-                           BigDecimal commission, String commissionAsset);
+        void onOrderUpdate(ExecutionUpdate update);
     }
+
+    public record ExecutionUpdate(long orderId, long tradeId, String clientOrderId, String side,
+                                  String executionType, String orderStatus, BigDecimal lastExecutedQty,
+                                  BigDecimal lastExecutedPrice, BigDecimal cumulativeExecutedQty,
+                                  BigDecimal cumulativeQuoteQty, BigDecimal commission,
+                                  String commissionAsset) { }
 
     @FunctionalInterface
     public interface StreamLifecycleCallback {
@@ -158,9 +162,13 @@ public class UserDataStreamService implements WebSocket.Listener {
                 String currentExecutionType = node.get("x").asText();
                 String orderStatus = node.get("X").asText();
                 long orderId = node.get("i").asLong();
+                long tradeId = node.path("t").asLong(-1);
                 String clientOrderId = node.path("c").asText("");
                 BigDecimal lastFilledQty = new BigDecimal(node.get("l").asText());
                 BigDecimal lastFilledPrice = new BigDecimal(node.get("L").asText());
+                BigDecimal cumulativeFilledQty = new BigDecimal(node.path("z").asText(lastFilledQty.toPlainString()));
+                BigDecimal cumulativeQuoteQty = new BigDecimal(node.path("Z").asText(
+                        lastFilledQty.multiply(lastFilledPrice).toPlainString()));
                 BigDecimal commission = new BigDecimal(node.path("n").asText("0"));
                 String commissionAsset = node.path("N").asText("");
 
@@ -168,8 +176,9 @@ public class UserDataStreamService implements WebSocket.Listener {
                     log.info("【订单成交】{} {} | 数量: {} @ 价格: {}", symbol, side, lastFilledQty, lastFilledPrice);
                 }
                 if (executionCallback != null && properties.getStrategy().getSymbol().equalsIgnoreCase(symbol)) {
-                    executionCallback.onOrderUpdate(orderId, clientOrderId, side, currentExecutionType, orderStatus,
-                            lastFilledQty, lastFilledPrice, commission, commissionAsset);
+                    executionCallback.onOrderUpdate(new ExecutionUpdate(orderId, tradeId, clientOrderId, side,
+                            currentExecutionType, orderStatus, lastFilledQty, lastFilledPrice, cumulativeFilledQty,
+                            cumulativeQuoteQty, commission, commissionAsset));
                 }
             } else if ("eventStreamTerminated".equals(eventType)) {
                 markUnavailable(webSocket, "账户事件流已终止");

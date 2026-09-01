@@ -67,14 +67,15 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final Set<Long> knownOrderIds = ConcurrentHashMap.newKeySet();
     private final Set<Long> restReconciledOrderIds = ConcurrentHashMap.newKeySet();
     private final Set<String> pendingClientOrderIds = ConcurrentHashMap.newKeySet();
-    private final ConcurrentHashMap<Long, BigDecimal> accountedOrderQty = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<Long, BigDecimal> accountedOrderQuote = new ConcurrentHashMap<>();
+    private final TradeAccountingLedger accountingLedger = new TradeAccountingLedger();
+    private final ConcurrentHashMap<String, CommissionPrice> commissionPriceCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, Integer> orderReconcileFailures = new ConcurrentHashMap<>();
     private final AtomicLong orderPlacedTimestamp = new AtomicLong(0);
     private final AtomicLong nextOrderAttemptAt = new AtomicLong(0);
     private final AtomicLong clientOrderSequence = new AtomicLong(0);
     private final AtomicBoolean entryCancellationPending = new AtomicBoolean(false);
     private final AtomicBoolean exitIocPending = new AtomicBoolean(false);
+    private final AtomicBoolean exitSubmissionInFlight = new AtomicBoolean(false);
     private final AtomicBoolean marketConnectInProgress = new AtomicBoolean(false);
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
     private final AtomicBoolean acceptingMarketConnections = new AtomicBoolean(true);
@@ -547,22 +548,27 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     // Only move a stale sell toward the market. Never chase the ask upward
                     // and never cancel/recreate an order at the same price.
                     if (passivePrice.compareTo(currentPrice) >= 0) return;
-                    submitMakerOrder(symbol, "SELL", passivePrice, qty, activeId, ChurnStatus.SELLING);
+                    submitExitMakerOnce(symbol, passivePrice, qty, activeId);
                     return;
                 }
                 BigDecimal price = initialExitPrice(bestAsk, rule);
                 if (!isValidOrder(qty, price, rule)) { halt("止盈卖单低于交易所最小名义额"); return; }
-                submitMakerOrder(symbol, "SELL", price, qty, null, ChurnStatus.SELLING);
+                submitExitMakerOnce(symbol, price, qty, null);
             }
             case HALTED -> { }
         }
     }
 
-    private synchronized void onOrderUpdate(long orderId, String clientOrderId, String side, String executionType,
-                                            String orderStatus, BigDecimal lastFilledQty, BigDecimal lastFilledPrice,
-                                            BigDecimal commission, String commissionAsset) {
+    private synchronized void onOrderUpdate(UserDataStreamService.ExecutionUpdate update) {
+        long orderId = update.orderId();
+        String clientOrderId = update.clientOrderId();
+        String side = update.side();
+        String executionType = update.executionType();
+        String orderStatus = update.orderStatus();
         if (restReconciledOrderIds.contains(orderId)) {
-            if (isTerminal(orderStatus)) restReconciledOrderIds.remove(orderId);
+            // REST reconciliation already consumed every trade for this order. Keep the marker
+            // until its delayed expiry so duplicate/late execution reports cannot mutate
+            // inventory or submit a second exit order.
             return;
         }
         boolean replacingOldEvent = Long.valueOf(orderId).equals(replacingOrderId.get())
@@ -572,7 +578,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         boolean knownEvent = activeEvent || knownOrderIds.contains(orderId)
                 || (clientOrderId != null && pendingClientOrderIds.contains(clientOrderId));
         if (!knownEvent) {
-            if ("TRADE".equals(executionType) && lastFilledQty.signum() > 0) {
+            if ("TRADE".equals(executionType) && update.lastExecutedQty().signum() > 0) {
                 liveArmed.set(false);
                 halt("收到未关联订单的成交回报 " + orderId + "，需人工对账");
             }
@@ -582,36 +588,34 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (activeEvent && activeOrderId.get() == null) activeOrderId.set(orderId);
         var rule = ruleManager.getRule(properties.getStrategy().getSymbol());
         if (rule == null) { halt("未加载交易规则"); return; }
-        if ("TRADE".equals(executionType) && lastFilledQty.signum() > 0) {
-            accountedOrderQty.merge(orderId, lastFilledQty, BigDecimal::add);
-            accountedOrderQuote.merge(orderId, lastFilledQty.multiply(lastFilledPrice), BigDecimal::add);
-            totalVolumeUsdt.accumulateAndGet(lastFilledQty.multiply(lastFilledPrice), BigDecimal::add);
-            if ("BUY".equalsIgnoreCase(side)) {
-                filledEntryQuantity.accumulateAndGet(lastFilledQty, BigDecimal::add);
-                BigDecimal netQty = lastFilledQty;
-                if (baseAsset().equalsIgnoreCase(commissionAsset)) netQty = netQty.subtract(commission).max(BigDecimal.ZERO);
-                holdingInventory.accumulateAndGet(netQty, BigDecimal::add);
-                if (properties.getStrategy().isCollectObservations()) postFillOutcomeTracker.recordBuyFill(lastFilledPrice, activeEntrySignalReason.get(), activeEntryContext.get(), System.currentTimeMillis());
-            } else {
-                BigDecimal inventoryReduction = lastFilledQty;
-                if (baseAsset().equalsIgnoreCase(commissionAsset)) inventoryReduction = inventoryReduction.add(commission);
-                holdingInventory.accumulateAndGet(inventoryReduction, BigDecimal::subtract);
-                if (holdingInventory.get().signum() < 0) holdingInventory.set(BigDecimal.ZERO);
+        TradeAccountingLedger.AppliedTrade appliedTrade = null;
+        if ("TRADE".equals(executionType) && update.lastExecutedQty().signum() > 0) {
+            appliedTrade = applyExecutionTrade(update);
+        }
+        if (activeEvent && appliedTrade != null && appliedTrade.applied()
+                && "BUY".equalsIgnoreCase(side) && currentStatus.get() == ChurnStatus.BUYING
+                && "PARTIALLY_FILLED".equals(orderStatus)) {
+            if (canSubmitImmediateExit(rule)) {
+                cancelPartiallyFilledEntryAndExit(orderId, rule);
+                return;
             }
-            riskGuard.recordFill(side, lastFilledQty, lastFilledPrice, System.currentTimeMillis(), properties.getStrategy());
-            if (riskGuard.getEntryBlockReason() != null) log.warn("风险熔断已触发: {}", riskGuard.getEntryBlockReason());
+            statusReason.set("BUY 已部分成交 " + holdingInventory.get().toPlainString()
+                    + " " + baseAsset() + "，尚未达到最小可卖额，继续等待成交");
         }
         if (activeEvent && "BUY".equalsIgnoreCase(side) && currentStatus.get() == ChurnStatus.BUYING
                 && ("FILLED".equals(orderStatus) || "CANCELED".equals(orderStatus) || "EXPIRED".equals(orderStatus))) {
+            if (!reconcileTerminalEvent(orderId, side, update.cumulativeExecutedQty(), update.cumulativeQuoteQty(), rule)) return;
             clearActiveOrder();
             if (holdingInventory.get().compareTo(rule.stepSize()) >= 0) {
                 currentStatus.set(ChurnStatus.SELLING);
                 statusReason.set("持仓退出中：准备挂出 Maker 卖单");
+                submitImmediateExit(rule);
             }
             else { currentStatus.set(ChurnStatus.IDLE); resetEntryTarget(); }
         } else if (activeEvent && "SELL".equalsIgnoreCase(side) && currentStatus.get() == ChurnStatus.SELLING
                 && ("FILLED".equals(orderStatus) || "CANCELED".equals(orderStatus)
                 || "EXPIRED".equals(orderStatus) || "EXPIRED_IN_MATCH".equals(orderStatus))) {
+            if (!reconcileTerminalEvent(orderId, side, update.cumulativeExecutedQty(), update.cumulativeQuoteQty(), rule)) return;
             clearActiveOrder();
             if (holdingInventory.get().compareTo(rule.stepSize()) < 0) {
                 holdingInventory.set(BigDecimal.ZERO);
@@ -627,11 +631,203 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         if (isTerminal(orderStatus)) {
             knownOrderIds.remove(orderId);
-            accountedOrderQty.remove(orderId);
-            accountedOrderQuote.remove(orderId);
             orderReconcileFailures.remove(orderId);
             if (clientOrderId != null) pendingClientOrderIds.remove(clientOrderId);
         }
+    }
+
+    /** Compatibility entry point retained for focused unit tests and operational tooling. */
+    private void onOrderUpdate(long orderId, String clientOrderId, String side, String executionType,
+                               String orderStatus, BigDecimal lastFilledQty, BigDecimal lastFilledPrice,
+                               BigDecimal commission, String commissionAsset) {
+        BigDecimal cumulativeQuote = lastFilledQty.multiply(lastFilledPrice);
+        onOrderUpdate(new UserDataStreamService.ExecutionUpdate(orderId, -1, clientOrderId, side, executionType,
+                orderStatus, lastFilledQty, lastFilledPrice, lastFilledQty, cumulativeQuote,
+                commission, commissionAsset));
+    }
+
+    private TradeAccountingLedger.AppliedTrade applyExecutionTrade(UserDataStreamService.ExecutionUpdate update) {
+        BigDecimal quoteQuantity = update.lastExecutedQty().multiply(update.lastExecutedPrice());
+        return applyTrade(update.orderId(), update.tradeId(), update.side(), update.lastExecutedQty(),
+                update.lastExecutedPrice(), quoteQuantity, update.commission(), update.commissionAsset());
+    }
+
+    private TradeAccountingLedger.AppliedTrade applyTrade(long orderId, long tradeId, String side,
+                                                          BigDecimal quantity, BigDecimal price,
+                                                          BigDecimal quoteQuantity, BigDecimal commission,
+                                                          String commissionAsset) {
+        BigDecimal commissionQuote = commissionQuoteEquivalent(commission, commissionAsset, price);
+        TradeAccountingLedger.AppliedTrade trade = accountingLedger.record(orderId, tradeId, quantity, price,
+                quoteQuantity, commission, commissionAsset, commissionQuote);
+        if (!trade.applied()) return trade;
+
+        totalVolumeUsdt.set(accountingLedger.snapshot().totalVolumeQuote());
+        boolean baseCommission = baseAsset().equalsIgnoreCase(trade.commissionAsset());
+        BigDecimal inventoryQuantity = trade.quantity();
+        if (baseCommission) {
+            inventoryQuantity = "BUY".equalsIgnoreCase(side)
+                    ? inventoryQuantity.subtract(trade.commission()).max(BigDecimal.ZERO)
+                    : inventoryQuantity.add(trade.commission());
+        }
+        if ("BUY".equalsIgnoreCase(side)) {
+            filledEntryQuantity.accumulateAndGet(trade.quantity(), BigDecimal::add);
+            holdingInventory.accumulateAndGet(inventoryQuantity, BigDecimal::add);
+            if (properties.getStrategy().isCollectObservations()) {
+                postFillOutcomeTracker.recordBuyFill(price, activeEntrySignalReason.get(), activeEntryContext.get(),
+                        System.currentTimeMillis());
+            }
+        } else {
+            holdingInventory.accumulateAndGet(inventoryQuantity, BigDecimal::subtract);
+            if (holdingInventory.get().signum() < 0) holdingInventory.set(BigDecimal.ZERO);
+        }
+        BigDecimal cashCommissionQuote = baseCommission ? BigDecimal.ZERO : commissionQuote;
+        riskGuard.recordActualFill(side, inventoryQuantity, trade.quoteQuantity(), cashCommissionQuote,
+                System.currentTimeMillis(), properties.getStrategy());
+        if (riskGuard.getEntryBlockReason() != null) {
+            log.warn("风险熔断已触发: {}", riskGuard.getEntryBlockReason());
+        }
+        return trade;
+    }
+
+    private BigDecimal commissionQuoteEquivalent(BigDecimal commission, String commissionAsset, BigDecimal fillPrice) {
+        if (commission == null || commission.signum() <= 0) return BigDecimal.ZERO;
+        if (quoteAsset().equalsIgnoreCase(commissionAsset)) return commission;
+        if (baseAsset().equalsIgnoreCase(commissionAsset)) return commission.multiply(fillPrice);
+        if (commissionAsset == null || commissionAsset.isBlank()) return null;
+        String conversionSymbol = commissionAsset.toUpperCase() + quoteAsset();
+        long now = System.currentTimeMillis();
+        CommissionPrice cached = commissionPriceCache.get(conversionSymbol);
+        BigDecimal conversionPrice;
+        if (cached != null && now - cached.updatedAtMs() < 30_000) {
+            conversionPrice = cached.price();
+        } else {
+            conversionPrice = tradeService.getTickerPrice(conversionSymbol);
+            if (conversionPrice != null) commissionPriceCache.put(conversionSymbol, new CommissionPrice(conversionPrice, now));
+        }
+        return conversionPrice == null ? null : commission.multiply(conversionPrice);
+    }
+
+    private boolean reconcileTerminalEvent(long orderId, String side, BigDecimal expectedQuantity,
+                                           BigDecimal expectedQuote, SymbolRuleManager.SymbolRule rule) {
+        if (accountingLedger.accountedQuantity(orderId).compareTo(expectedQuantity) < 0
+                && !reconcileOrderTrades(orderId, side, expectedQuantity, expectedQuote)) return false;
+        if (!reconcileInventory(rule, "订单 " + orderId + " 终态")) return false;
+        markRestReconciled(orderId);
+        return true;
+    }
+
+    private boolean reconcileOrderTrades(long orderId, String fallbackSide, BigDecimal expectedQuantity,
+                                         BigDecimal expectedQuote) {
+        JsonNode trades = tradeService.getMyTrades(properties.getStrategy().getSymbol(), orderId);
+        if (trades == null || !trades.isArray()) {
+            liveArmed.set(false);
+            halt("无法读取订单 " + orderId + " 的真实成交与手续费明细");
+            return false;
+        }
+        for (JsonNode trade : trades) {
+            if (trade.path("orderId").asLong(orderId) != orderId) continue;
+            String side = trade.has("isBuyer") ? (trade.path("isBuyer").asBoolean() ? "BUY" : "SELL") : fallbackSide;
+            BigDecimal quantity = new BigDecimal(trade.path("qty").asText("0"));
+            BigDecimal price = new BigDecimal(trade.path("price").asText("0"));
+            BigDecimal quote = new BigDecimal(trade.path("quoteQty").asText(quantity.multiply(price).toPlainString()));
+            BigDecimal commission = new BigDecimal(trade.path("commission").asText("0"));
+            applyTrade(orderId, trade.path("id").asLong(-1), side, quantity, price, quote,
+                    commission, trade.path("commissionAsset").asText(""));
+        }
+        BigDecimal accountedQuantity = accountingLedger.accountedQuantity(orderId);
+        BigDecimal accountedQuote = accountingLedger.accountedQuote(orderId);
+        if (accountedQuantity.compareTo(expectedQuantity) != 0
+                || (expectedQuote != null && expectedQuote.signum() > 0 && accountedQuote.compareTo(expectedQuote) != 0)) {
+            liveArmed.set(false);
+            halt("订单 " + orderId + " 成交明细与订单累计值不一致，需人工对账");
+            return false;
+        }
+        return true;
+    }
+
+    private boolean reconcileInventory(SymbolRuleManager.SymbolRule rule, String context) {
+        BinanceOptimizedTradeService.AssetBalance balance = tradeService.getAssetBalance(baseAsset());
+        if (balance == null) {
+            BigDecimal free = tradeService.getFreeAssetBalance(baseAsset());
+            if (free != null) balance = new BinanceOptimizedTradeService.AssetBalance(baseAsset(), free,
+                    BigDecimal.ZERO, free);
+        }
+        if (balance == null) {
+            liveArmed.set(false);
+            halt(context + " 后无法读取账户总持仓");
+            return false;
+        }
+        BigDecimal expected = holdingInventory.get();
+        BigDecimal difference = balance.total().subtract(expected).abs();
+        holdingInventory.set(balance.total());
+        if (difference.compareTo(rule.stepSize()) >= 0) {
+            liveArmed.set(false);
+            halt(context + " 后库存不一致: local=" + expected.toPlainString()
+                    + ", exchange=" + balance.total().toPlainString());
+            return false;
+        }
+        return true;
+    }
+
+    private void cancelPartiallyFilledEntryAndExit(long orderId, SymbolRuleManager.SymbolRule rule) {
+        if (!entryCancellationPending.compareAndSet(false, true)) return;
+        JsonNode cancel = tradeService.cancelOrder(properties.getStrategy().getSymbol(), orderId);
+        JsonNode finalOrder = tradeService.getOrder(properties.getStrategy().getSymbol(), orderId);
+        if (finalOrder == null || !isTerminal(finalOrder.path("status").asText())) {
+            liveArmed.set(false);
+            halt("BUY 部分成交后无法确认剩余买单已撤销");
+            return;
+        }
+        if (cancel == null || cancel.has("code")) {
+            log.info("BUY 部分成交撤单响应未成功，但订单 {} 已处于终态 {}；按 REST 成交明细对账",
+                    orderId, finalOrder.path("status").asText());
+        }
+        BigDecimal executed = new BigDecimal(finalOrder.path("executedQty").asText("0"));
+        BigDecimal quote = new BigDecimal(finalOrder.path("cummulativeQuoteQty").asText("0"));
+        if (!reconcileOrderTrades(orderId, "BUY", executed, quote) || !reconcileInventory(rule, "BUY 部分成交撤单")) {
+            return;
+        }
+        markRestReconciled(orderId);
+        clearActiveOrder();
+        currentStatus.set(ChurnStatus.SELLING);
+        statusReason.set("BUY 部分成交已停止追单，立即退出已成交持仓");
+        submitImmediateExit(rule);
+    }
+
+    private void submitImmediateExit(SymbolRuleManager.SymbolRule rule) {
+        BigDecimal bestAsk = lastBestAsk.get();
+        if (bestAsk == null || bestAsk.signum() <= 0 || activeOrderId.get() != null
+                || currentStatus.get() != ChurnStatus.SELLING) return;
+        BigDecimal quantity = PrecisionUtil.roundDownToStep(holdingInventory.get(), rule.stepSize());
+        BigDecimal price = initialExitPrice(bestAsk, rule);
+        if (!isValidOrder(quantity, price, rule)) {
+            halt("已成交持仓不足以创建有效卖单");
+            return;
+        }
+        submitExitMakerOnce(properties.getStrategy().getSymbol(), price, quantity, null);
+    }
+
+    private boolean canSubmitImmediateExit(SymbolRuleManager.SymbolRule rule) {
+        BigDecimal bestAsk = lastBestAsk.get();
+        if (bestAsk == null || bestAsk.signum() <= 0) return false;
+        BigDecimal quantity = PrecisionUtil.roundDownToStep(holdingInventory.get(), rule.stepSize());
+        return isValidOrder(quantity, initialExitPrice(bestAsk, rule), rule);
+    }
+
+    private void submitExitMakerOnce(String symbol, BigDecimal price, BigDecimal quantity, Long cancelOrderId) {
+        if (cancelOrderId == null && activeOrderId.get() != null) return;
+        if (!exitSubmissionInFlight.compareAndSet(false, true)) return;
+        try {
+            submitMakerOrder(symbol, "SELL", price, quantity, cancelOrderId, ChurnStatus.SELLING);
+        } finally {
+            exitSubmissionInFlight.set(false);
+        }
+    }
+
+    private void markRestReconciled(long orderId) {
+        restReconciledOrderIds.add(orderId);
+        CompletableFuture.delayedExecutor(60, TimeUnit.SECONDS)
+                .execute(() -> restReconciledOrderIds.remove(orderId));
     }
 
     private ExitReason exitReason(BigDecimal bestBid, long nowMs) {
@@ -1027,13 +1223,21 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (order == null) { halt("撤单后无法确认订单最终状态"); return; }
         String status = order.path("status").asText();
         BigDecimal executedQty = new BigDecimal(order.path("executedQty").asText("0"));
-        if (executedQty.signum() > 0) {
-            halt("撤单回报遗漏了部分成交，需人工核对持仓");
-            return;
-        }
         if ("CANCELED".equals(status) || "EXPIRED".equals(status) || "EXPIRED_IN_MATCH".equals(status)) {
+            var rule = ruleManager.getRule(properties.getStrategy().getSymbol());
+            if (rule == null) { halt("撤单后交易规则不可用"); return; }
+            if (executedQty.signum() > 0) {
+                BigDecimal cumulativeQuote = new BigDecimal(order.path("cummulativeQuoteQty").asText("0"));
+                if (!reconcileOrderTrades(orderId, "BUY", executedQty, cumulativeQuote)
+                        || !reconcileInventory(rule, "撤销部分成交 BUY")) return;
+                markRestReconciled(orderId);
+            }
             clearActiveOrder();
-            if (holdingInventory.get().signum() > 0) currentStatus.set(ChurnStatus.SELLING);
+            if (holdingInventory.get().compareTo(rule.stepSize()) >= 0) {
+                currentStatus.set(ChurnStatus.SELLING);
+                statusReason.set("BUY 撤单包含成交，立即退出已成交持仓");
+                submitImmediateExit(rule);
+            }
             else { currentStatus.set(ChurnStatus.IDLE); resetEntryTarget(); }
             log.info("撤单 {} 已确认，状态机恢复为 {}", orderId, currentStatus.get());
         }
@@ -1077,45 +1281,21 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         String side = order.path("side").asText();
         BigDecimal executedQty = new BigDecimal(order.path("executedQty").asText("0"));
         BigDecimal cumulativeQuote = new BigDecimal(order.path("cummulativeQuoteQty").asText("0"));
-        BigDecimal alreadyQty = accountedOrderQty.getOrDefault(orderId, BigDecimal.ZERO);
-        BigDecimal alreadyQuote = accountedOrderQuote.getOrDefault(orderId, BigDecimal.ZERO);
-        BigDecimal missingQty = executedQty.subtract(alreadyQty).max(BigDecimal.ZERO);
-        BigDecimal missingQuote = cumulativeQuote.subtract(alreadyQuote).max(BigDecimal.ZERO);
-        if (missingQty.signum() > 0) {
-            BigDecimal fallbackPrice = missingQuote.signum() > 0
-                    ? missingQuote.divide(missingQty, java.math.MathContext.DECIMAL64)
-                    : new BigDecimal(order.path("price").asText("0"));
-            if (fallbackPrice.signum() <= 0) {
-                liveArmed.set(false);
-                halt("订单 " + orderId + " 成交但无法确定成交价格，需人工对账");
-                return;
-            }
-            totalVolumeUsdt.accumulateAndGet(missingQty.multiply(fallbackPrice), BigDecimal::add);
-            if ("BUY".equalsIgnoreCase(side)) {
-                filledEntryQuantity.accumulateAndGet(missingQty, BigDecimal::add);
-            }
-            riskGuard.recordFill(side, missingQty, fallbackPrice, System.currentTimeMillis(),
-                    properties.getStrategy());
-            log.warn("账户成交流遗漏订单 {} 的成交，REST 已补记: side={} qty={} price={}",
-                    orderId, side, missingQty, fallbackPrice);
-        }
-
-        BigDecimal freeBalance = tradeService.getFreeAssetBalance(baseAsset());
         SymbolRuleManager.SymbolRule rule = ruleManager.getRule(properties.getStrategy().getSymbol());
-        if (freeBalance == null || rule == null) {
+        if (rule == null) {
             liveArmed.set(false);
-            halt("订单终态已确认，但无法核对标的余额");
+            halt("订单终态已确认，但交易规则不可用");
             return;
         }
-        holdingInventory.set(freeBalance);
-        restReconciledOrderIds.add(orderId);
+        if (executedQty.signum() > 0 && !reconcileOrderTrades(orderId, side, executedQty, cumulativeQuote)) return;
+        if (!reconcileInventory(rule, "订单 " + orderId + " REST 对账")) return;
+        BigDecimal reconciledInventory = holdingInventory.get();
+        markRestReconciled(orderId);
         clearActiveOrder();
-        accountedOrderQty.remove(orderId);
-        accountedOrderQuote.remove(orderId);
         if ("BUY".equalsIgnoreCase(side)) {
-            if (freeBalance.compareTo(rule.stepSize()) >= 0) currentStatus.set(ChurnStatus.SELLING);
+            if (reconciledInventory.compareTo(rule.stepSize()) >= 0) currentStatus.set(ChurnStatus.SELLING);
             else { currentStatus.set(ChurnStatus.IDLE); resetEntryTarget(); }
-        } else if (freeBalance.compareTo(rule.stepSize()) < 0) {
+        } else if (reconciledInventory.compareTo(rule.stepSize()) < 0) {
             holdingInventory.set(BigDecimal.ZERO);
             if (isRunning.get()) roundTripsCompleted.incrementAndGet();
             currentStatus.set(ChurnStatus.IDLE);
@@ -1124,8 +1304,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         } else {
             currentStatus.set(ChurnStatus.SELLING);
         }
-        CompletableFuture.delayedExecutor(60, TimeUnit.SECONDS)
-                .execute(() -> restReconciledOrderIds.remove(orderId));
     }
 
     private void clearActiveOrder() {
@@ -1144,8 +1322,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         knownOrderIds.clear();
         pendingClientOrderIds.clear();
         restReconciledOrderIds.clear();
-        accountedOrderQty.clear();
-        accountedOrderQuote.clear();
         orderReconcileFailures.clear();
         replacingOrderId.set(null);
     }
@@ -1193,9 +1369,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private void halt(String reason) { isRunning.set(false); currentStatus.set(ChurnStatus.HALTED); statusReason.set(reason); log.error("引擎进入保护停机: {}", reason); }
     private BigDecimal applyJitter(BigDecimal qty) { double j = properties.getStrategy().getRandomSizeJitter(); return j <= 0 ? qty : qty.multiply(BigDecimal.valueOf(1 + ThreadLocalRandom.current().nextDouble(-j, j))); }
     private boolean calibrateHoldings() {
-        BigDecimal balance = tradeService.getFreeAssetBalance(baseAsset());
-        if (balance == null) return false;
-        holdingInventory.set(balance);
+        BinanceOptimizedTradeService.AssetBalance balance = tradeService.getAssetBalance(baseAsset());
+        if (balance == null) {
+            BigDecimal free = tradeService.getFreeAssetBalance(baseAsset());
+            if (free == null) return false;
+            balance = new BinanceOptimizedTradeService.AssetBalance(baseAsset(), free, BigDecimal.ZERO, free);
+        }
+        holdingInventory.set(balance.total());
         return true;
     }
     private String baseAsset() {
@@ -1205,12 +1385,20 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         return symbol;
     }
+    private String quoteAsset() {
+        String symbol = properties.getStrategy().getSymbol().toUpperCase();
+        for (String quote : new String[]{"FDUSD", "USDT", "USDC", "BUSD", "BTC", "ETH"}) {
+            if (symbol.endsWith(quote)) return quote;
+        }
+        return "USDT";
+    }
     public String getSymbol() { return properties.getStrategy().getSymbol(); }
     public int getUsedApiWeight() { return tradeService.getUsedWeight1m().get(); }
     public MarketSignalEvaluator.EntryDecision getLastEntryDecision() { return marketSignalEvaluator.getLastDecision(); }
     public PostFillOutcomeTracker.OutcomeSummary getBaselineOutcomes() { return postFillOutcomeTracker.getBaselineSummary(); }
     public PostFillOutcomeTracker.OutcomeSummary getQualifiedSignalOutcomes() { return postFillOutcomeTracker.getQualifiedSignalSummary(); }
     public TradingRiskGuard.RiskSnapshot getRiskSnapshot() { return riskGuard.snapshot(); }
+    public TradeAccountingLedger.AccountingSnapshot getAccountingSnapshot() { return accountingLedger.snapshot(); }
     public String getRiskBlockReason() { return riskGuard.getEntryBlockReason(); }
     public String getExecutionMode() { return properties.getStrategy().getExecutionMode(); }
     public boolean isAccountStreamReady() { return userDataStreamService.isReady(); }
@@ -1222,4 +1410,5 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     public record MarketDataSnapshot(BigDecimal bestBid, BigDecimal bestAsk, BigDecimal midPrice,
                                      long updatedAtMs, long lastFrameAtMs) { }
+    private record CommissionPrice(BigDecimal price, long updatedAtMs) { }
 }

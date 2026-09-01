@@ -29,21 +29,34 @@ public class TradingRiskGuard {
 
     public synchronized void recordFill(String side, BigDecimal quantity, BigDecimal price, long nowMs,
                                         BinanceProperties.Strategy config) {
-        rollDayIfNeeded();
         if (quantity == null || price == null || quantity.signum() <= 0 || price.signum() <= 0) return;
         BigDecimal notional = quantity.multiply(price);
         BigDecimal fee = notional.multiply(config.getAssumedMakerFeeBps()).divide(BigDecimal.valueOf(10_000), MC);
+        recordActualFill(side, quantity, notional, fee, nowMs, config);
+    }
+
+    /** Records exchange-reported economics instead of applying the configured fee estimate. */
+    public synchronized void recordActualFill(String side, BigDecimal inventoryQuantity, BigDecimal quoteNotional,
+                                              BigDecimal cashCommissionQuote, long nowMs,
+                                              BinanceProperties.Strategy config) {
+        rollDayIfNeeded();
+        if (inventoryQuantity == null || quoteNotional == null || inventoryQuantity.signum() <= 0
+                || quoteNotional.signum() <= 0) return;
+        BigDecimal fee = cashCommissionQuote == null ? BigDecimal.ZERO : cashCommissionQuote.max(BigDecimal.ZERO);
         estimatedFeesUsdt = estimatedFeesUsdt.add(fee);
-        markPrice = price;
+        BigDecimal effectivePrice = quoteNotional.divide(inventoryQuantity, MC);
+        markPrice = effectivePrice;
         if ("BUY".equalsIgnoreCase(side)) {
             if (positionQty.signum() == 0) positionOpenedAtMs = nowMs;
-            positionQty = positionQty.add(quantity);
-            positionCostUsdt = positionCostUsdt.add(notional).add(fee);
+            positionQty = positionQty.add(inventoryQuantity);
+            positionCostUsdt = positionCostUsdt.add(quoteNotional).add(fee);
         } else if ("SELL".equalsIgnoreCase(side) && positionQty.signum() > 0) {
-            BigDecimal closedQty = quantity.min(positionQty);
+            BigDecimal closedQty = inventoryQuantity.min(positionQty);
             BigDecimal averageCost = positionCostUsdt.divide(positionQty, MC);
             BigDecimal allocatedCost = averageCost.multiply(closedQty);
-            BigDecimal netProceeds = closedQty.multiply(price).subtract(fee);
+            BigDecimal proceedsShare = inventoryQuantity.compareTo(closedQty) == 0
+                    ? quoteNotional : quoteNotional.multiply(closedQty).divide(inventoryQuantity, MC);
+            BigDecimal netProceeds = proceedsShare.subtract(fee);
             realizedPnlUsdt = realizedPnlUsdt.add(netProceeds.subtract(allocatedCost));
             positionQty = positionQty.subtract(closedQty);
             positionCostUsdt = positionCostUsdt.subtract(allocatedCost);

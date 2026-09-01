@@ -21,19 +21,22 @@ class UserDataStreamServiceTest {
         UserDataStreamService service = new UserDataStreamService(
                 mock(BinanceOptimizedTradeService.class), properties, mock(BinanceSigner.class));
         AtomicReference<Update> update = new AtomicReference<>();
-        service.setExecutionCallback((orderId, clientOrderId, side, executionType, orderStatus,
-                                      qty, price, commission, commissionAsset) ->
-                update.set(new Update(orderId, clientOrderId, qty, commission, commissionAsset)));
+        service.setExecutionCallback(execution -> update.set(new Update(execution.orderId(),
+                execution.tradeId(), execution.clientOrderId(), execution.lastExecutedQty(),
+                execution.cumulativeExecutedQty(), execution.commission(), execution.commissionAsset())));
 
         String event = """
                 {"event":{"e":"executionReport","s":"ENSOUSDT","S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED",
-                "i":42,"c":"churn-BUY-1","l":"10","L":"0.60","n":"0.01","N":"ENSO"}}
+                "i":42,"t":7001,"c":"churn-BUY-1","l":"10","L":"0.60","z":"10","Z":"6.00",
+                "n":"0.01","N":"ENSO"}}
                 """;
         service.onText(mock(WebSocket.class), event, true);
 
         assertEquals(42, update.get().orderId());
+        assertEquals(7001, update.get().tradeId());
         assertEquals("churn-BUY-1", update.get().clientOrderId());
         assertEquals(new BigDecimal("10"), update.get().qty());
+        assertEquals(new BigDecimal("10"), update.get().cumulativeQty());
         assertEquals(new BigDecimal("0.01"), update.get().commission());
         assertEquals("ENSO", update.get().commissionAsset());
     }
@@ -45,9 +48,9 @@ class UserDataStreamServiceTest {
         UserDataStreamService service = new UserDataStreamService(
                 mock(BinanceOptimizedTradeService.class), properties, mock(BinanceSigner.class));
         AtomicReference<Update> update = new AtomicReference<>();
-        service.setExecutionCallback((orderId, clientOrderId, side, executionType, orderStatus,
-                                      qty, price, commission, commissionAsset) ->
-                update.set(new Update(orderId, clientOrderId, qty, commission, commissionAsset)));
+        service.setExecutionCallback(execution -> update.set(new Update(execution.orderId(),
+                execution.tradeId(), execution.clientOrderId(), execution.lastExecutedQty(),
+                execution.cumulativeExecutedQty(), execution.commission(), execution.commissionAsset())));
         WebSocket webSocket = mock(WebSocket.class);
 
         service.onText(webSocket,
@@ -62,6 +65,6 @@ class UserDataStreamServiceTest {
         assertEquals(90, update.get().orderId());
     }
 
-    private record Update(long orderId, String clientOrderId, BigDecimal qty,
-                          BigDecimal commission, String commissionAsset) { }
+    private record Update(long orderId, long tradeId, String clientOrderId, BigDecimal qty,
+                          BigDecimal cumulativeQty, BigDecimal commission, String commissionAsset) { }
 }

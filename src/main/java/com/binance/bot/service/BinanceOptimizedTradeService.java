@@ -230,25 +230,22 @@ public class BinanceOptimizedTradeService {
     }
 
     public BigDecimal getFreeAssetBalance(String asset) {
-        long timestamp = System.currentTimeMillis();
-        String queryString = "timestamp=" + timestamp;
-        String signature = signer.sign(queryString, properties.getApi().getSecretKey());
-        String uri = "/api/v3/account?" + queryString + "&signature=" + signature;
+        AssetBalance balance = getAssetBalance(asset);
+        return balance == null ? null : balance.free();
+    }
 
-        try {
-            String res = restClient.get().uri(uri).retrieve().body(String.class);
-            JsonNode root = objectMapper.readTree(res);
-            if (root.has("balances")) {
-                for (JsonNode b : root.get("balances")) {
-                    if (asset.equalsIgnoreCase(b.get("asset").asText())) {
-                        return new BigDecimal(b.get("free").asText());
-                    }
-                }
+    /** Free plus locked is the authoritative inventory while an exit order is resting. */
+    public AssetBalance getAssetBalance(String asset) {
+        JsonNode root = getAccountInfo();
+        if (root == null || !root.path("balances").isArray()) return null;
+        for (JsonNode balance : root.path("balances")) {
+            if (asset.equalsIgnoreCase(balance.path("asset").asText())) {
+                BigDecimal free = new BigDecimal(balance.path("free").asText("0"));
+                BigDecimal locked = new BigDecimal(balance.path("locked").asText("0"));
+                return new AssetBalance(asset.toUpperCase(), free, locked, free.add(locked));
             }
-        } catch (Exception e) {
-            log.error("查询账户余额失败", e);
         }
-        return null;
+        return new AssetBalance(asset.toUpperCase(), BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO);
     }
 
     /** Read the signed account snapshot used by the authenticated monitoring page. */
@@ -265,6 +262,30 @@ public class BinanceOptimizedTradeService {
         params.put("limit", String.valueOf(Math.max(1, Math.min(limit, 1000))));
         params.put("timestamp", String.valueOf(System.currentTimeMillis()));
         return getSignedJson("/api/v3/allOrders", params, "查询历史订单失败");
+    }
+
+    /** Authoritative fills, including trade id and actual commission, for one order. */
+    public JsonNode getMyTrades(String symbol, long orderId) {
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("symbol", symbol.toUpperCase());
+        params.put("orderId", String.valueOf(orderId));
+        params.put("limit", "1000");
+        params.put("timestamp", String.valueOf(System.currentTimeMillis()));
+        return getSignedJson("/api/v3/myTrades", params, "查询订单成交明细失败");
+    }
+
+    /** Public conversion price used only to value commissions charged in a third asset such as BNB. */
+    public BigDecimal getTickerPrice(String symbol) {
+        try {
+            String response = restClient.get().uri("/api/v3/ticker/price?symbol=" + symbol.toUpperCase())
+                    .retrieve().body(String.class);
+            JsonNode root = objectMapper.readTree(response);
+            BigDecimal price = new BigDecimal(root.path("price").asText("0"));
+            return price.signum() > 0 ? price : null;
+        } catch (Exception e) {
+            log.warn("查询手续费资产换算价格失败: symbol={}, {}", symbol, e.getMessage());
+            return null;
+        }
     }
 
     /** Returns null on an indeterminate API failure; callers must fail closed in that case. */
@@ -338,4 +359,6 @@ public class BinanceOptimizedTradeService {
             lastWeightUpdateMs.set(System.currentTimeMillis());
         }
     }
+
+    public record AssetBalance(String asset, BigDecimal free, BigDecimal locked, BigDecimal total) { }
 }

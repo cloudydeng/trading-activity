@@ -49,7 +49,8 @@ public class BotDashboardController {
                 Map.entry("entrySignal", engine.getLastEntryDecision()),
                 Map.entry("marketBaseline", engine.getBaselineOutcomes()),
                 Map.entry("qualifiedSignals", engine.getQualifiedSignalOutcomes()),
-                Map.entry("risk", engine.getRiskSnapshot())
+                Map.entry("risk", engine.getRiskSnapshot()),
+                Map.entry("accounting", engine.getAccountingSnapshot())
         );
     }
 
