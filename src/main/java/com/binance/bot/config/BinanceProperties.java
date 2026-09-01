@@ -20,6 +20,8 @@ public class BinanceProperties {
         private String baseUrl;
         private String wsMarketUrl;
         private String wsUserUrl;
+        /** Human-readable credential label; never contains key material. */
+        private String apiKeyAlias;
         private String apiKey;
         private String secretKey;
     }

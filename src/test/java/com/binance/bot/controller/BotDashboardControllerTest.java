@@ -34,6 +34,8 @@ class BotDashboardControllerTest {
         BinanceOptimizedTradeService tradeService = mock(BinanceOptimizedTradeService.class);
         when(engine.getSymbol()).thenReturn("ENSOUSDT");
         when(engine.getUsedApiWeight()).thenReturn(30);
+        BinanceProperties properties = new BinanceProperties();
+        properties.getApi().setApiKeyAlias("lee-sub-account-bot");
         ObjectMapper mapper = new ObjectMapper();
         when(tradeService.getAccountInfo()).thenReturn(mapper.readTree("""
                 {"accountType":"SPOT","canTrade":true,"updateTime":123,
@@ -45,12 +47,13 @@ class BotDashboardControllerTest {
                  {"orderId":2,"side":"BUY","type":"LIMIT_MAKER","status":"CANCELED","executedQty":"0","price":"0.8","time":20}]
                 """));
         when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
-        BotDashboardController controller = new BotDashboardController(engine, new BinanceProperties(), tradeService);
+        BotDashboardController controller = new BotDashboardController(engine, properties, tradeService);
 
         var response = controller.getAccountSnapshot();
 
         assertEquals(HttpStatus.OK, response.getStatusCode());
         BotDashboardController.AccountSnapshot body = (BotDashboardController.AccountSnapshot) response.getBody();
+        assertEquals("lee-sub-account-bot", body.apiKeyAlias());
         assertEquals(1, body.balances().size());
         assertEquals(1, body.filledOrders().size());
         assertEquals(0, body.openOrders().size());

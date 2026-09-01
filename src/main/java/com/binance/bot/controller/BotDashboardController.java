@@ -39,6 +39,7 @@ public class BotDashboardController {
                 Map.entry("executionMode", engine.getExecutionMode()),
                 Map.entry("liveArmed", engine.getLiveArmed().get()),
                 Map.entry("accountStreamReady", engine.isAccountStreamReady()),
+                Map.entry("apiKeyAlias", properties.getApi().getApiKeyAlias()),
                 Map.entry("minimumPaperObservations", engine.getMinimumPaperObservations()),
                 Map.entry("symbol", engine.getSymbol()),
                 Map.entry("totalVolumeUsdt", engine.getTotalVolumeUsdt().get()),
@@ -62,6 +63,7 @@ public class BotDashboardController {
         }
         return ResponseEntity.ok(new AccountSnapshot(
                 engine.getSymbol(),
+                properties.getApi().getApiKeyAlias(),
                 account.path("accountType").asText("SPOT"),
                 account.path("canTrade").asBoolean(false),
                 account.path("updateTime").asLong(0),
@@ -165,7 +167,8 @@ public class BotDashboardController {
     }
 
     public record LiquidationRequest(String password, String confirmation) { }
-    public record AccountSnapshot(String symbol, String accountType, boolean canTrade, long accountUpdateTimeMs,
+    public record AccountSnapshot(String symbol, String apiKeyAlias, String accountType,
+                                  boolean canTrade, long accountUpdateTimeMs,
                                   List<BalanceView> balances, List<OrderView> filledOrders,
                                   List<OrderView> openOrders, int usedApiWeight1m) { }
     public record BalanceView(String asset, String free, String locked, String total) { }
