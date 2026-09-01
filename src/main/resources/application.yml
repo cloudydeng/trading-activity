@@ -37,6 +37,10 @@ binance:
         alias: "${BINANCE_SECONDARY_API_KEY_ALIAS:}"
         api-key: "${BINANCE_SECONDARY_API_API_KEY:}"
         secret-key: "${BINANCE_SECONDARY_API_SECRET_KEY:}"
+      tertiary:
+        alias: "${BINANCE_TERTIARY_API_KEY_ALIAS:}"
+        api-key: "${BINANCE_TERTIARY_API_API_KEY:}"
+        secret-key: "${BINANCE_TERTIARY_API_SECRET_KEY:}"
   strategy:
     # OBSERVE: 只消费公开行情并记录虚拟入场结果，绝不发认证请求或订单。
     # LIVE requires both of the environment switches below; defaults never trade.

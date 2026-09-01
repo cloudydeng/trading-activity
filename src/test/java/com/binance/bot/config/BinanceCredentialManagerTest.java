@@ -23,12 +23,15 @@ class BinanceCredentialManagerTest {
         BinanceCredentialManager manager = new BinanceCredentialManager(properties, store);
 
         assertEquals("second-bot", manager.currentAlias());
+        assertEquals(3, manager.profileViews().size());
         assertEquals("second-key", manager.current().apiKey());
         String publicJson = new ObjectMapper().writeValueAsString(manager.profileViews());
         assertFalse(publicJson.contains("primary-key"));
         assertFalse(publicJson.contains("primary-secret"));
         assertFalse(publicJson.contains("second-key"));
         assertFalse(publicJson.contains("second-secret"));
+        assertFalse(publicJson.contains("third-key"));
+        assertFalse(publicJson.contains("third-secret"));
         assertFalse(manager.current().toString().contains("second-key"));
     }
 
@@ -52,6 +55,11 @@ class BinanceCredentialManagerTest {
         secondary.setApiKey("second-key");
         secondary.setSecretKey("second-secret");
         properties.getApi().getProfiles().put("secondary", secondary);
+        BinanceProperties.CredentialProfile tertiary = new BinanceProperties.CredentialProfile();
+        tertiary.setAlias("third-bot");
+        tertiary.setApiKey("third-key");
+        tertiary.setSecretKey("third-secret");
+        properties.getApi().getProfiles().put("tertiary", tertiary);
         return properties;
     }
 }
