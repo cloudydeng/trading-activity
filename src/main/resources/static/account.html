@@ -6,7 +6,7 @@
 <body><div class="head"><div><h1>账户与成交</h1><div id="updated" class="muted">正在加载…</div></div><p><a href="/dashboard.html">返回控制台</a> <button onclick="load()">立即刷新</button> <form method="post" action="/logout" style="display:inline"><button>退出登录</button></form></p></div>
 <div class="grid" id="summary"></div>
 <section><h2>非零余额</h2><table><thead><tr><th>资产</th><th>可用</th><th>冻结</th><th>合计</th></tr></thead><tbody id="balances"></tbody></table></section>
-<section><h2>已成交订单（最近 100 条订单中有成交的记录）</h2><table><thead><tr><th>时间</th><th>订单号</th><th>方向</th><th>类型</th><th>状态</th><th>价格</th><th>成交数量</th><th>成交额</th></tr></thead><tbody id="filled"></tbody></table></section>
+<section id="trades"><h2>已成交订单（最近 100 条订单中有成交的记录）</h2><p class="muted">一次闭环表示一笔买入仓位已经全部卖完；可在下表按时间核对对应的 BUY 与 SELL 成交。</p><table><thead><tr><th>时间</th><th>订单号</th><th>方向</th><th>类型</th><th>状态</th><th>价格</th><th>成交数量</th><th>成交额</th></tr></thead><tbody id="filled"></tbody></table></section>
 <section><h2>当前活动订单</h2><table><thead><tr><th>时间</th><th>订单号</th><th>方向</th><th>类型</th><th>状态</th><th>价格</th><th>原始数量</th><th>已成交</th></tr></thead><tbody id="open"></tbody></table></section>
 <script>
 const n=v=>v===null||v===undefined?'—':Number(v).toLocaleString('zh-CN',{maximumFractionDigits:8});
