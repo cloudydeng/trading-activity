@@ -74,13 +74,23 @@ public final class TradeAccountingLedger {
                 processedTrades.size());
     }
 
+    synchronized void reset() {
+        processedTrades.clear();
+        orderQuantity.clear();
+        orderQuote.clear();
+        commissionByAsset.clear();
+        unconvertedCommissionAssets.clear();
+        totalVolumeQuote = BigDecimal.ZERO;
+        totalCommissionQuote = BigDecimal.ZERO;
+    }
+
     private String normalizeAsset(String asset) {
         return asset == null || asset.isBlank() ? "UNKNOWN" : asset.toUpperCase();
     }
 
     record AppliedTrade(boolean applied, BigDecimal quantity, BigDecimal quoteQuantity,
                         BigDecimal commission, String commissionAsset, BigDecimal commissionQuoteEquivalent) {
-        private static AppliedTrade ignored() {
+        static AppliedTrade ignored() {
             return new AppliedTrade(false, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, "", BigDecimal.ZERO);
         }
     }

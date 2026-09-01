@@ -82,6 +82,12 @@ public class PostFillOutcomeTracker {
     public synchronized OutcomeSummary getBaselineSummary() { return summarize("MARKET_BASELINE"); }
     public synchronized OutcomeSummary getQualifiedSignalSummary() { return summarize("PAPER_CANDIDATE"); }
 
+    /** Prevents price observations from two symbols being combined after a hot switch. */
+    public synchronized void reset() {
+        active.clear();
+        completed.clear();
+    }
+
     private OutcomeSummary summarize(String entryType) {
         int activeCount = (int) active.stream().filter(o -> entryType == null || entryType.equals(o.entryType)).count();
         List<Outcome> outcomes = completed.stream().filter(o -> entryType == null || entryType.equals(o.entryType)).toList();

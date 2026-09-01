@@ -56,7 +56,7 @@ public class UserDataStreamService implements WebSocket.Listener {
                                   String executionType, String orderStatus, BigDecimal lastExecutedQty,
                                   BigDecimal lastExecutedPrice, BigDecimal cumulativeExecutedQty,
                                   BigDecimal cumulativeQuoteQty, BigDecimal commission,
-                                  String commissionAsset) { }
+                                  String commissionAsset, long tradeTimeMs) { }
 
     @FunctionalInterface
     public interface StreamLifecycleCallback {
@@ -171,6 +171,7 @@ public class UserDataStreamService implements WebSocket.Listener {
                         lastFilledQty.multiply(lastFilledPrice).toPlainString()));
                 BigDecimal commission = new BigDecimal(node.path("n").asText("0"));
                 String commissionAsset = node.path("N").asText("");
+                long tradeTimeMs = node.path("T").asLong(node.path("E").asLong(System.currentTimeMillis()));
 
                 if ("TRADE".equals(currentExecutionType) && lastFilledQty.compareTo(BigDecimal.ZERO) > 0) {
                     log.info("【订单成交】{} {} | 数量: {} @ 价格: {}", symbol, side, lastFilledQty, lastFilledPrice);
@@ -178,7 +179,7 @@ public class UserDataStreamService implements WebSocket.Listener {
                 if (executionCallback != null && properties.getStrategy().getSymbol().equalsIgnoreCase(symbol)) {
                     executionCallback.onOrderUpdate(new ExecutionUpdate(orderId, tradeId, clientOrderId, side,
                             currentExecutionType, orderStatus, lastFilledQty, lastFilledPrice, cumulativeFilledQty,
-                            cumulativeQuoteQty, commission, commissionAsset));
+                            cumulativeQuoteQty, commission, commissionAsset, tradeTimeMs));
                 }
             } else if ("eventStreamTerminated".equals(eventType)) {
                 markUnavailable(webSocket, "账户事件流已终止");

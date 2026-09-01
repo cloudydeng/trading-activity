@@ -13,6 +13,7 @@ import org.mockito.ArgumentCaptor;
 
 import java.math.BigDecimal;
 import java.net.http.WebSocket;
+import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
@@ -24,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -39,6 +41,7 @@ class HighFrequencyVolumeChurnEngineTest {
     private SymbolRuleManager ruleManager;
     private UserDataStreamService userDataStreamService;
     private MarketSignalEvaluator marketSignalEvaluator;
+    private DailyTradeStatsStore dailyStatsStore;
     private HighFrequencyVolumeChurnEngine engine;
     private final AtomicLong testTradeId = new AtomicLong(7_000);
     private final Map<Long, BigDecimal> cumulativeQuantity = new HashMap<>();
@@ -52,6 +55,7 @@ class HighFrequencyVolumeChurnEngineTest {
         properties = new BinanceProperties();
         properties.getApi().setApiKey("test-api-key");
         properties.getApi().setSecretKey("test-secret-key");
+        properties.getApi().setApiKeyAlias("test-bot");
         properties.getStrategy().setExecutionMode("LIVE");
         properties.getStrategy().setLiveTradingEnabled(true);
         properties.getStrategy().setSymbol("ENSOUSDT");
@@ -66,10 +70,18 @@ class HighFrequencyVolumeChurnEngineTest {
         ruleManager = mock(SymbolRuleManager.class);
         userDataStreamService = mock(UserDataStreamService.class);
         marketSignalEvaluator = mock(MarketSignalEvaluator.class);
+        dailyStatsStore = mock(DailyTradeStatsStore.class);
+        when(dailyStatsStore.recordTrade(anyString(), anyString(), anyLong(), anyLong(), anyString(),
+                any(), any(), any(), any(), any(), anyLong()))
+                .thenReturn(DailyTradeStatsStore.RecordResult.APPLIED);
+        when(dailyStatsStore.today(anyString(), anyString())).thenReturn(new DailyTradeStatsStore.DailyStatsSnapshot(
+                LocalDate.now(), "unlabeled", "ENSOUSDT", BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
+                BigDecimal.ZERO, 0, 0, true));
         when(ruleManager.getRule("ENSOUSDT")).thenReturn(new SymbolRuleManager.SymbolRule(
                 "ENSOUSDT", new BigDecimal("0.0001"), new BigDecimal("0.1"), new BigDecimal("5")));
         engine = new HighFrequencyVolumeChurnEngine(properties, tradeService, ruleManager, userDataStreamService,
-                marketSignalEvaluator, mock(PostFillOutcomeTracker.class), new TradingRiskGuard());
+                marketSignalEvaluator, mock(PostFillOutcomeTracker.class), new TradingRiskGuard(), dailyStatsStore);
     }
 
     @Test
@@ -96,6 +108,42 @@ class HighFrequencyVolumeChurnEngineTest {
         assertFalse(engine.getLiveArmed().get());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.HALTED, engine.getCurrentStatus().get());
         verify(tradeService).cancelOrder("ENSOUSDT", 77L);
+    }
+
+    @Test
+    void symbolSwitchRequiresStoppedFlatAccountAndPersistsSelection() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        when(ruleManager.refreshRule("BTCUSDT")).thenReturn(new SymbolRuleManager.SymbolRule(
+                "BTCUSDT", new BigDecimal("0.01"), new BigDecimal("0.00001"), new BigDecimal("5")));
+        when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
+        when(tradeService.getOpenOrders("BTCUSDT")).thenReturn(mapper.readTree("[]"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceOptimizedTradeService.AssetBalance(
+                "ENSO", BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
+        when(tradeService.getAssetBalance("BTC")).thenReturn(new BinanceOptimizedTradeService.AssetBalance(
+                "BTC", BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
+        ((java.util.concurrent.atomic.AtomicBoolean) ReflectionTestUtils.getField(engine, "acceptingMarketConnections"))
+                .set(false);
+
+        HighFrequencyVolumeChurnEngine.SymbolSwitchResult result = engine.switchSymbol("btcusdt");
+
+        assertTrue(result.accepted());
+        assertEquals("BTCUSDT", engine.getSymbol());
+        assertFalse(engine.getIsRunning().get());
+        assertFalse(engine.getLiveArmed().get());
+        verify(dailyStatsStore).saveActiveSymbol("BTCUSDT");
+        verify(tradeService).getOpenOrders("ENSOUSDT");
+        verify(tradeService).getOpenOrders("BTCUSDT");
+    }
+
+    @Test
+    void symbolSwitchIsRejectedBeforeExchangeCallsWhileEngineRuns() {
+        engine.getIsRunning().set(true);
+
+        HighFrequencyVolumeChurnEngine.SymbolSwitchResult result = engine.switchSymbol("BTCUSDT");
+
+        assertFalse(result.accepted());
+        assertEquals("ENSOUSDT", engine.getSymbol());
+        verify(tradeService, never()).getOpenOrders(anyString());
     }
 
     @Test
@@ -150,7 +198,7 @@ class HighFrequencyVolumeChurnEngineTest {
         UserDataStreamService.ExecutionUpdate fill = new UserDataStreamService.ExecutionUpdate(
                 42L, 7001L, "churn-BUY-1", "BUY", "TRADE", "FILLED",
                 new BigDecimal("10"), new BigDecimal("0.60"), new BigDecimal("10"),
-                new BigDecimal("6.00"), new BigDecimal("0.006"), "USDT");
+                new BigDecimal("6.00"), new BigDecimal("0.006"), "USDT", System.currentTimeMillis());
 
         ReflectionTestUtils.invokeMethod(engine, "onOrderUpdate", fill);
         ReflectionTestUtils.invokeMethod(engine, "onOrderUpdate", fill);
@@ -580,7 +628,7 @@ class HighFrequencyVolumeChurnEngineTest {
         UserDataStreamService.ExecutionUpdate partialFill = new UserDataStreamService.ExecutionUpdate(
                 42L, 7001L, "churn-BUY-maker", "BUY", "TRADE", "PARTIALLY_FILLED",
                 new BigDecimal("7.0"), new BigDecimal("0.862"), new BigDecimal("7.0"),
-                new BigDecimal("6.034"), BigDecimal.ZERO, "USDT");
+                new BigDecimal("6.034"), BigDecimal.ZERO, "USDT", System.currentTimeMillis());
         ReflectionTestUtils.invokeMethod(engine, "onOrderUpdate", partialFill);
         ReflectionTestUtils.invokeMethod(engine, "onOrderUpdate", partialFill);
         orderUpdate(42L, "churn-BUY-maker", "BUY", "CANCELED", "CANCELED",
@@ -667,7 +715,7 @@ class HighFrequencyVolumeChurnEngineTest {
                 executedQuantity, executedPrice,
                 cumulativeQuantity.getOrDefault(orderId, BigDecimal.ZERO),
                 cumulativeQuote.getOrDefault(orderId, BigDecimal.ZERO),
-                new BigDecimal(commission), commissionAsset);
+                new BigDecimal(commission), commissionAsset, System.currentTimeMillis());
         ReflectionTestUtils.invokeMethod(engine, "onOrderUpdate", update);
     }
 

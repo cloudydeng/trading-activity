@@ -19,6 +19,8 @@ spring:
       enabled: true
 
 binance:
+  storage:
+    daily-stats-db: "${BOT_DAILY_STATS_DB:data/daily-stats.db}"
   security:
     admin-token: "${BOT_ADMIN_TOKEN:}"
     admin-password: "${BOT_ADMIN_PASSWORD:}"
@@ -34,7 +36,7 @@ binance:
     # LIVE requires both of the environment switches below; defaults never trade.
     execution-mode: "${BINANCE_STRATEGY_EXECUTION_MODE:OBSERVE}"
     live-trading-enabled: "${BINANCE_LIVE_TRADING_ENABLED:false}"
-    symbol: "ENSOUSDT"
+    symbol: "${BINANCE_STRATEGY_SYMBOL:ENSOUSDT}"
     # 观察及未来模拟的名义单笔金额；ENSOUSDT 的 Binance 最小名义额为 5 USDT。
     order-amount-usdt: 11.0
     max-live-order-notional-usdt: 11.0

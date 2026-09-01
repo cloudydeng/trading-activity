@@ -50,8 +50,15 @@ public class BotDashboardController {
                 Map.entry("marketBaseline", engine.getBaselineOutcomes()),
                 Map.entry("qualifiedSignals", engine.getQualifiedSignalOutcomes()),
                 Map.entry("risk", engine.getRiskSnapshot()),
-                Map.entry("accounting", engine.getAccountingSnapshot())
+                Map.entry("accounting", engine.getAccountingSnapshot()),
+                Map.entry("dailyStats", engine.getDailyStatsSnapshot())
         );
+    }
+
+    @GetMapping("/stats/daily")
+    public List<com.binance.bot.strategy.DailyTradeStatsStore.DailyStatsSnapshot> getDailyStats(
+            @RequestParam(defaultValue = "30") int limit) {
+        return engine.getRecentDailyStats(limit);
     }
 
     @GetMapping("/account")
@@ -150,6 +157,13 @@ public class BotDashboardController {
                 : ResponseEntity.status(409).body("LIVE 已解除，但订单或持仓仍需人工核对");
     }
 
+    @PostMapping("/symbol")
+    public ResponseEntity<HighFrequencyVolumeChurnEngine.SymbolSwitchResult> switchSymbol(
+            @RequestBody SymbolSwitchRequest request) {
+        HighFrequencyVolumeChurnEngine.SymbolSwitchResult result = engine.switchSymbol(request.symbol());
+        return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
+    }
+
     @PostMapping("/liquidate")
     public ResponseEntity<HighFrequencyVolumeChurnEngine.LiquidationResult> liquidate(
             @RequestBody LiquidationRequest request) {
@@ -168,6 +182,7 @@ public class BotDashboardController {
     }
 
     public record LiquidationRequest(String password, String confirmation) { }
+    public record SymbolSwitchRequest(String symbol) { }
     public record AccountSnapshot(String symbol, String apiKeyAlias, String accountType,
                                   boolean canTrade, long accountUpdateTimeMs,
                                   List<BalanceView> balances, List<OrderView> filledOrders,

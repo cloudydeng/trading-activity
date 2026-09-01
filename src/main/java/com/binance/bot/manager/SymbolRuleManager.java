@@ -41,10 +41,16 @@ public class SymbolRuleManager {
     }
 
     public void refreshRules() {
+        refreshRule(properties.getStrategy().getSymbol());
+    }
+
+    /** Loads and validates one exact spot symbol. Returns null on any exchange or validation failure. */
+    public SymbolRule refreshRule(String requestedSymbol) {
         try {
-            log.info("从 Binance 获取交易对精度规则: {}", properties.getStrategy().getSymbol());
+            String requested = requestedSymbol.toUpperCase();
+            log.info("从 Binance 获取交易对精度规则: {}", requested);
             String response = restClient.get()
-                    .uri("/api/v3/exchangeInfo?symbol=" + properties.getStrategy().getSymbol().toUpperCase())
+                    .uri("/api/v3/exchangeInfo?symbol=" + requested)
                     .retrieve()
                     .body(String.class);
 
@@ -52,6 +58,11 @@ public class SymbolRuleManager {
             if (root != null && root.has("symbols")) {
                 for (JsonNode s : root.get("symbols")) {
                     String symbol = s.get("symbol").asText();
+                    if (!requested.equalsIgnoreCase(symbol)
+                            || !"TRADING".equalsIgnoreCase(s.path("status").asText())
+                            || (s.has("isSpotTradingAllowed") && !s.path("isSpotTradingAllowed").asBoolean())) {
+                        continue;
+                    }
                     BigDecimal tickSize = new BigDecimal("0.0001");
                     BigDecimal stepSize = new BigDecimal("0.1");
                     BigDecimal minNotional = new BigDecimal("5.0");
@@ -71,11 +82,13 @@ public class SymbolRuleManager {
                     SymbolRule rule = new SymbolRule(symbol, tickSize, stepSize, minNotional);
                     symbolRules.put(symbol, rule);
                     log.info("加载交易规则成功: {}", rule);
+                    return rule;
                 }
             }
         } catch (Exception e) {
-            log.error("加载交易对规则失败", e);
+            log.error("加载交易对规则失败: {}", requestedSymbol, e);
         }
+        return null;
     }
 
     public SymbolRule getRule(String symbol) {

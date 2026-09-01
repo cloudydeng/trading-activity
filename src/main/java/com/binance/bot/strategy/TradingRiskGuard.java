@@ -103,6 +103,30 @@ public class TradingRiskGuard {
     public void trip(String reason) { entryBlockReason.compareAndSet(null, reason); }
     public String getEntryBlockReason() { return entryBlockReason.get(); }
 
+    /** Safe only after exchange reconciliation has proved the previous symbol is flat. */
+    public synchronized void resetForFlatSymbol() {
+        positionQty = BigDecimal.ZERO;
+        positionCostUsdt = BigDecimal.ZERO;
+        realizedPnlUsdt = BigDecimal.ZERO;
+        estimatedFeesUsdt = BigDecimal.ZERO;
+        markPrice = null;
+        peakNetPnlUsdt = BigDecimal.ZERO;
+        positionOpenedAtMs = -1;
+        ledgerDate = LocalDate.now(ZoneOffset.UTC);
+        entryBlockReason.set(null);
+    }
+
+    /** Restores today's durable realized result while intentionally refusing to reconstruct inventory. */
+    public synchronized void restoreFlatDaily(BigDecimal realizedNetPnl, BigDecimal actualFees, LocalDate date,
+                                              BinanceProperties.Strategy config) {
+        resetForFlatSymbol();
+        ledgerDate = date == null ? LocalDate.now(ZoneOffset.UTC) : date;
+        realizedPnlUsdt = realizedNetPnl == null ? BigDecimal.ZERO : realizedNetPnl;
+        estimatedFeesUsdt = actualFees == null ? BigDecimal.ZERO : actualFees.max(BigDecimal.ZERO);
+        peakNetPnlUsdt = realizedPnlUsdt.max(BigDecimal.ZERO);
+        evaluate(System.currentTimeMillis(), config);
+    }
+
     private void evaluate(long nowMs, BinanceProperties.Strategy config) {
         BigDecimal netPnl = realizedPnlUsdt.add(unrealizedPnl());
         peakNetPnlUsdt = peakNetPnlUsdt.max(netPnl);

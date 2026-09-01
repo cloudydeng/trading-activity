@@ -14,6 +14,7 @@ public class BinanceProperties {
     private Api api = new Api();
     private Strategy strategy = new Strategy();
     private Security security = new Security();
+    private Storage storage = new Storage();
 
     @Data
     public static class Api {
@@ -100,5 +101,11 @@ public class BinanceProperties {
         private String adminToken;
         /** Browser login secret; injected only through BOT_ADMIN_PASSWORD. */
         private String adminPassword;
+    }
+
+    @Data
+    public static class Storage {
+        /** One compact SQLite file containing daily aggregates and trade-id deduplication state. */
+        private String dailyStatsDb = "data/daily-stats.db";
     }
 }
