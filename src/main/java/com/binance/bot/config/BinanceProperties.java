@@ -77,17 +77,15 @@ public class BinanceProperties {
         private BigDecimal maxDailyRealizedLossUsdt = new BigDecimal("5");
         private BigDecimal maxDailyDrawdownUsdt = new BigDecimal("8");
         private long maxInventoryAgeMs = 60_000;
-        /** Signal-driven exit defaults: target must cover both estimated maker fees. */
-        private double takeProfitBps = 5;
-        private double stopLossBps = 80;
+        /** Desired net profit after the estimated exit commission has been deducted. */
+        private double takeProfitBps = 10;
+        private double stopLossBps = 30;
         /** Keep the original fee-aware maker target untouched for this recovery window. */
-        private long exitRepriceAfterMs = 60_000;
+        private long exitRepriceAfterMs = 15_000;
         /** Once recovery time expires, only lower a passive sell at this cadence. */
         private long exitRepriceIntervalMs = 5_000;
-        /** Final time cap before a price-bounded IOC reduction is attempted. */
-        private long maxHoldingMs = 90_000;
-        /** IOC sell may cross this many ticks below the observed best bid. */
-        private int exitIocMaxSlippageTicks = 1;
+        /** Time cap after which no new cycle is allowed once the current position is flat. */
+        private long maxHoldingMs = 60_000;
         /** A pessimistic fee estimate, until actual commission events are accounted for. */
         private BigDecimal assumedMakerFeeBps = new BigDecimal("10");
         /** Unconditional OBSERVE-only market baseline cadence; kept separate from qualified signal samples. */

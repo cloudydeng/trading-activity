@@ -77,8 +77,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicLong nextOrderAttemptAt = new AtomicLong(0);
     private final AtomicLong clientOrderSequence = new AtomicLong(0);
     private final AtomicBoolean entryCancellationPending = new AtomicBoolean(false);
-    private final AtomicBoolean exitIocPending = new AtomicBoolean(false);
     private final AtomicBoolean exitSubmissionInFlight = new AtomicBoolean(false);
+    /** A holding-time breach disables new entries after the current inventory is safely flattened. */
+    private final AtomicBoolean stopAfterFlat = new AtomicBoolean(false);
     private final AtomicBoolean marketConnectInProgress = new AtomicBoolean(false);
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
     private final AtomicBoolean acceptingMarketConnections = new AtomicBoolean(true);
@@ -294,6 +295,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return false;
         }
         clearTrackedOrders();
+        stopAfterFlat.set(false);
         isRunning.set(true);
         currentStatus.set(ChurnStatus.IDLE);
         statusReason.set("运行中，等待入场信号");
@@ -305,6 +307,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     public synchronized boolean stopTrading() {
         isRunning.set(false);
+        stopAfterFlat.set(false);
         Long orderId = activeOrderId.get();
         if (properties.getStrategy().isObserveMode()) {
             clearActiveOrder();
@@ -543,7 +546,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 submitMakerOrder(symbol, "BUY", price, qty, orderId, ChurnStatus.BUYING);
             }
             case SELLING -> {
-                ExitReason exitReason = exitReason(bestBid, now);
+                ExitReason exitReason = exitReason(bestBid, now, rule);
                 BigDecimal qty = PrecisionUtil.roundDownToStep(holdingInventory.get(), rule.stepSize());
                 if (qty.compareTo(rule.stepSize()) < 0) { halt("持仓不足以创建有效卖单"); return; }
                 if (exitReason == ExitReason.STOP_LOSS) {
@@ -551,8 +554,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     return;
                 }
                 if (exitReason == ExitReason.MAX_HOLDING) {
-                    if (!exitIocPending.get()) cappedIocExit(symbol, qty, bestBid, rule);
-                    return;
+                    if (stopAfterFlat.compareAndSet(false, true)) {
+                        statusReason.set("超过最长持仓：保持手续费后目标 Maker，平仓后自动停止");
+                        log.warn("达到最长持仓，不再 IOC 追价；保持目标 Maker，平仓后自动停止");
+                    }
                 }
                 var risk = riskGuard.snapshot();
                 long holdingAgeMs = risk.positionOpenedAtMs() > 0 ? now - risk.positionOpenedAtMs() : 0;
@@ -636,11 +641,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             if (!reconcileTerminalEvent(orderId, side, update.cumulativeExecutedQty(), update.cumulativeQuoteQty(), rule)) return;
             clearActiveOrder();
             if (holdingInventory.get().compareTo(rule.stepSize()) < 0) {
-                holdingInventory.set(BigDecimal.ZERO);
-                syncDailyCounters();
-                currentStatus.set(ChurnStatus.IDLE);
-                statusReason.set(isRunning.get() ? "运行中，等待入场信号" : "人工授权市价清仓已完成");
-                resetEntryTarget();
+                completeFlatExit(false);
             } else {
                 // A partial fill leaves one position and no active order; the next market tick
                 // routes it through the same target/stop/time exit policy.
@@ -864,11 +865,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 .execute(() -> restReconciledOrderIds.remove(orderId));
     }
 
-    private ExitReason exitReason(BigDecimal bestBid, long nowMs) {
+    private ExitReason exitReason(BigDecimal bestBid, long nowMs, SymbolRuleManager.SymbolRule rule) {
         var risk = riskGuard.snapshot();
         if (risk.positionQty() == null || risk.positionQty().signum() <= 0 || risk.positionCostUsdt() == null) return ExitReason.NONE;
         BigDecimal cost = risk.positionCostUsdt().divide(risk.positionQty(), java.math.MathContext.DECIMAL64);
-        BigDecimal takeProfit = cost.multiply(BigDecimal.ONE.add(BigDecimal.valueOf(properties.getStrategy().getTakeProfitBps()).movePointLeft(4)));
+        BigDecimal takeProfit = feeAwareTargetPrice(rule);
         BigDecimal stopLoss = cost.multiply(BigDecimal.ONE.subtract(BigDecimal.valueOf(properties.getStrategy().getStopLossBps()).movePointLeft(4)));
         boolean timedOut = risk.positionOpenedAtMs() > 0 && nowMs - risk.positionOpenedAtMs() >= properties.getStrategy().getMaxHoldingMs();
         if (bestBid.compareTo(stopLoss) <= 0) return ExitReason.STOP_LOSS;
@@ -877,19 +878,35 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return ExitReason.NONE;
     }
     private BigDecimal initialExitPrice(BigDecimal ask, SymbolRuleManager.SymbolRule rule) {
-        var risk = riskGuard.snapshot();
-        BigDecimal cost = risk.positionCostUsdt().divide(risk.positionQty(), java.math.MathContext.DECIMAL64);
-        BigDecimal target = cost.multiply(BigDecimal.ONE.add(BigDecimal.valueOf(properties.getStrategy().getTakeProfitBps()).movePointLeft(4)));
-        // Rest at the fee-aware target immediately. If the market is already above it,
-        // use best ask so LIMIT_MAKER cannot cross the current bid. Round upward so tick
-        // normalization never erodes the configured minimum exit margin.
-        return PrecisionUtil.roundUpToStep(ask.max(target), rule.tickSize());
+        BigDecimal target = feeAwareTargetPrice(rule);
+        BigDecimal configuredAsk = ask.add(rule.tickSize().multiply(BigDecimal.valueOf(
+                Math.max(0, properties.getStrategy().getAskDepthOffsetTicks()))));
+        return PrecisionUtil.roundUpToStep(configuredAsk.max(target), rule.tickSize());
     }
 
     private BigDecimal passiveExitPrice(BigDecimal bestBid, BigDecimal bestAsk,
                                         SymbolRuleManager.SymbolRule rule) {
+        BigDecimal target = feeAwareTargetPrice(rule);
         BigDecimal minimumPostOnly = bestBid.add(rule.tickSize());
-        return PrecisionUtil.roundUpToStep(bestAsk.max(minimumPostOnly), rule.tickSize());
+        return PrecisionUtil.roundUpToStep(target.max(bestAsk).max(minimumPostOnly), rule.tickSize());
+    }
+
+    private BigDecimal feeAwareTargetPrice(SymbolRuleManager.SymbolRule rule) {
+        var risk = riskGuard.snapshot();
+        if (risk.positionQty() == null || risk.positionQty().signum() <= 0
+                || risk.positionCostUsdt() == null || risk.positionCostUsdt().signum() <= 0) {
+            throw new IllegalStateException("无法在空仓状态计算退出目标价");
+        }
+        BigDecimal unitCost = risk.positionCostUsdt().divide(
+                risk.positionQty(), java.math.MathContext.DECIMAL64);
+        BigDecimal desiredNetRate = BigDecimal.valueOf(properties.getStrategy().getTakeProfitBps())
+                .movePointLeft(4);
+        BigDecimal estimatedExitFeeRate = properties.getStrategy().getAssumedMakerFeeBps().movePointLeft(4);
+        BigDecimal feeDenominator = BigDecimal.ONE.subtract(estimatedExitFeeRate);
+        if (feeDenominator.signum() <= 0) throw new IllegalStateException("预计卖出费率配置无效");
+        BigDecimal target = unitCost.multiply(BigDecimal.ONE.add(desiredNetRate))
+                .divide(feeDenominator, java.math.MathContext.DECIMAL64);
+        return PrecisionUtil.roundUpToStep(target, rule.tickSize());
     }
 
     private BigDecimal buyQuantity(BigDecimal bid, SymbolRuleManager.SymbolRule rule) {
@@ -1178,65 +1195,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
     }
 
-    private void cappedIocExit(String symbol, BigDecimal requestedQty, BigDecimal bestBid,
-                               SymbolRuleManager.SymbolRule rule) {
-        if (!exitIocPending.compareAndSet(false, true)) return;
-        Long makerOrderId = activeOrderId.get();
-        if (makerOrderId != null) {
-            JsonNode cancel = tradeService.cancelOrder(symbol, makerOrderId);
-            JsonNode finalOrder = tradeService.getOrder(symbol, makerOrderId);
-            if (finalOrder == null || !isTerminal(finalOrder.path("status").asText())) {
-                exitIocPending.set(false);
-                liveArmed.set(false);
-                halt("受限 IOC 退出前无法确认原卖单已撤销");
-                return;
-            }
-            if (cancel == null || cancel.has("code")) {
-                log.info("IOC 退出撤单响应未成功，但订单 {} 已处于终态 {}；先按 REST 对账",
-                        makerOrderId, finalOrder.path("status").asText());
-            }
-            reconcileTrackedOrder(makerOrderId);
-            // reconcileTrackedOrder clears all active-order flags. This exit flow is
-            // still in progress and must remain single-flight while the IOC is sent.
-            exitIocPending.set(true);
-        }
-        BigDecimal freeBalance = tradeService.getFreeAssetBalance(baseAsset());
-        if (freeBalance == null) {
-            exitIocPending.set(false);
-            liveArmed.set(false);
-            halt("受限 IOC 退出前无法确认可卖余额");
-            return;
-        }
-        BigDecimal qty = PrecisionUtil.roundDownToStep(freeBalance.min(requestedQty), rule.stepSize());
-        if (qty.compareTo(rule.stepSize()) < 0) {
-            exitIocPending.set(false);
-            if (holdingInventory.get().signum() == 0) return;
-            halt("受限 IOC 退出余额不足，需人工核对");
-            return;
-        }
-        BigDecimal limitPrice = PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(
-                BigDecimal.valueOf(Math.max(0, properties.getStrategy().getExitIocMaxSlippageTicks())))), rule.tickSize());
-        String clientOrderId = nextClientOrderId("SELLI");
-        pendingClientOrderIds.add(clientOrderId);
-        activeClientOrderId.set(clientOrderId);
-        JsonNode response = tradeService.placeLimitIocSell(symbol, qty, limitPrice, clientOrderId);
-        if (response != null && response.has("orderId")) {
-            trackOrder(response.get("orderId").asLong(), clientOrderId, ChurnStatus.SELLING);
-            activeOrderPrice.set(limitPrice);
-            statusReason.set("持仓受限 IOC 退出中 @ " + limitPrice.toPlainString());
-            log.warn("达到最长持仓，已提交受限 IOC 卖单: qty={} limitPrice={}", qty, limitPrice);
-        } else if (response != null && response.has("code")) {
-            pendingClientOrderIds.remove(clientOrderId);
-            activeClientOrderId.compareAndSet(clientOrderId, null);
-            exitIocPending.set(false);
-            nextOrderAttemptAt.set(System.currentTimeMillis() + 1_000);
-            log.warn("受限 IOC 卖单被交易所拒绝，已退避 1 秒: code={}, msg={}",
-                    response.path("code").asText("unknown"), response.path("msg").asText("unknown"));
-        } else {
-            reconcileAmbiguousSubmission(clientOrderId, ChurnStatus.SELLING, "受限 IOC 卖单结果未知");
-        }
-    }
-
     private void cancelActiveEntryOrder(String reason) {
         Long orderId = activeOrderId.get();
         if (orderId == null || !entryCancellationPending.compareAndSet(false, true)) return;
@@ -1330,13 +1288,25 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             if (reconciledInventory.compareTo(rule.stepSize()) >= 0) currentStatus.set(ChurnStatus.SELLING);
             else { currentStatus.set(ChurnStatus.IDLE); resetEntryTarget(); }
         } else if (reconciledInventory.compareTo(rule.stepSize()) < 0) {
-            holdingInventory.set(BigDecimal.ZERO);
-            syncDailyCounters();
-            currentStatus.set(ChurnStatus.IDLE);
-            if (!isRunning.get()) statusReason.set("人工授权市价清仓已完成（REST 对账）");
-            resetEntryTarget();
+            completeFlatExit(true);
         } else {
             currentStatus.set(ChurnStatus.SELLING);
+        }
+    }
+
+    private void completeFlatExit(boolean restReconciled) {
+        holdingInventory.set(BigDecimal.ZERO);
+        syncDailyCounters();
+        currentStatus.set(ChurnStatus.IDLE);
+        resetEntryTarget();
+        if (stopAfterFlat.getAndSet(false)) {
+            isRunning.set(false);
+            liveArmed.set(false);
+            statusReason.set("最长持仓退出已完成，策略已自动停止并解除 LIVE");
+            log.warn("持仓已归零；最长持仓保护已停止策略并解除 LIVE");
+        } else {
+            statusReason.set(isRunning.get() ? "运行中，等待入场信号"
+                    : "人工授权市价清仓已完成" + (restReconciled ? "（REST 对账）" : ""));
         }
     }
 
@@ -1346,7 +1316,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         String clientOrderId = activeClientOrderId.getAndSet(null);
         if (clientOrderId != null) pendingClientOrderIds.remove(clientOrderId);
         entryCancellationPending.set(false);
-        exitIocPending.set(false);
         activeOrderPrice.set(null);
         orderPlacedTimestamp.set(0);
     }

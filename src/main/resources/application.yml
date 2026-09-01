@@ -52,8 +52,8 @@ binance:
     max-live-order-notional-usdt: 11.0
     # 买单挂在买一以提高 Maker 成交率；LIMIT_MAKER 仍会阻止意外 Taker 成交。
     bid-depth-offset-ticks: 0
-    # 卖单挂单深度 (接到货后贴紧卖一快速回本出货)
-    ask-depth-offset-ticks: 1
+    # 初始卖单在卖一与手续费后净利润目标中取较高者；0 表示不额外抬高卖一。
+    ask-depth-offset-ticks: 0
     # 挂单超时时间 (毫秒，超时后跟随最新盘口位移)
     order-ttl-ms: 5000
     # 盘口/深度的瞬时噪声不会立即撤单；强卖压、快速下跌等硬风险不受此限制。
@@ -81,16 +81,14 @@ binance:
     max-daily-realized-loss-usdt: 5
     max-daily-drawdown-usdt: 8
     max-inventory-age-ms: 600000
-    # 买入成本已包含估算入场手续费；再预留 5 bps，向上取整后 ENSO 通常
-    # 对应买入价上方约 2 ticks，覆盖估算退出手续费并保留极小利润。
-    take-profit-bps: 5
-    stop-loss-bps: 80
-    # 先给价格 60 秒恢复；之后每 5 秒仅向当前卖一方向下调 Maker 卖价。
-    exit-reprice-after-ms: 60000
+    # take-profit-bps 是扣除预计卖出手续费后的净利润目标。
+    take-profit-bps: 10
+    stop-loss-bps: 30
+    # 15 秒后允许向盘口下调 Maker 卖价，但永远不得跌破手续费后目标价。
+    exit-reprice-after-ms: 15000
     exit-reprice-interval-ms: 5000
-    # 90 秒仍未成交时改用最多穿过买一 1 tick 的受限 IOC 卖单。
-    max-holding-ms: 90000
-    exit-ioc-max-slippage-ticks: 1
+    # 超过 60 秒仅进入“平仓后停止”，不会因为计时器直接 IOC 亏损退出。
+    max-holding-ms: 60000
     # 仅用于下单前的风险估算；成交后由 executionReport/myTrades 的真实 commission 覆盖记账。
     assumed-maker-fee-bps: 10
     # Observation can be enabled for research; signal execution does not depend on it.
