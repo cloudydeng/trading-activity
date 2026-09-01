@@ -360,7 +360,7 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void maxHoldingKeepsFeeAwareMakerThenStopsAfterFlat() throws Exception {
+    void longHeldPositionKeepsFeeAwareMakerThenContinuesAfterFlat() throws Exception {
         engine.getIsRunning().set(true);
         engine.getLiveArmed().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
@@ -385,10 +385,10 @@ class HighFrequencyVolumeChurnEngineTest {
         orderUpdate(88L, atomic("activeClientOrderId", String.class).get(), "SELL", "TRADE", "FILLED",
                 "10", "0.6019", "0.006019", "USDT");
 
-        assertFalse(engine.getIsRunning().get());
-        assertFalse(engine.getLiveArmed().get());
+        assertTrue(engine.getIsRunning().get());
+        assertTrue(engine.getLiveArmed().get());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
-        assertTrue(engine.getStatusReason().get().contains("自动停止"));
+        assertEquals("运行中，等待入场信号", engine.getStatusReason().get());
     }
 
     @Test

@@ -78,8 +78,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicLong clientOrderSequence = new AtomicLong(0);
     private final AtomicBoolean entryCancellationPending = new AtomicBoolean(false);
     private final AtomicBoolean exitSubmissionInFlight = new AtomicBoolean(false);
-    /** A holding-time breach disables new entries after the current inventory is safely flattened. */
-    private final AtomicBoolean stopAfterFlat = new AtomicBoolean(false);
     private final AtomicBoolean marketConnectInProgress = new AtomicBoolean(false);
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
     private final AtomicBoolean acceptingMarketConnections = new AtomicBoolean(true);
@@ -295,7 +293,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return false;
         }
         clearTrackedOrders();
-        stopAfterFlat.set(false);
         isRunning.set(true);
         currentStatus.set(ChurnStatus.IDLE);
         statusReason.set("运行中，等待入场信号");
@@ -307,7 +304,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     public synchronized boolean stopTrading() {
         isRunning.set(false);
-        stopAfterFlat.set(false);
         Long orderId = activeOrderId.get();
         if (properties.getStrategy().isObserveMode()) {
             clearActiveOrder();
@@ -546,18 +542,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 submitMakerOrder(symbol, "BUY", price, qty, orderId, ChurnStatus.BUYING);
             }
             case SELLING -> {
-                ExitReason exitReason = exitReason(bestBid, now, rule);
+                ExitReason exitReason = exitReason(bestBid, rule);
                 BigDecimal qty = PrecisionUtil.roundDownToStep(holdingInventory.get(), rule.stepSize());
                 if (qty.compareTo(rule.stepSize()) < 0) { halt("持仓不足以创建有效卖单"); return; }
                 if (exitReason == ExitReason.STOP_LOSS) {
                     emergencyExit(symbol, qty, rule, exitReason);
                     return;
-                }
-                if (exitReason == ExitReason.MAX_HOLDING) {
-                    if (stopAfterFlat.compareAndSet(false, true)) {
-                        statusReason.set("超过最长持仓：保持手续费后目标 Maker，平仓后自动停止");
-                        log.warn("达到最长持仓，不再 IOC 追价；保持目标 Maker，平仓后自动停止");
-                    }
                 }
                 var risk = riskGuard.snapshot();
                 long holdingAgeMs = risk.positionOpenedAtMs() > 0 ? now - risk.positionOpenedAtMs() : 0;
@@ -865,15 +855,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 .execute(() -> restReconciledOrderIds.remove(orderId));
     }
 
-    private ExitReason exitReason(BigDecimal bestBid, long nowMs, SymbolRuleManager.SymbolRule rule) {
+    private ExitReason exitReason(BigDecimal bestBid, SymbolRuleManager.SymbolRule rule) {
         var risk = riskGuard.snapshot();
         if (risk.positionQty() == null || risk.positionQty().signum() <= 0 || risk.positionCostUsdt() == null) return ExitReason.NONE;
         BigDecimal cost = risk.positionCostUsdt().divide(risk.positionQty(), java.math.MathContext.DECIMAL64);
         BigDecimal takeProfit = feeAwareTargetPrice(rule);
         BigDecimal stopLoss = cost.multiply(BigDecimal.ONE.subtract(BigDecimal.valueOf(properties.getStrategy().getStopLossBps()).movePointLeft(4)));
-        boolean timedOut = risk.positionOpenedAtMs() > 0 && nowMs - risk.positionOpenedAtMs() >= properties.getStrategy().getMaxHoldingMs();
         if (bestBid.compareTo(stopLoss) <= 0) return ExitReason.STOP_LOSS;
-        if (timedOut) return ExitReason.MAX_HOLDING;
         if (bestBid.compareTo(takeProfit) >= 0) return ExitReason.TAKE_PROFIT;
         return ExitReason.NONE;
     }
@@ -1299,15 +1287,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         syncDailyCounters();
         currentStatus.set(ChurnStatus.IDLE);
         resetEntryTarget();
-        if (stopAfterFlat.getAndSet(false)) {
-            isRunning.set(false);
-            liveArmed.set(false);
-            statusReason.set("最长持仓退出已完成，策略已自动停止并解除 LIVE");
-            log.warn("持仓已归零；最长持仓保护已停止策略并解除 LIVE");
-        } else {
-            statusReason.set(isRunning.get() ? "运行中，等待入场信号"
-                    : "人工授权市价清仓已完成" + (restReconciled ? "（REST 对账）" : ""));
-        }
+        statusReason.set(isRunning.get() ? "运行中，等待入场信号"
+                : "人工授权市价清仓已完成" + (restReconciled ? "（REST 对账）" : ""));
     }
 
     private void clearActiveOrder() {
@@ -1345,7 +1326,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     private enum ExitReason {
-        NONE(false), TAKE_PROFIT(false), STOP_LOSS(true), MAX_HOLDING(true);
+        NONE(false), TAKE_PROFIT(false), STOP_LOSS(true);
         private final boolean emergency;
         ExitReason(boolean emergency) { this.emergency = emergency; }
     }

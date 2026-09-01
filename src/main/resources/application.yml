@@ -87,8 +87,6 @@ binance:
     # 15 秒后允许向盘口下调 Maker 卖价，但永远不得跌破手续费后目标价。
     exit-reprice-after-ms: 15000
     exit-reprice-interval-ms: 5000
-    # 超过 60 秒仅进入“平仓后停止”，不会因为计时器直接 IOC 亏损退出。
-    max-holding-ms: 60000
     # 仅用于下单前的风险估算；成交后由 executionReport/myTrades 的真实 commission 覆盖记账。
     assumed-maker-fee-bps: 10
     # Observation can be enabled for research; signal execution does not depend on it.

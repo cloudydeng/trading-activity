@@ -84,8 +84,6 @@ public class BinanceProperties {
         private long exitRepriceAfterMs = 15_000;
         /** Once recovery time expires, only lower a passive sell at this cadence. */
         private long exitRepriceIntervalMs = 5_000;
-        /** Time cap after which no new cycle is allowed once the current position is flat. */
-        private long maxHoldingMs = 60_000;
         /** A pessimistic fee estimate, until actual commission events are accounted for. */
         private BigDecimal assumedMakerFeeBps = new BigDecimal("10");
         /** Unconditional OBSERVE-only market baseline cadence; kept separate from qualified signal samples. */
