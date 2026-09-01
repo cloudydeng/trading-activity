@@ -1,6 +1,7 @@
 package com.binance.bot.strategy;
 
 import com.binance.bot.config.BinanceProperties;
+import com.binance.bot.config.BinanceCredentialManager;
 import com.binance.bot.manager.SymbolRuleManager;
 import com.binance.bot.service.BinanceOptimizedTradeService;
 import com.binance.bot.service.UserDataStreamService;
@@ -16,6 +17,7 @@ import java.net.http.WebSocket;
 import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -42,6 +44,7 @@ class HighFrequencyVolumeChurnEngineTest {
     private UserDataStreamService userDataStreamService;
     private MarketSignalEvaluator marketSignalEvaluator;
     private DailyTradeStatsStore dailyStatsStore;
+    private BinanceCredentialManager credentialManager;
     private HighFrequencyVolumeChurnEngine engine;
     private final AtomicLong testTradeId = new AtomicLong(7_000);
     private final Map<Long, BigDecimal> cumulativeQuantity = new HashMap<>();
@@ -56,6 +59,11 @@ class HighFrequencyVolumeChurnEngineTest {
         properties.getApi().setApiKey("test-api-key");
         properties.getApi().setSecretKey("test-secret-key");
         properties.getApi().setApiKeyAlias("test-bot");
+        BinanceProperties.CredentialProfile secondary = new BinanceProperties.CredentialProfile();
+        secondary.setAlias("second-bot");
+        secondary.setApiKey("second-api-key");
+        secondary.setSecretKey("second-secret-key");
+        properties.getApi().getProfiles().put("secondary", secondary);
         properties.getStrategy().setExecutionMode("LIVE");
         properties.getStrategy().setLiveTradingEnabled(true);
         properties.getStrategy().setSymbol("ENSOUSDT");
@@ -71,6 +79,8 @@ class HighFrequencyVolumeChurnEngineTest {
         userDataStreamService = mock(UserDataStreamService.class);
         marketSignalEvaluator = mock(MarketSignalEvaluator.class);
         dailyStatsStore = mock(DailyTradeStatsStore.class);
+        when(dailyStatsStore.loadActiveApiAlias()).thenReturn(Optional.empty());
+        credentialManager = new BinanceCredentialManager(properties, dailyStatsStore);
         when(dailyStatsStore.recordTrade(anyString(), anyString(), anyLong(), anyLong(), anyString(),
                 any(), any(), any(), any(), any(), anyLong()))
                 .thenReturn(DailyTradeStatsStore.RecordResult.APPLIED);
@@ -81,7 +91,8 @@ class HighFrequencyVolumeChurnEngineTest {
         when(ruleManager.getRule("ENSOUSDT")).thenReturn(new SymbolRuleManager.SymbolRule(
                 "ENSOUSDT", new BigDecimal("0.0001"), new BigDecimal("0.1"), new BigDecimal("5")));
         engine = new HighFrequencyVolumeChurnEngine(properties, tradeService, ruleManager, userDataStreamService,
-                marketSignalEvaluator, mock(PostFillOutcomeTracker.class), new TradingRiskGuard(), dailyStatsStore);
+                marketSignalEvaluator, mock(PostFillOutcomeTracker.class), new TradingRiskGuard(), dailyStatsStore,
+                credentialManager);
     }
 
     @Test
@@ -144,6 +155,54 @@ class HighFrequencyVolumeChurnEngineTest {
         assertFalse(result.accepted());
         assertEquals("ENSOUSDT", engine.getSymbol());
         verify(tradeService, never()).getOpenOrders(anyString());
+    }
+
+    @Test
+    void apiProfileSwitchValidatesBothAccountsAndKeepsTradingStopped() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        when(tradeService.getAllOpenOrders()).thenReturn(mapper.readTree("[]"));
+        when(tradeService.getAccountInfo()).thenReturn(mapper.readTree("{\"canTrade\":true,\"balances\":[]}"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceOptimizedTradeService.AssetBalance(
+                "ENSO", BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
+        when(userDataStreamService.reconnectForCredentialSwitch(12_000)).thenReturn(true);
+
+        HighFrequencyVolumeChurnEngine.ApiProfileSwitchResult result = engine.switchApiProfile("second-bot");
+
+        assertTrue(result.accepted());
+        assertEquals("second-bot", engine.getApiKeyAlias());
+        assertFalse(engine.getIsRunning().get());
+        assertFalse(engine.getLiveArmed().get());
+        verify(dailyStatsStore).saveActiveApiAlias("second-bot");
+        verify(userDataStreamService).reconnectForCredentialSwitch(12_000);
+    }
+
+    @Test
+    void apiProfileSwitchIsRejectedWhileEngineRuns() {
+        engine.getIsRunning().set(true);
+
+        HighFrequencyVolumeChurnEngine.ApiProfileSwitchResult result = engine.switchApiProfile("second-bot");
+
+        assertFalse(result.accepted());
+        assertEquals("test-bot", engine.getApiKeyAlias());
+        verify(tradeService, never()).getAllOpenOrders();
+    }
+
+    @Test
+    void failedApiProfileValidationRollsBackToOriginalCredential() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        when(tradeService.getAllOpenOrders()).thenReturn(mapper.readTree("[]"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceOptimizedTradeService.AssetBalance(
+                "ENSO", BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
+        when(tradeService.getAccountInfo()).thenReturn(mapper.readTree("{\"code\":-2015}"));
+        when(userDataStreamService.reconnectForCredentialSwitch(12_000)).thenReturn(true);
+
+        HighFrequencyVolumeChurnEngine.ApiProfileSwitchResult result = engine.switchApiProfile("second-bot");
+
+        assertFalse(result.accepted());
+        assertEquals("test-bot", engine.getApiKeyAlias());
+        assertTrue(engine.getStatusReason().get().contains("已回滚"));
+        verify(dailyStatsStore, never()).saveActiveApiAlias("second-bot");
+        verify(userDataStreamService).reconnectForCredentialSwitch(12_000);
     }
 
     @Test

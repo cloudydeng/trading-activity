@@ -33,6 +33,7 @@ class BotDashboardControllerTest {
         HighFrequencyVolumeChurnEngine engine = mock(HighFrequencyVolumeChurnEngine.class);
         BinanceOptimizedTradeService tradeService = mock(BinanceOptimizedTradeService.class);
         when(engine.getSymbol()).thenReturn("ENSOUSDT");
+        when(engine.getApiKeyAlias()).thenReturn("lee-sub-account-bot");
         when(engine.getUsedApiWeight()).thenReturn(30);
         BinanceProperties properties = new BinanceProperties();
         properties.getApi().setApiKeyAlias("lee-sub-account-bot");

@@ -1,7 +1,9 @@
 package com.binance.bot.service;
 
 import com.binance.bot.config.BinanceProperties;
+import com.binance.bot.config.BinanceCredentialManager;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.math.BigDecimal;
 import java.net.http.WebSocket;
@@ -11,6 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class UserDataStreamServiceTest {
 
@@ -18,8 +21,7 @@ class UserDataStreamServiceTest {
     void forwardsClientOrderIdAndCommissionFromExecutionReport() {
         BinanceProperties properties = new BinanceProperties();
         properties.getStrategy().setSymbol("ENSOUSDT");
-        UserDataStreamService service = new UserDataStreamService(
-                mock(BinanceOptimizedTradeService.class), properties, mock(BinanceSigner.class));
+        UserDataStreamService service = service(properties);
         AtomicReference<Update> update = new AtomicReference<>();
         service.setExecutionCallback(execution -> update.set(new Update(execution.orderId(),
                 execution.tradeId(), execution.clientOrderId(), execution.lastExecutedQty(),
@@ -30,7 +32,9 @@ class UserDataStreamServiceTest {
                 "i":42,"t":7001,"c":"churn-BUY-1","l":"10","L":"0.60","z":"10","Z":"6.00",
                 "n":"0.01","N":"ENSO"}}
                 """;
-        service.onText(mock(WebSocket.class), event, true);
+        WebSocket webSocket = mock(WebSocket.class);
+        activeSocket(service).set(webSocket);
+        service.onText(webSocket, event, true);
 
         assertEquals(42, update.get().orderId());
         assertEquals(7001, update.get().tradeId());
@@ -45,13 +49,13 @@ class UserDataStreamServiceTest {
     void subscriptionAckRequestsNextMessageSoExecutionReportsContinue() {
         BinanceProperties properties = new BinanceProperties();
         properties.getStrategy().setSymbol("ENSOUSDT");
-        UserDataStreamService service = new UserDataStreamService(
-                mock(BinanceOptimizedTradeService.class), properties, mock(BinanceSigner.class));
+        UserDataStreamService service = service(properties);
         AtomicReference<Update> update = new AtomicReference<>();
         service.setExecutionCallback(execution -> update.set(new Update(execution.orderId(),
                 execution.tradeId(), execution.clientOrderId(), execution.lastExecutedQty(),
                 execution.cumulativeExecutedQty(), execution.commission(), execution.commissionAsset())));
         WebSocket webSocket = mock(WebSocket.class);
+        activeSocket(service).set(webSocket);
 
         service.onText(webSocket,
                 "{\"id\":\"account-events\",\"status\":200,\"result\":{\"subscriptionId\":0}}", true);
@@ -67,4 +71,17 @@ class UserDataStreamServiceTest {
 
     private record Update(long orderId, long tradeId, String clientOrderId, BigDecimal qty,
                           BigDecimal cumulativeQty, BigDecimal commission, String commissionAsset) { }
+
+    private UserDataStreamService service(BinanceProperties properties) {
+        BinanceCredentialManager manager = mock(BinanceCredentialManager.class);
+        BinanceCredentialManager.CredentialSnapshot credentials =
+                new BinanceCredentialManager.CredentialSnapshot("test-bot", "test-key", "test-secret");
+        when(manager.current()).thenReturn(credentials);
+        return new UserDataStreamService(properties, mock(BinanceSigner.class), manager);
+    }
+
+    @SuppressWarnings("unchecked")
+    private AtomicReference<WebSocket> activeSocket(UserDataStreamService service) {
+        return (AtomicReference<WebSocket>) ReflectionTestUtils.getField(service, "activeWebSocket");
+    }
 }

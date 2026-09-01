@@ -202,23 +202,46 @@ public class DailyTradeStatsStore {
     }
 
     public synchronized void saveActiveSymbol(String symbol) {
+        saveSetting("active_symbol", symbol.toUpperCase(), "保存当前交易对失败");
+    }
+
+    public synchronized void saveActiveApiAlias(String alias) {
+        saveSetting("active_api_alias", alias, "保存当前 API 别名失败");
+    }
+
+    public synchronized java.util.Optional<String> loadActiveApiAlias() {
+        try {
+            return loadSetting("active_api_alias");
+        } catch (SQLException e) {
+            throw new IllegalStateException("读取当前 API 别名失败", e);
+        }
+    }
+
+    private void saveSetting(String key, String value, String errorMessage) {
         try (PreparedStatement statement = connection.prepareStatement("""
-                INSERT INTO runtime_setting(setting_key, setting_value, updated_at) VALUES('active_symbol', ?, ?)
+                INSERT INTO runtime_setting(setting_key, setting_value, updated_at) VALUES(?, ?, ?)
                 ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value, updated_at=excluded.updated_at
                 """)) {
-            statement.setString(1, symbol.toUpperCase());
-            statement.setLong(2, System.currentTimeMillis());
+            statement.setString(1, key);
+            statement.setString(2, value);
+            statement.setLong(3, System.currentTimeMillis());
             statement.executeUpdate();
         } catch (SQLException e) {
-            throw new IllegalStateException("保存当前交易对失败", e);
+            throw new IllegalStateException(errorMessage, e);
         }
     }
 
     private java.util.Optional<String> loadPersistedSymbol() throws SQLException {
+        return loadSetting("active_symbol");
+    }
+
+    private java.util.Optional<String> loadSetting(String key) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT setting_value FROM runtime_setting WHERE setting_key='active_symbol'");
-             ResultSet row = statement.executeQuery()) {
-            return row.next() ? java.util.Optional.of(row.getString(1)) : java.util.Optional.empty();
+                "SELECT setting_value FROM runtime_setting WHERE setting_key=?")) {
+            statement.setString(1, key);
+            try (ResultSet row = statement.executeQuery()) {
+                return row.next() ? java.util.Optional.of(row.getString(1)) : java.util.Optional.empty();
+            }
         }
     }
 

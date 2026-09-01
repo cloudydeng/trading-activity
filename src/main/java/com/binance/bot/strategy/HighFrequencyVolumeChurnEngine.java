@@ -1,6 +1,7 @@
 package com.binance.bot.strategy;
 
 import com.binance.bot.config.BinanceProperties;
+import com.binance.bot.config.BinanceCredentialManager;
 import com.binance.bot.manager.SymbolRuleManager;
 import com.binance.bot.service.BinanceOptimizedTradeService;
 import com.binance.bot.service.UserDataStreamService;
@@ -42,6 +43,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final PostFillOutcomeTracker postFillOutcomeTracker;
     private final TradingRiskGuard riskGuard;
     private final DailyTradeStatsStore dailyStatsStore;
+    private final BinanceCredentialManager credentialManager;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newHttpClient();
     private final AtomicReference<BigDecimal> lastBestBid = new AtomicReference<>();
@@ -95,7 +97,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public HighFrequencyVolumeChurnEngine(BinanceProperties properties, BinanceOptimizedTradeService tradeService,
                                            SymbolRuleManager ruleManager, UserDataStreamService userDataStreamService,
                                            MarketSignalEvaluator marketSignalEvaluator, PostFillOutcomeTracker postFillOutcomeTracker,
-                                           TradingRiskGuard riskGuard, DailyTradeStatsStore dailyStatsStore) {
+                                           TradingRiskGuard riskGuard, DailyTradeStatsStore dailyStatsStore,
+                                           BinanceCredentialManager credentialManager) {
         this.properties = properties;
         this.tradeService = tradeService;
         this.ruleManager = ruleManager;
@@ -104,6 +107,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         this.postFillOutcomeTracker = postFillOutcomeTracker;
         this.riskGuard = riskGuard;
         this.dailyStatsStore = dailyStatsStore;
+        this.credentialManager = credentialManager;
     }
 
     @PostConstruct
@@ -235,8 +239,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             log.error("拒绝启动：真实执行必须同时设置 execution-mode=LIVE 与 live-trading-enabled=true");
             return false;
         }
-        if (properties.getApi().getApiKey() == null || properties.getApi().getApiKey().isBlank()
-                || properties.getApi().getSecretKey() == null || properties.getApi().getSecretKey().isBlank()) {
+        BinanceCredentialManager.CredentialSnapshot credentials = credentialManager.current();
+        if (credentials.apiKey().isBlank() || credentials.secretKey().isBlank()) {
             log.error("拒绝启动：真实执行缺少 API 凭据");
             return false;
         }
@@ -685,7 +689,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         BigDecimal cashCommissionQuote = baseCommission ? BigDecimal.ZERO : commissionQuote;
         DailyTradeStatsStore.RecordResult persistentResult = dailyStatsStore.recordTrade(
-                properties.getApi().getApiKeyAlias(), properties.getStrategy().getSymbol(), orderId, tradeId,
+                credentialManager.currentAlias(), properties.getStrategy().getSymbol(), orderId, tradeId,
                 side, inventoryQuantity, trade.quoteQuantity(), trade.commission(), commissionQuote,
                 cashCommissionQuote, tradeTimeMs);
         if (persistentResult == DailyTradeStatsStore.RecordResult.FAILED) {
@@ -1458,9 +1462,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                         + " " + baseAsset(target) + "，成本未知，拒绝自动接管");
             }
             DailyTradeStatsStore.DailyStatsSnapshot currentStats = dailyStatsStore.today(
-                    properties.getApi().getApiKeyAlias(), current);
+                    credentialManager.currentAlias(), current);
             DailyTradeStatsStore.DailyStatsSnapshot targetStats = dailyStatsStore.today(
-                    properties.getApi().getApiKeyAlias(), target);
+                    credentialManager.currentAlias(), target);
             if (currentStats.positionQty().compareTo(currentRule.stepSize()) >= 0
                     || targetStats.positionQty().compareTo(targetRule.stepSize()) >= 0) {
                 return SymbolSwitchResult.rejected(current, "每日账本仍记录旧或新标的持仓，需先人工对账");
@@ -1500,10 +1504,104 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return new SymbolSwitchResult(true, target, statusReason.get());
     }
 
+    /** Safely moves this stopped engine between server-configured Binance accounts. */
+    public synchronized ApiProfileSwitchResult switchApiProfile(String requestedAlias) {
+        String currentAlias = credentialManager.currentAlias();
+        String targetAlias = requestedAlias == null ? "" : requestedAlias.trim();
+        if (!credentialManager.contains(targetAlias)) {
+            return ApiProfileSwitchResult.rejected(currentAlias, "未配置 API 别名: " + targetAlias);
+        }
+        if (targetAlias.equals(currentAlias)) {
+            return new ApiProfileSwitchResult(true, currentAlias, "API 凭据未变化");
+        }
+        if (isRunning.get() || liveArmed.get() || activeOrderId.get() != null) {
+            return ApiProfileSwitchResult.rejected(currentAlias, "请先停止策略并解除 LIVE，再切换 API");
+        }
+        String symbol = properties.getStrategy().getSymbol();
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule(symbol);
+        if (rule == null) return ApiProfileSwitchResult.rejected(currentAlias, "当前交易规则不可用");
+
+        JsonNode oldOrders = tradeService.getAllOpenOrders();
+        BinanceOptimizedTradeService.AssetBalance oldBalance = tradeService.getAssetBalance(baseAsset());
+        DailyTradeStatsStore.DailyStatsSnapshot oldStats = dailyStatsStore.today(currentAlias, symbol);
+        if (oldOrders == null || !oldOrders.isArray() || oldBalance == null) {
+            return ApiProfileSwitchResult.rejected(currentAlias, "无法确认当前账户订单或余额，已拒绝切换");
+        }
+        if (!oldOrders.isEmpty()) {
+            return ApiProfileSwitchResult.rejected(currentAlias, "当前账户仍有活动订单，已拒绝切换");
+        }
+        if (holdingInventory.get().compareTo(rule.stepSize()) >= 0
+                || oldBalance.total().compareTo(rule.stepSize()) >= 0
+                || oldStats.positionQty().compareTo(rule.stepSize()) >= 0) {
+            return ApiProfileSwitchResult.rejected(currentAlias, "当前账户或每日账本仍有标的持仓，必须先卖出并对账");
+        }
+
+        BinanceCredentialManager.CredentialSnapshot previous = credentialManager.current();
+        credentialManager.activate(targetAlias);
+        String failure = validateSelectedAccount(rule, symbol, targetAlias);
+        if (failure == null && !userDataStreamService.reconnectForCredentialSwitch(12_000)) {
+            failure = "目标账户成交流订阅失败";
+        }
+        if (failure != null) return rollbackApiProfile(previous, failure);
+
+        try {
+            dailyStatsStore.saveActiveApiAlias(targetAlias);
+        } catch (RuntimeException e) {
+            log.error("持久化 API 别名失败", e);
+            return rollbackApiProfile(previous, "无法持久化 API 选择");
+        }
+
+        clearTrackedOrders();
+        resetEntryTarget();
+        accountingLedger.reset();
+        riskGuard.resetForFlatSymbol();
+        holdingInventory.set(BigDecimal.ZERO);
+        commissionPriceCache.clear();
+        tradeService.resetRequestWeight();
+        currentStatus.set(ChurnStatus.IDLE);
+        statusReason.set("已切换 API 到 " + targetAlias + "，策略保持停止");
+        syncDailyCounters();
+        restoreDailyRisk();
+        log.warn("API 凭据已由 {} 切换为 {}；策略保持停止且 LIVE 未解锁", currentAlias, targetAlias);
+        return new ApiProfileSwitchResult(true, targetAlias, statusReason.get());
+    }
+
+    private String validateSelectedAccount(SymbolRuleManager.SymbolRule rule, String symbol, String alias) {
+        JsonNode account = tradeService.getAccountInfo();
+        JsonNode orders = tradeService.getAllOpenOrders();
+        BinanceOptimizedTradeService.AssetBalance balance = tradeService.getAssetBalance(baseAsset());
+        if (account == null || account.has("code") || !account.path("canTrade").asBoolean(false)) {
+            return "目标 API 无法读取账户或没有现货交易权限";
+        }
+        if (orders == null || !orders.isArray()) return "无法确认目标账户的活动订单";
+        if (!orders.isEmpty()) return "目标账户存在活动订单，拒绝自动接管";
+        if (balance == null) return "无法确认目标账户的标的余额";
+        if (balance.total().compareTo(rule.stepSize()) >= 0) return "目标账户已有标的持仓，成本未知";
+        DailyTradeStatsStore.DailyStatsSnapshot stats = dailyStatsStore.today(alias, symbol);
+        if (stats.positionQty().compareTo(rule.stepSize()) >= 0) return "目标 API 的每日账本仍记录有持仓";
+        return null;
+    }
+
+    private ApiProfileSwitchResult rollbackApiProfile(BinanceCredentialManager.CredentialSnapshot previous,
+                                                       String failure) {
+        credentialManager.restore(previous);
+        boolean restored = userDataStreamService.reconnectForCredentialSwitch(12_000);
+        liveArmed.set(false);
+        if (restored) {
+            currentStatus.set(ChurnStatus.IDLE);
+            statusReason.set("API 切换失败，已回滚到 " + previous.alias() + ": " + failure);
+        } else {
+            currentStatus.set(ChurnStatus.HALTED);
+            statusReason.set("API 切换失败且旧账户流恢复失败，需人工检查: " + failure);
+        }
+        log.error(statusReason.get());
+        return ApiProfileSwitchResult.rejected(previous.alias(), statusReason.get());
+    }
+
     private void syncDailyCounters() {
         try {
             DailyTradeStatsStore.DailyStatsSnapshot today = dailyStatsStore.today(
-                    properties.getApi().getApiKeyAlias(), properties.getStrategy().getSymbol());
+                    credentialManager.currentAlias(), properties.getStrategy().getSymbol());
             totalVolumeUsdt.set(today.totalVolumeQuote());
             roundTripsCompleted.set(today.roundTrips());
         } catch (RuntimeException e) {
@@ -1513,7 +1611,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     private void restoreDailyRisk() {
         DailyTradeStatsStore.DailyStatsSnapshot today = dailyStatsStore.today(
-                properties.getApi().getApiKeyAlias(), properties.getStrategy().getSymbol());
+                credentialManager.currentAlias(), properties.getStrategy().getSymbol());
         riskGuard.restoreFlatDaily(today.netRealizedPnlQuote(), today.totalCommissionQuoteEquivalent(),
                 today.date(), properties.getStrategy());
     }
@@ -1543,10 +1641,14 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public TradingRiskGuard.RiskSnapshot getRiskSnapshot() { return riskGuard.snapshot(); }
     public TradeAccountingLedger.AccountingSnapshot getAccountingSnapshot() { return accountingLedger.snapshot(); }
     public DailyTradeStatsStore.DailyStatsSnapshot getDailyStatsSnapshot() {
-        return dailyStatsStore.today(properties.getApi().getApiKeyAlias(), properties.getStrategy().getSymbol());
+        return dailyStatsStore.today(credentialManager.currentAlias(), properties.getStrategy().getSymbol());
     }
     public java.util.List<DailyTradeStatsStore.DailyStatsSnapshot> getRecentDailyStats(int limit) {
-        return dailyStatsStore.recent(properties.getApi().getApiKeyAlias(), properties.getStrategy().getSymbol(), limit);
+        return dailyStatsStore.recent(credentialManager.currentAlias(), properties.getStrategy().getSymbol(), limit);
+    }
+    public String getApiKeyAlias() { return credentialManager.currentAlias(); }
+    public java.util.List<BinanceCredentialManager.ProfileView> getApiProfiles() {
+        return credentialManager.profileViews();
     }
     public String getRiskBlockReason() { return riskGuard.getEntryBlockReason(); }
     public String getExecutionMode() { return properties.getStrategy().getExecutionMode(); }
@@ -1562,6 +1664,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public record SymbolSwitchResult(boolean accepted, String symbol, String message) {
         private static SymbolSwitchResult rejected(String current, String message) {
             return new SymbolSwitchResult(false, current, message);
+        }
+    }
+    public record ApiProfileSwitchResult(boolean accepted, String alias, String message) {
+        private static ApiProfileSwitchResult rejected(String current, String message) {
+            return new ApiProfileSwitchResult(false, current, message);
         }
     }
     private record CommissionPrice(BigDecimal price, long updatedAtMs) { }

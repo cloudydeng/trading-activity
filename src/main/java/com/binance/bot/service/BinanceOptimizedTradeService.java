@@ -1,6 +1,7 @@
 package com.binance.bot.service;
 
 import com.binance.bot.config.BinanceProperties;
+import com.binance.bot.config.BinanceCredentialManager;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Getter;
@@ -23,6 +24,7 @@ public class BinanceOptimizedTradeService {
 
     private final RestClient restClient;
     private final BinanceProperties properties;
+    private final BinanceCredentialManager credentialManager;
     private final BinanceSigner signer;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -30,12 +32,13 @@ public class BinanceOptimizedTradeService {
     private final AtomicInteger usedWeight1m = new AtomicInteger(0);
     private final AtomicLong lastWeightUpdateMs = new AtomicLong(0);
 
-    public BinanceOptimizedTradeService(BinanceProperties properties, BinanceSigner signer) {
+    public BinanceOptimizedTradeService(BinanceProperties properties, BinanceSigner signer,
+                                        BinanceCredentialManager credentialManager) {
         this.properties = properties;
         this.signer = signer;
+        this.credentialManager = credentialManager;
         this.restClient = RestClient.builder()
                 .baseUrl(properties.getApi().getBaseUrl())
-                .defaultHeader("X-MBX-APIKEY", properties.getApi().getApiKey())
                 .build();
     }
 
@@ -67,7 +70,8 @@ public class BinanceOptimizedTradeService {
         params.put("timestamp", String.valueOf(timestamp));
 
         String queryString = buildQueryString(params);
-        String signature = signer.sign(queryString, properties.getApi().getSecretKey());
+        BinanceCredentialManager.CredentialSnapshot credentials = credentialManager.current();
+        String signature = signer.sign(queryString, credentials.secretKey());
         String uri = (cancelOrderId != null && cancelOrderId > 0)
                 ? "/api/v3/order/cancelReplace?" + queryString + "&signature=" + signature
                 : "/api/v3/order?" + queryString + "&signature=" + signature;
@@ -75,6 +79,7 @@ public class BinanceOptimizedTradeService {
         try {
             return restClient.post()
                     .uri(uri)
+                    .header("X-MBX-APIKEY", credentials.apiKey())
                     .contentType(MediaType.APPLICATION_FORM_URLENCODED)
                     .exchange((request, response) -> {
                         HttpHeaders headers = response.getHeaders();
@@ -104,12 +109,14 @@ public class BinanceOptimizedTradeService {
         params.put("timestamp", String.valueOf(timestamp));
 
         String queryString = buildQueryString(params);
-        String signature = signer.sign(queryString, properties.getApi().getSecretKey());
+        BinanceCredentialManager.CredentialSnapshot credentials = credentialManager.current();
+        String signature = signer.sign(queryString, credentials.secretKey());
         String uri = "/api/v3/order?" + queryString + "&signature=" + signature;
 
         try {
             return restClient.delete()
                     .uri(uri)
+                    .header("X-MBX-APIKEY", credentials.apiKey())
                     .exchange((request, response) -> {
                         updateWeight(response.getHeaders());
                         JsonNode body = objectMapper.readTree(response.getBody());
@@ -139,10 +146,12 @@ public class BinanceOptimizedTradeService {
         params.put("selfTradePreventionMode", "EXPIRE_BOTH");
         params.put("timestamp", String.valueOf(timestamp));
         String queryString = buildQueryString(params);
-        String signature = signer.sign(queryString, properties.getApi().getSecretKey());
+        BinanceCredentialManager.CredentialSnapshot credentials = credentialManager.current();
+        String signature = signer.sign(queryString, credentials.secretKey());
         try {
             return restClient.post()
                     .uri("/api/v3/order?" + queryString + "&signature=" + signature)
+                    .header("X-MBX-APIKEY", credentials.apiKey())
                     .contentType(MediaType.APPLICATION_FORM_URLENCODED)
                     .exchange((request, response) -> {
                         updateWeight(response.getHeaders());
@@ -174,10 +183,12 @@ public class BinanceOptimizedTradeService {
         params.put("selfTradePreventionMode", "EXPIRE_BOTH");
         params.put("timestamp", String.valueOf(timestamp));
         String queryString = buildQueryString(params);
-        String signature = signer.sign(queryString, properties.getApi().getSecretKey());
+        BinanceCredentialManager.CredentialSnapshot credentials = credentialManager.current();
+        String signature = signer.sign(queryString, credentials.secretKey());
         try {
             return restClient.post()
                     .uri("/api/v3/order?" + queryString + "&signature=" + signature)
+                    .header("X-MBX-APIKEY", credentials.apiKey())
                     .contentType(MediaType.APPLICATION_FORM_URLENCODED)
                     .exchange((request, response) -> {
                         updateWeight(response.getHeaders());
@@ -209,10 +220,12 @@ public class BinanceOptimizedTradeService {
         params.put("selfTradePreventionMode", "EXPIRE_BOTH");
         params.put("timestamp", String.valueOf(timestamp));
         String queryString = buildQueryString(params);
-        String signature = signer.sign(queryString, properties.getApi().getSecretKey());
+        BinanceCredentialManager.CredentialSnapshot credentials = credentialManager.current();
+        String signature = signer.sign(queryString, credentials.secretKey());
         try {
             return restClient.post()
                     .uri("/api/v3/order?" + queryString + "&signature=" + signature)
+                    .header("X-MBX-APIKEY", credentials.apiKey())
                     .contentType(MediaType.APPLICATION_FORM_URLENCODED)
                     .exchange((request, response) -> {
                         updateWeight(response.getHeaders());
@@ -290,39 +303,26 @@ public class BinanceOptimizedTradeService {
 
     /** Returns null on an indeterminate API failure; callers must fail closed in that case. */
     public JsonNode getOpenOrders(String symbol) {
-        long timestamp = System.currentTimeMillis();
         Map<String, String> params = new LinkedHashMap<>();
         params.put("symbol", symbol.toUpperCase());
-        params.put("timestamp", String.valueOf(timestamp));
-        String queryString = buildQueryString(params);
-        String signature = signer.sign(queryString, properties.getApi().getSecretKey());
-        try {
-            String response = restClient.get().uri("/api/v3/openOrders?" + queryString + "&signature=" + signature)
-                    .retrieve().body(String.class);
-            return objectMapper.readTree(response);
-        } catch (Exception e) {
-            log.error("查询活动订单失败；拒绝在未知订单状态下启动: {}", e.getMessage());
-            return null;
-        }
+        params.put("timestamp", String.valueOf(System.currentTimeMillis()));
+        return getSignedJson("/api/v3/openOrders", params, "查询活动订单失败");
+    }
+
+    /** Account-wide open-order check used before abandoning one credential profile. */
+    public JsonNode getAllOpenOrders() {
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("timestamp", String.valueOf(System.currentTimeMillis()));
+        return getSignedJson("/api/v3/openOrders", params, "查询账户全部活动订单失败");
     }
 
     /** Queries the authoritative final state of one order after a cancel acknowledgement. */
     public JsonNode getOrder(String symbol, long orderId) {
-        long timestamp = System.currentTimeMillis();
         Map<String, String> params = new LinkedHashMap<>();
         params.put("symbol", symbol.toUpperCase());
         params.put("orderId", String.valueOf(orderId));
-        params.put("timestamp", String.valueOf(timestamp));
-        String queryString = buildQueryString(params);
-        String signature = signer.sign(queryString, properties.getApi().getSecretKey());
-        try {
-            String response = restClient.get().uri("/api/v3/order?" + queryString + "&signature=" + signature)
-                    .retrieve().body(String.class);
-            return objectMapper.readTree(response);
-        } catch (Exception e) {
-            log.error("查询订单最终状态失败: {}", e.getMessage());
-            return null;
-        }
+        params.put("timestamp", String.valueOf(System.currentTimeMillis()));
+        return getSignedJson("/api/v3/order", params, "查询订单最终状态失败");
     }
 
     private String buildQueryString(Map<String, String> params) {
@@ -333,9 +333,11 @@ public class BinanceOptimizedTradeService {
 
     private JsonNode getSignedJson(String path, Map<String, String> params, String errorMessage) {
         String queryString = buildQueryString(params);
-        String signature = signer.sign(queryString, properties.getApi().getSecretKey());
+        BinanceCredentialManager.CredentialSnapshot credentials = credentialManager.current();
+        String signature = signer.sign(queryString, credentials.secretKey());
         try {
             return restClient.get().uri(path + "?" + queryString + "&signature=" + signature)
+                    .header("X-MBX-APIKEY", credentials.apiKey())
                     .exchange((request, response) -> {
                         updateWeight(response.getHeaders());
                         JsonNode body = objectMapper.readTree(response.getBody());
@@ -358,6 +360,11 @@ public class BinanceOptimizedTradeService {
             usedWeight1m.set(Integer.parseInt(weightStr));
             lastWeightUpdateMs.set(System.currentTimeMillis());
         }
+    }
+
+    public void resetRequestWeight() {
+        usedWeight1m.set(0);
+        lastWeightUpdateMs.set(0);
     }
 
     public record AssetBalance(String asset, BigDecimal free, BigDecimal locked, BigDecimal total) { }

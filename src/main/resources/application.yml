@@ -31,6 +31,12 @@ binance:
     api-key-alias: "${BINANCE_API_KEY_ALIAS:unlabeled}"
     api-key: "${BINANCE_API_API_KEY:}"
     secret-key: "${BINANCE_API_SECRET_KEY:}"
+    # Optional second account. The browser sees only alias and active state, never these secrets.
+    profiles:
+      secondary:
+        alias: "${BINANCE_SECONDARY_API_KEY_ALIAS:}"
+        api-key: "${BINANCE_SECONDARY_API_API_KEY:}"
+        secret-key: "${BINANCE_SECONDARY_API_SECRET_KEY:}"
   strategy:
     # OBSERVE: 只消费公开行情并记录虚拟入场结果，绝不发认证请求或订单。
     # LIVE requires both of the environment switches below; defaults never trade.

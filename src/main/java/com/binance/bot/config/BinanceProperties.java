@@ -5,6 +5,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
 import java.math.BigDecimal;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @Data
 @Configuration
@@ -23,6 +25,15 @@ public class BinanceProperties {
         private String wsUserUrl;
         /** Human-readable credential label; never contains key material. */
         private String apiKeyAlias;
+        private String apiKey;
+        private String secretKey;
+        /** Additional server-side credential profiles. Secrets are never exposed through an API. */
+        private Map<String, CredentialProfile> profiles = new LinkedHashMap<>();
+    }
+
+    @Data
+    public static class CredentialProfile {
+        private String alias;
         private String apiKey;
         private String secretKey;
     }

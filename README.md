@@ -1,34 +1,48 @@
-# Binance Spot Competition Pure Churning Bot (v3.0 Ultra)
+# Binance Spot Trading Activity Bot
 
-专为**币安现货交易赛低磨损、极速刷交易量**设计的工业级量化工程。
+基于公开 WebSocket 行情信号执行小额 Binance 现货交易。系统默认 `OBSERVE`，真实交易必须同时启用服务器 `LIVE` 配置、从控制台临时解锁并手动启动。项目不做自成交。
 
----
+## 安全边界
 
-## ⚡ 核心实战逻辑
+- BUY 部分成交会立即进入 SELL 管理，成交以账户事件流和 REST 对账为准。
+- Maker 使用 `LIMIT_MAKER`，止损与超时退出使用受限 IOC/市价减仓路径。
+- 交易对或 API 账户切换前必须停止策略、锁定 LIVE、确认无活动订单和当前标的持仓。
+- API Key、Secret、管理密码仅从服务器环境变量加载，不通过浏览器提交或返回。
+- 每日成交量、手续费、净盈亏和成本按 `UTC 日期 + API 别名 + 交易对` 写入 SQLite。
 
-1. **深度插针挂单（Anti-Adverse Selection）：**
-   - 买单挂在 `Bid 2 ~ Bid 3`，绝不贴脸买一接飞刀，专吃市场微小插针。
-2. **0 持仓毫秒级出货（Ping-Pong Zero Exposure）：**
-   - 买单成交瞬间以 0 延迟反手将卖单挂在 `Ask 1` 快速脱手回本，单笔持仓时间控制在毫秒/秒级。
-3. **小单化整为零抗单边（Randomized Micro Sizing）：**
-   - 单笔严格限制在 `$15~$25 USDT` 并附带随机抖动，单边行情发生时单笔损失仅 $0.1~$0.2，被大数定律彻底摊薄。
-4. **原生 cancelReplace + 权重熔断：**
-   - 单请求原子撤换单，节省 50% API 权重，使用率达 80% 自动降速，杜绝 429/418 封 IP。
+## 环境变量
 
----
-
-## 🚀 启动与控制
+主 API 账户：
 
 ```bash
-# 1. 打包
-mvn clean package -DskipTests
-
-# 2. 启动 (替换真实密钥)
-java -jar target/binance-spot-competition-bot-3.0.0.jar \
-  --binance.api.api-key="YOUR_KEY" \
-  --binance.api.secret-key="YOUR_SECRET"
+BINANCE_API_KEY_ALIAS=huaqin-bot
+BINANCE_API_API_KEY=...
+BINANCE_API_SECRET_KEY=...
 ```
 
-- **启动刷量：** `curl -X POST http://localhost:8080/api/bot/start`
-- **监控看板：** `curl -X GET http://localhost:8080/api/bot/status`
-- **安全停止：** `curl -X POST http://localhost:8080/api/bot/stop`
+可选的第二 API 账户：
+
+```bash
+BINANCE_SECONDARY_API_KEY_ALIAS=second-bot
+BINANCE_SECONDARY_API_API_KEY=...
+BINANCE_SECONDARY_API_SECRET_KEY=...
+```
+
+第二套凭据必须三项同时配置，否则服务拒绝启动。网页只会显示别名。成功切换的别名写入 SQLite，服务重启后会恢复；如果对应环境变量不再存在，则回退到主账户。
+
+## 构建与启动
+
+```bash
+mvn clean package
+java -jar target/binance-spot-competition-bot-3.0.0.jar
+```
+
+控制接口均受浏览器登录会话或 `X-Bot-Admin-Token` 保护：
+
+- `GET /api/bot/status`
+- `POST /api/bot/start`
+- `POST /api/bot/stop`
+- `POST /api/bot/symbol`
+- `GET /api/bot/api-profiles`
+- `POST /api/bot/api-profile`
+- `GET /api/bot/stats/daily`

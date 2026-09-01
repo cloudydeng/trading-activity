@@ -39,7 +39,8 @@ public class BotDashboardController {
                 Map.entry("executionMode", engine.getExecutionMode()),
                 Map.entry("liveArmed", engine.getLiveArmed().get()),
                 Map.entry("accountStreamReady", engine.isAccountStreamReady()),
-                Map.entry("apiKeyAlias", properties.getApi().getApiKeyAlias()),
+                Map.entry("apiKeyAlias", engine.getApiKeyAlias()),
+                Map.entry("apiProfiles", engine.getApiProfiles()),
                 Map.entry("minimumPaperObservations", engine.getMinimumPaperObservations()),
                 Map.entry("symbol", engine.getSymbol()),
                 Map.entry("totalVolumeUsdt", engine.getTotalVolumeUsdt().get()),
@@ -71,7 +72,7 @@ public class BotDashboardController {
         }
         return ResponseEntity.ok(new AccountSnapshot(
                 engine.getSymbol(),
-                properties.getApi().getApiKeyAlias(),
+                engine.getApiKeyAlias(),
                 account.path("accountType").asText("SPOT"),
                 account.path("canTrade").asBoolean(false),
                 account.path("updateTime").asLong(0),
@@ -164,6 +165,18 @@ public class BotDashboardController {
         return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
     }
 
+    @GetMapping("/api-profiles")
+    public List<com.binance.bot.config.BinanceCredentialManager.ProfileView> getApiProfiles() {
+        return engine.getApiProfiles();
+    }
+
+    @PostMapping("/api-profile")
+    public ResponseEntity<HighFrequencyVolumeChurnEngine.ApiProfileSwitchResult> switchApiProfile(
+            @RequestBody ApiProfileSwitchRequest request) {
+        HighFrequencyVolumeChurnEngine.ApiProfileSwitchResult result = engine.switchApiProfile(request.alias());
+        return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
+    }
+
     @PostMapping("/liquidate")
     public ResponseEntity<HighFrequencyVolumeChurnEngine.LiquidationResult> liquidate(
             @RequestBody LiquidationRequest request) {
@@ -183,6 +196,7 @@ public class BotDashboardController {
 
     public record LiquidationRequest(String password, String confirmation) { }
     public record SymbolSwitchRequest(String symbol) { }
+    public record ApiProfileSwitchRequest(String alias) { }
     public record AccountSnapshot(String symbol, String apiKeyAlias, String accountType,
                                   boolean canTrade, long accountUpdateTimeMs,
                                   List<BalanceView> balances, List<OrderView> filledOrders,
