@@ -830,17 +830,17 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             halt("已成交持仓不足以创建有效卖单");
             return;
         }
-        String clientOrderId = nextClientOrderId("SELLI");
+        String clientOrderId = nextClientOrderId("SELLG");
         pendingClientOrderIds.add(clientOrderId);
         activeClientOrderId.set(clientOrderId);
-        JsonNode response = tradeService.placeLimitIocSell(properties.getStrategy().getSymbol(), quantity,
+        JsonNode response = tradeService.placeLimitGtcSell(properties.getStrategy().getSymbol(), quantity,
                 floorPrice, clientOrderId);
         if (response != null && response.has("orderId")) {
             trackOrder(response.get("orderId").asLong(), clientOrderId, ChurnStatus.SELLING);
             statusReason.set("BUY 成交后按买入均价下限卖出中 @ " + floorPrice.toPlainString());
-            log.info("BUY 成交后已提交价格受限 IOC 卖出 {} {}，最低价 {}", quantity, baseAsset(), floorPrice);
+            log.info("BUY 成交后已挂 GTC 限价卖出 {} {} @ {}", quantity, baseAsset(), floorPrice);
         } else {
-            reconcileAmbiguousSubmission(clientOrderId, ChurnStatus.SELLING, "价格受限 IOC 卖单结果未知");
+            reconcileAmbiguousSubmission(clientOrderId, ChurnStatus.SELLING, "买入均价 GTC 卖单结果未知");
         }
     }
 

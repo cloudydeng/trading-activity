@@ -254,7 +254,7 @@ class HighFrequencyVolumeChurnEngineTest {
         atomic("activeClientOrderId", String.class).set("churn-BUY-1");
         atomic("lastBestBid", BigDecimal.class).set(new BigDecimal("0.60"));
         when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(new BigDecimal("10"));
-        when(tradeService.placeLimitIocSell(eq("ENSOUSDT"), decimalEquals("10.0"),
+        when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10.0"),
                 decimalEquals("0.60"), anyString()))
                 .thenReturn(new ObjectMapper().createObjectNode().put("orderId", 99L));
         UserDataStreamService.ExecutionUpdate fill = new UserDataStreamService.ExecutionUpdate(
@@ -674,7 +674,7 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void partialMakerBuyCancelsRemainderAndSubmitsOnePriceFlooredIocSell() throws Exception {
+    void partialMakerBuyCancelsRemainderAndSubmitsOneEntryPriceGtcSell() throws Exception {
         prepareRestingMakerOrder();
         ObjectMapper mapper = new ObjectMapper();
         atomic("lastBestBid", BigDecimal.class).set(new BigDecimal("0.862"));
@@ -691,7 +691,7 @@ class HighFrequencyVolumeChurnEngineTest {
                   "quoteQty":"6.034","commission":"0","commissionAsset":"USDT","isBuyer":true}]
                 """));
         when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(new BigDecimal("7.0"));
-        when(tradeService.placeLimitIocSell(eq("ENSOUSDT"), decimalEquals("7.0"),
+        when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("7.0"),
                 decimalEquals("0.862"), anyString()))
                 .thenReturn(mapper.readTree("{\"orderId\":99}"));
 
@@ -713,7 +713,7 @@ class HighFrequencyVolumeChurnEngineTest {
 
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
         assertEquals(99L, atomic("activeOrderId", Long.class).get());
-        verify(tradeService, times(1)).placeLimitIocSell(eq("ENSOUSDT"), decimalEquals("7.0"),
+        verify(tradeService, times(1)).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("7.0"),
                 decimalEquals("0.862"), anyString());
         verify(tradeService, never()).placeMarketSell(anyString(), any(), anyString());
         verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), any(),
