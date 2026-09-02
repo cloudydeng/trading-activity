@@ -48,8 +48,8 @@ binance:
     live-trading-enabled: "${BINANCE_LIVE_TRADING_ENABLED:false}"
     symbol: "${BINANCE_STRATEGY_SYMBOL:ENSOUSDT}"
     # 观察及未来模拟的名义单笔金额；ENSOUSDT 的 Binance 最小名义额为 5 USDT。
-    order-amount-usdt: 6.0
-    max-live-order-notional-usdt: 6.0
+    order-amount-usdt: 12.0
+    max-live-order-notional-usdt: 12.0
     # 买单挂在买一以提高 Maker 成交率；LIMIT_MAKER 仍会阻止意外 Taker 成交。
     bid-depth-offset-ticks: 0
     # 初始卖单在卖一与手续费后净利润目标中取较高者；0 表示不额外抬高卖一。
