@@ -103,6 +103,20 @@ public class TradingRiskGuard {
     public void trip(String reason) { entryBlockReason.compareAndSet(null, reason); }
     public String getEntryBlockReason() { return entryBlockReason.get(); }
 
+    /**
+     * Normalizes an untradeable ledger remainder after exchange balance reconciliation has
+     * proved the base-asset position is below the symbol step size. Any remaining cost is
+     * conservatively realized as a loss instead of silently disappearing.
+     */
+    public synchronized void reconcileExchangeFlat(long nowMs, BinanceProperties.Strategy config) {
+        if (positionQty.signum() > 0) realizedPnlUsdt = realizedPnlUsdt.subtract(positionCostUsdt);
+        positionQty = BigDecimal.ZERO;
+        positionCostUsdt = BigDecimal.ZERO;
+        positionOpenedAtMs = -1;
+        entryBlockReason.compareAndSet("MAX_INVENTORY_AGE", null);
+        evaluate(nowMs, config);
+    }
+
     /** Safe only after exchange reconciliation has proved the previous symbol is flat. */
     public synchronized void resetForFlatSymbol() {
         positionQty = BigDecimal.ZERO;

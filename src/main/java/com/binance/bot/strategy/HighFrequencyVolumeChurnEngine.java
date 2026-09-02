@@ -1284,6 +1284,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     private void completeFlatExit(boolean restReconciled) {
         holdingInventory.set(BigDecimal.ZERO);
+        riskGuard.reconcileExchangeFlat(System.currentTimeMillis(), properties.getStrategy());
         syncDailyCounters();
         currentStatus.set(ChurnStatus.IDLE);
         resetEntryTarget();
