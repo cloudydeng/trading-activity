@@ -64,6 +64,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicReference<BigDecimal> holdingInventory = new AtomicReference<>(BigDecimal.ZERO);
     private final AtomicReference<BigDecimal> targetEntryQuantity = new AtomicReference<>(BigDecimal.ZERO);
     private final AtomicReference<BigDecimal> filledEntryQuantity = new AtomicReference<>(BigDecimal.ZERO);
+    private final AtomicReference<BigDecimal> filledEntryQuoteQuantity = new AtomicReference<>(BigDecimal.ZERO);
     private final AtomicReference<String> activeClientOrderId = new AtomicReference<>();
     private final AtomicReference<Long> replacingOrderId = new AtomicReference<>();
     @Getter private final AtomicReference<String> statusReason = new AtomicReference<>("等待启动");
@@ -692,6 +693,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         if ("BUY".equalsIgnoreCase(side)) {
             filledEntryQuantity.accumulateAndGet(trade.quantity(), BigDecimal::add);
+            filledEntryQuoteQuantity.accumulateAndGet(trade.quoteQuantity(), BigDecimal::add);
             holdingInventory.accumulateAndGet(inventoryQuantity, BigDecimal::add);
             if (properties.getStrategy().isCollectObservations()) {
                 postFillOutcomeTracker.recordBuyFill(price, activeEntrySignalReason.get(), activeEntryContext.get(),
@@ -823,19 +825,36 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (activeOrderId.get() != null
                 || currentStatus.get() != ChurnStatus.SELLING) return;
         BigDecimal quantity = PrecisionUtil.roundDownToStep(holdingInventory.get(), rule.stepSize());
-        BigDecimal bestBid = lastBestBid.get();
-        if (bestBid == null || !isValidOrder(quantity, bestBid, rule)) {
+        BigDecimal floorPrice = entryAverageFloorPrice(rule);
+        if (!isValidOrder(quantity, floorPrice, rule)) {
             halt("已成交持仓不足以创建有效卖单");
             return;
         }
-        emergencyExit(properties.getStrategy().getSymbol(), quantity, rule, ExitReason.IMMEDIATE_AFTER_BUY);
+        String clientOrderId = nextClientOrderId("SELLI");
+        pendingClientOrderIds.add(clientOrderId);
+        activeClientOrderId.set(clientOrderId);
+        JsonNode response = tradeService.placeLimitIocSell(properties.getStrategy().getSymbol(), quantity,
+                floorPrice, clientOrderId);
+        if (response != null && response.has("orderId")) {
+            trackOrder(response.get("orderId").asLong(), clientOrderId, ChurnStatus.SELLING);
+            statusReason.set("BUY 成交后按买入均价下限卖出中 @ " + floorPrice.toPlainString());
+            log.info("BUY 成交后已提交价格受限 IOC 卖出 {} {}，最低价 {}", quantity, baseAsset(), floorPrice);
+        } else {
+            reconcileAmbiguousSubmission(clientOrderId, ChurnStatus.SELLING, "价格受限 IOC 卖单结果未知");
+        }
     }
 
     private boolean canSubmitImmediateExit(SymbolRuleManager.SymbolRule rule) {
-        BigDecimal bestBid = lastBestBid.get();
-        if (bestBid == null || bestBid.signum() <= 0) return false;
         BigDecimal quantity = PrecisionUtil.roundDownToStep(holdingInventory.get(), rule.stepSize());
-        return isValidOrder(quantity, bestBid, rule);
+        return isValidOrder(quantity, entryAverageFloorPrice(rule), rule);
+    }
+
+    private BigDecimal entryAverageFloorPrice(SymbolRuleManager.SymbolRule rule) {
+        BigDecimal filledQuantity = filledEntryQuantity.get();
+        BigDecimal filledQuote = filledEntryQuoteQuantity.get();
+        if (filledQuantity.signum() <= 0 || filledQuote.signum() <= 0) return BigDecimal.ZERO;
+        return PrecisionUtil.roundUpToStep(filledQuote.divide(filledQuantity,
+                java.math.MathContext.DECIMAL64), rule.tickSize());
     }
 
     private void submitExitMakerOnce(String symbol, BigDecimal price, BigDecimal quantity, Long cancelOrderId) {
@@ -1102,13 +1121,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         JsonNode response = tradeService.placeMarketSell(symbol, qty, clientOrderId);
         if (response != null && response.has("orderId")) {
             trackOrder(response.get("orderId").asLong(), clientOrderId, ChurnStatus.SELLING);
-            if (reason == ExitReason.IMMEDIATE_AFTER_BUY) {
-                statusReason.set("BUY 成交后市价卖出中");
-                log.info("BUY 成交后已立即提交市价卖出 {} {}", qty, baseAsset());
-            } else {
-                statusReason.set("持仓紧急退出中：" + reason);
-                log.warn("触发 {}，已提交紧急市价减仓 {} {}", reason, qty, baseAsset());
-            }
+            statusReason.set("持仓紧急退出中：" + reason);
+            log.warn("触发 {}，已提交紧急市价减仓 {} {}", reason, qty, baseAsset());
         } else {
             reconcileAmbiguousSubmission(clientOrderId, ChurnStatus.SELLING, "紧急市价单结果未知");
         }
@@ -1296,6 +1310,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private void resetEntryTarget() {
         targetEntryQuantity.set(BigDecimal.ZERO);
         filledEntryQuantity.set(BigDecimal.ZERO);
+        filledEntryQuoteQuantity.set(BigDecimal.ZERO);
     }
 
     private String nextClientOrderId(String side) {
@@ -1309,7 +1324,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     private enum ExitReason {
-        NONE(false), TAKE_PROFIT(false), STOP_LOSS(true), IMMEDIATE_AFTER_BUY(true);
+        NONE(false), TAKE_PROFIT(false), STOP_LOSS(true);
         private final boolean emergency;
         ExitReason(boolean emergency) { this.emergency = emergency; }
     }

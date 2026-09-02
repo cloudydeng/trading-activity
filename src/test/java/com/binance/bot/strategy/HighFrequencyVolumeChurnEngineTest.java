@@ -254,7 +254,8 @@ class HighFrequencyVolumeChurnEngineTest {
         atomic("activeClientOrderId", String.class).set("churn-BUY-1");
         atomic("lastBestBid", BigDecimal.class).set(new BigDecimal("0.60"));
         when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(new BigDecimal("10"));
-        when(tradeService.placeMarketSell(eq("ENSOUSDT"), decimalEquals("10.0"), anyString()))
+        when(tradeService.placeLimitIocSell(eq("ENSOUSDT"), decimalEquals("10.0"),
+                decimalEquals("0.60"), anyString()))
                 .thenReturn(new ObjectMapper().createObjectNode().put("orderId", 99L));
         UserDataStreamService.ExecutionUpdate fill = new UserDataStreamService.ExecutionUpdate(
                 42L, 7001L, "churn-BUY-1", "BUY", "TRADE", "FILLED",
@@ -673,7 +674,7 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void partialMakerBuyCancelsRemainderAndImmediatelySubmitsOneMarketSell() throws Exception {
+    void partialMakerBuyCancelsRemainderAndSubmitsOnePriceFlooredIocSell() throws Exception {
         prepareRestingMakerOrder();
         ObjectMapper mapper = new ObjectMapper();
         atomic("lastBestBid", BigDecimal.class).set(new BigDecimal("0.862"));
@@ -690,7 +691,8 @@ class HighFrequencyVolumeChurnEngineTest {
                   "quoteQty":"6.034","commission":"0","commissionAsset":"USDT","isBuyer":true}]
                 """));
         when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(new BigDecimal("7.0"));
-        when(tradeService.placeMarketSell(eq("ENSOUSDT"), decimalEquals("7.0"), anyString()))
+        when(tradeService.placeLimitIocSell(eq("ENSOUSDT"), decimalEquals("7.0"),
+                decimalEquals("0.862"), anyString()))
                 .thenReturn(mapper.readTree("{\"orderId\":99}"));
 
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
@@ -711,7 +713,9 @@ class HighFrequencyVolumeChurnEngineTest {
 
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
         assertEquals(99L, atomic("activeOrderId", Long.class).get());
-        verify(tradeService, times(1)).placeMarketSell(eq("ENSOUSDT"), decimalEquals("7.0"), anyString());
+        verify(tradeService, times(1)).placeLimitIocSell(eq("ENSOUSDT"), decimalEquals("7.0"),
+                decimalEquals("0.862"), anyString());
+        verify(tradeService, never()).placeMarketSell(anyString(), any(), anyString());
         verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), any(),
                 any(), any(), anyString());
         assertEquals(1, engine.getAccountingSnapshot().processedTradeCount());
