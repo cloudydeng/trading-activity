@@ -99,6 +99,10 @@ public class MarketSignalEvaluator {
     }
 
     public EntryDecision getLastDecision() { return lastDecision.get(); }
+    public EntryDecision markBestBidMakerReady() {
+        return set(new EntryDecision(true, "BEST_BID_MAKER", BigDecimal.ZERO, BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
+    }
     public synchronized void reset() {
         quotes.clear();
         trades.clear();

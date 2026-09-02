@@ -50,6 +50,8 @@ public class BinanceProperties {
         private int bidDepthOffsetTicks;
         private int askDepthOffsetTicks;
         private long orderTtlMs;
+        /** Cancel an unfilled entry-price sell after this delay and market-sell the remainder. */
+        private long limitSellTimeoutMs = 60_000;
         /** Soft signal noise cannot cancel a fresh entry before this resting time. */
         private long minEntryOrderRestMs = 800;
         private double randomSizeJitter;

@@ -493,11 +493,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 if (cooldownUntil > 0 && stopLossCooldownUntil.compareAndSet(cooldownUntil, 0)) {
                     statusReason.set("运行中，等待入场信号");
                 }
-                MarketSignalEvaluator.EntryDecision decision = marketSignalEvaluator.evaluate(now, properties.getStrategy());
-                if (!decision.allowed()) {
-                    log.debug("新开仓被信号层阻止: {} (book={}, depth={}, flow={}, returnBps={}, rangeBps={})", decision.reason(), decision.bookImbalance(), decision.depthImbalance(), decision.takerFlowImbalance(), decision.returnBps(), decision.rangeBps());
-                    return;
-                }
+                MarketSignalEvaluator.EntryDecision decision = marketSignalEvaluator.markBestBidMakerReady();
                 activeEntrySignalReason.set(decision.reason());
                 activeEntryContext.set(marketSignalEvaluator.getMarketContext(now));
                 BigDecimal price = PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(BigDecimal.valueOf(properties.getStrategy().getBidDepthOffsetTicks()))), rule.tickSize());
@@ -518,20 +514,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             case BUYING -> {
                 Long orderId = activeOrderId.get();
                 if (orderId == null) { halt("买单状态没有活动订单"); return; }
-                MarketSignalEvaluator.EntryDecision decision = marketSignalEvaluator.evaluate(now, properties.getStrategy());
-                if (!decision.allowed()) {
-                    long restingMs = now - orderPlacedTimestamp.get();
-                    long softCancelAfterMs = Math.max(properties.getStrategy().getOrderTtlMs(),
-                            properties.getStrategy().getMinEntryOrderRestMs());
-                    if (isHardEntryRisk(decision.reason())) {
-                        cancelActiveEntryOrder("入场硬风险转为 " + decision.reason());
-                    } else if (restingMs >= softCancelAfterMs) {
-                        cancelActiveEntryOrder("软信号转弱且挂单已到 TTL: " + decision.reason());
-                    } else {
-                        log.debug("忽略买单短时软信号噪声: {}，已驻留 {} ms", decision.reason(), restingMs);
-                    }
-                    return;
-                }
                 long restingMs = now - orderPlacedTimestamp.get();
                 long makerTimeoutMs = Math.max(properties.getStrategy().getOrderTtlMs(),
                         properties.getStrategy().getMinEntryOrderRestMs());
@@ -547,24 +529,14 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     emergencyExit(symbol, qty, rule, exitReason);
                     return;
                 }
-                var risk = riskGuard.snapshot();
-                long holdingAgeMs = risk.positionOpenedAtMs() > 0 ? now - risk.positionOpenedAtMs() : 0;
                 Long activeId = activeOrderId.get();
                 if (activeId != null) {
-                    BigDecimal currentPrice = activeOrderPrice.get();
-                    if (holdingAgeMs < properties.getStrategy().getExitRepriceAfterMs()
-                            || currentPrice == null
-                            || now - orderPlacedTimestamp.get() < properties.getStrategy().getExitRepriceIntervalMs()) return;
-                    BigDecimal passivePrice = passiveExitPrice(bestBid, bestAsk, rule);
-                    // Only move a stale sell toward the market. Never chase the ask upward
-                    // and never cancel/recreate an order at the same price.
-                    if (passivePrice.compareTo(currentPrice) >= 0) return;
-                    submitExitMakerOnce(symbol, passivePrice, qty, activeId);
+                    if (now - orderPlacedTimestamp.get() >= properties.getStrategy().getLimitSellTimeoutMs()) {
+                        emergencyExit(symbol, qty, rule, ExitReason.SELL_TIMEOUT);
+                    }
                     return;
                 }
-                BigDecimal price = initialExitPrice(bestAsk, rule);
-                if (!isValidOrder(qty, price, rule)) { halt("止盈卖单低于交易所最小名义额"); return; }
-                submitExitMakerOnce(symbol, price, qty, null);
+                submitImmediateExit(rule);
             }
             case HALTED -> { }
         }
@@ -619,7 +591,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             clearActiveOrder();
             if (holdingInventory.get().compareTo(rule.stepSize()) >= 0) {
                 currentStatus.set(ChurnStatus.SELLING);
-                statusReason.set("BUY 已成交，立即提交市价卖出");
+                statusReason.set("BUY 已成交，按实际成交均价挂限价卖单");
                 submitImmediateExit(rule);
             }
             else { currentStatus.set(ChurnStatus.IDLE); resetEntryTarget(); }
@@ -1324,7 +1296,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     private enum ExitReason {
-        NONE(false), TAKE_PROFIT(false), STOP_LOSS(true);
+        NONE(false), TAKE_PROFIT(false), STOP_LOSS(true), SELL_TIMEOUT(true);
         private final boolean emergency;
         ExitReason(boolean emergency) { this.emergency = emergency; }
     }
