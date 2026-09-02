@@ -252,7 +252,10 @@ class HighFrequencyVolumeChurnEngineTest {
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
         atomic("activeOrderId", Long.class).set(42L);
         atomic("activeClientOrderId", String.class).set("churn-BUY-1");
+        atomic("lastBestBid", BigDecimal.class).set(new BigDecimal("0.60"));
         when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(new BigDecimal("10"));
+        when(tradeService.placeMarketSell(eq("ENSOUSDT"), decimalEquals("10.0"), anyString()))
+                .thenReturn(new ObjectMapper().createObjectNode().put("orderId", 99L));
         UserDataStreamService.ExecutionUpdate fill = new UserDataStreamService.ExecutionUpdate(
                 42L, 7001L, "churn-BUY-1", "BUY", "TRADE", "FILLED",
                 new BigDecimal("10"), new BigDecimal("0.60"), new BigDecimal("10"),
@@ -670,9 +673,10 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void partialMakerBuyCancelsRemainderAndImmediatelySubmitsOneSell() throws Exception {
+    void partialMakerBuyCancelsRemainderAndImmediatelySubmitsOneMarketSell() throws Exception {
         prepareRestingMakerOrder();
         ObjectMapper mapper = new ObjectMapper();
+        atomic("lastBestBid", BigDecimal.class).set(new BigDecimal("0.862"));
         atomic("lastBestAsk", BigDecimal.class).set(new BigDecimal("0.863"));
         when(tradeService.cancelOrder("ENSOUSDT", 42L))
                 .thenReturn(mapper.readTree("{\"orderId\":42,\"status\":\"CANCELED\"}"));
@@ -686,8 +690,8 @@ class HighFrequencyVolumeChurnEngineTest {
                   "quoteQty":"6.034","commission":"0","commissionAsset":"USDT","isBuyer":true}]
                 """));
         when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(new BigDecimal("7.0"));
-        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), any(), decimalEquals("7.0"),
-                isNull(), anyString())).thenReturn(mapper.readTree("{\"orderId\":99}"));
+        when(tradeService.placeMarketSell(eq("ENSOUSDT"), decimalEquals("7.0"), anyString()))
+                .thenReturn(mapper.readTree("{\"orderId\":99}"));
 
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
                 new BigDecimal("0.862"), new BigDecimal("0.863"));
@@ -707,8 +711,9 @@ class HighFrequencyVolumeChurnEngineTest {
 
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
         assertEquals(99L, atomic("activeOrderId", Long.class).get());
-        verify(tradeService, times(1)).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), any(),
-                decimalEquals("7.0"), isNull(), anyString());
+        verify(tradeService, times(1)).placeMarketSell(eq("ENSOUSDT"), decimalEquals("7.0"), anyString());
+        verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), any(),
+                any(), any(), anyString());
         assertEquals(1, engine.getAccountingSnapshot().processedTradeCount());
     }
 

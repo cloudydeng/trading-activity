@@ -618,7 +618,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             clearActiveOrder();
             if (holdingInventory.get().compareTo(rule.stepSize()) >= 0) {
                 currentStatus.set(ChurnStatus.SELLING);
-                statusReason.set("持仓退出中：准备挂出 Maker 卖单");
+                statusReason.set("BUY 已成交，立即提交市价卖出");
                 submitImmediateExit(rule);
             }
             else { currentStatus.set(ChurnStatus.IDLE); resetEntryTarget(); }
@@ -820,23 +820,22 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     private void submitImmediateExit(SymbolRuleManager.SymbolRule rule) {
-        BigDecimal bestAsk = lastBestAsk.get();
-        if (bestAsk == null || bestAsk.signum() <= 0 || activeOrderId.get() != null
+        if (activeOrderId.get() != null
                 || currentStatus.get() != ChurnStatus.SELLING) return;
         BigDecimal quantity = PrecisionUtil.roundDownToStep(holdingInventory.get(), rule.stepSize());
-        BigDecimal price = initialExitPrice(bestAsk, rule);
-        if (!isValidOrder(quantity, price, rule)) {
+        BigDecimal bestBid = lastBestBid.get();
+        if (bestBid == null || !isValidOrder(quantity, bestBid, rule)) {
             halt("已成交持仓不足以创建有效卖单");
             return;
         }
-        submitExitMakerOnce(properties.getStrategy().getSymbol(), price, quantity, null);
+        emergencyExit(properties.getStrategy().getSymbol(), quantity, rule, ExitReason.IMMEDIATE_AFTER_BUY);
     }
 
     private boolean canSubmitImmediateExit(SymbolRuleManager.SymbolRule rule) {
-        BigDecimal bestAsk = lastBestAsk.get();
-        if (bestAsk == null || bestAsk.signum() <= 0) return false;
+        BigDecimal bestBid = lastBestBid.get();
+        if (bestBid == null || bestBid.signum() <= 0) return false;
         BigDecimal quantity = PrecisionUtil.roundDownToStep(holdingInventory.get(), rule.stepSize());
-        return isValidOrder(quantity, initialExitPrice(bestAsk, rule), rule);
+        return isValidOrder(quantity, bestBid, rule);
     }
 
     private void submitExitMakerOnce(String symbol, BigDecimal price, BigDecimal quantity, Long cancelOrderId) {
@@ -1103,8 +1102,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         JsonNode response = tradeService.placeMarketSell(symbol, qty, clientOrderId);
         if (response != null && response.has("orderId")) {
             trackOrder(response.get("orderId").asLong(), clientOrderId, ChurnStatus.SELLING);
-            statusReason.set("持仓紧急退出中：" + reason);
-            log.warn("触发 {}，已提交紧急市价减仓 {} {}", reason, qty, baseAsset());
+            if (reason == ExitReason.IMMEDIATE_AFTER_BUY) {
+                statusReason.set("BUY 成交后市价卖出中");
+                log.info("BUY 成交后已立即提交市价卖出 {} {}", qty, baseAsset());
+            } else {
+                statusReason.set("持仓紧急退出中：" + reason);
+                log.warn("触发 {}，已提交紧急市价减仓 {} {}", reason, qty, baseAsset());
+            }
         } else {
             reconcileAmbiguousSubmission(clientOrderId, ChurnStatus.SELLING, "紧急市价单结果未知");
         }
@@ -1305,7 +1309,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     private enum ExitReason {
-        NONE(false), TAKE_PROFIT(false), STOP_LOSS(true);
+        NONE(false), TAKE_PROFIT(false), STOP_LOSS(true), IMMEDIATE_AFTER_BUY(true);
         private final boolean emergency;
         ExitReason(boolean emergency) { this.emergency = emergency; }
     }
