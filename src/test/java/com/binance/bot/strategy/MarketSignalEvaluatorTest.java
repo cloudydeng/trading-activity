@@ -12,11 +12,25 @@ class MarketSignalEvaluatorTest {
     private final BinanceProperties.Strategy config = new BinanceProperties.Strategy();
 
     @Test
-    void permitsBalancedMarketOnlyWhenBidDepthAndMicropriceSupportIt() {
+    void permitsBalancedMarketWhenBidDepthSupportsIt() {
         MarketSignalEvaluator evaluator = new MarketSignalEvaluator();
         evaluator.recordQuote(decimal("100"), decimal("100"), decimal("101"), decimal("100"), 1_000, config);
         evaluator.recordQuote(decimal("100"), decimal("110"), decimal("101"), decimal("90"), 1_500, config);
         evaluator.recordDepth(decimal("1100"), decimal("900"), 1_500);
+
+        MarketSignalEvaluator.EntryDecision decision = evaluator.evaluate(1_500, config);
+
+        assertTrue(decision.allowed());
+        assertEquals("ALLOWED", decision.reason());
+    }
+
+    @Test
+    void permitsMildTopBookAskImbalanceWhenDepthAndFlowRemainSafe() {
+        MarketSignalEvaluator evaluator = new MarketSignalEvaluator();
+        config.setMinBookImbalance(-0.35);
+        evaluator.recordQuote(decimal("100"), decimal("80"), decimal("101"), decimal("120"), 1_000, config);
+        evaluator.recordQuote(decimal("100"), decimal("80"), decimal("101"), decimal("120"), 1_500, config);
+        evaluator.recordDepth(decimal("1000"), decimal("1000"), 1_500);
 
         MarketSignalEvaluator.EntryDecision decision = evaluator.evaluate(1_500, config);
 

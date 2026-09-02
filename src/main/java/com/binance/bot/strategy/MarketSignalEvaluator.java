@@ -55,8 +55,6 @@ public class MarketSignalEvaluator {
         BigDecimal totalQty = latest.bidQty().add(latest.askQty());
         if (totalQty.signum() == 0) return set(EntryDecision.block("EMPTY_TOP_OF_BOOK"));
         BigDecimal imbalance = latest.bidQty().subtract(latest.askQty()).divide(totalQty, MC);
-        BigDecimal microPrice = latest.ask().multiply(latest.bidQty()).add(latest.bid().multiply(latest.askQty())).divide(totalQty, MC);
-
         Quote first = quotes.peekFirst();
         BigDecimal firstMid = first.bid().add(first.ask()).divide(BigDecimal.valueOf(2), MC);
         BigDecimal returnBps = mid.subtract(firstMid).multiply(BigDecimal.valueOf(10_000)).divide(firstMid, MC);
@@ -85,7 +83,6 @@ public class MarketSignalEvaluator {
             recordSelloff(mid, nowMs);
             return set(EntryDecision.block("SELL_TAKER_PRESSURE", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
         }
-        if (microPrice.compareTo(mid) <= 0) return set(EntryDecision.block("MICROPRICE_NOT_SUPPORTIVE", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
         if (returnBps.compareTo(BigDecimal.valueOf(-config.getMaxDownwardMoveBps())) < 0) {
             recordSelloff(mid, nowMs);
             return set(EntryDecision.block("SHORT_TERM_DOWNMOVE", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));

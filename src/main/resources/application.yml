@@ -68,7 +68,8 @@ binance:
     depth-data-stale-ms: 2500
     # 连接存活与下单行情新鲜度分离：Binance 约每 20 秒发 Ping，45 秒无任何入站帧才重连。
     market-stream-watchdog-ms: 45000
-    min-book-imbalance: 0.05
+    # ENSO 买一经常小于卖一；允许轻度卖一占优，强卖压仍由成交流和跌幅保护拦截。
+    min-book-imbalance: -0.35
     min-depth-imbalance: -0.10
     min-taker-flow-imbalance: -0.20
     max-downward-move-bps: 8
