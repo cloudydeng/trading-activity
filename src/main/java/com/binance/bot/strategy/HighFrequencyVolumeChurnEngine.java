@@ -76,9 +76,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final ConcurrentHashMap<Long, Integer> tradeReconcileFailures = new ConcurrentHashMap<>();
     private final AtomicLong orderPlacedTimestamp = new AtomicLong(0);
     private final AtomicLong nextOrderAttemptAt = new AtomicLong(0);
+    private final AtomicLong stopLossCooldownUntil = new AtomicLong(0);
     private final AtomicLong clientOrderSequence = new AtomicLong(0);
     private final AtomicBoolean entryCancellationPending = new AtomicBoolean(false);
     private final AtomicBoolean exitSubmissionInFlight = new AtomicBoolean(false);
+    private final AtomicBoolean stopLossExitPending = new AtomicBoolean(false);
     private final AtomicBoolean marketConnectInProgress = new AtomicBoolean(false);
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
     private final AtomicBoolean acceptingMarketConnections = new AtomicBoolean(true);
@@ -481,6 +483,15 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         String symbol = properties.getStrategy().getSymbol();
         switch (currentStatus.get()) {
             case IDLE -> {
+                long cooldownUntil = stopLossCooldownUntil.get();
+                if (now < cooldownUntil) {
+                    long remainingSeconds = Math.max(1, (cooldownUntil - now + 999) / 1_000);
+                    statusReason.set("止损后冷却中，剩余 " + remainingSeconds + " 秒");
+                    return;
+                }
+                if (cooldownUntil > 0 && stopLossCooldownUntil.compareAndSet(cooldownUntil, 0)) {
+                    statusReason.set("运行中，等待入场信号");
+                }
                 MarketSignalEvaluator.EntryDecision decision = marketSignalEvaluator.evaluate(now, properties.getStrategy());
                 if (!decision.allowed()) {
                     log.debug("新开仓被信号层阻止: {} (book={}, depth={}, flow={}, returnBps={}, rangeBps={})", decision.reason(), decision.bookImbalance(), decision.depthImbalance(), decision.takerFlowImbalance(), decision.returnBps(), decision.rangeBps());
@@ -521,26 +532,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     return;
                 }
                 long restingMs = now - orderPlacedTimestamp.get();
-                if (properties.getStrategy().getMakerEntryFallbackMs() > 0
-                        && restingMs >= properties.getStrategy().getMakerEntryFallbackMs()) {
-                    fallbackMakerEntryToIoc(symbol, orderId, bestAsk, rule);
-                    return;
+                long makerTimeoutMs = Math.max(properties.getStrategy().getOrderTtlMs(),
+                        properties.getStrategy().getMinEntryOrderRestMs());
+                if (!entryCancellationPending.get() && restingMs >= makerTimeoutMs) {
+                    cancelActiveEntryOrder("Maker 买单超时，取消等待下一次信号（不转 IOC）");
                 }
-                if (entryCancellationPending.get()
-                        || restingMs < properties.getStrategy().getMinEntryOrderRestMs()
-                        || restingMs <= properties.getStrategy().getOrderTtlMs()) return;
-                BigDecimal qty = PrecisionUtil.roundDownToStep(
-                        targetEntryQuantity.get().subtract(filledEntryQuantity.get()).max(BigDecimal.ZERO), rule.stepSize());
-                BigDecimal price = PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(BigDecimal.valueOf(properties.getStrategy().getBidDepthOffsetTicks()))), rule.tickSize());
-                if (!isValidOrder(qty, price, rule)) {
-                    cancelActiveEntryOrder("目标数量的剩余部分不足以继续挂单");
-                    return;
-                }
-                if (!riskGuard.permitsNewEntry(qty, price, now, properties.getStrategy())) {
-                    cancelActiveEntryOrder("风险熔断: " + riskGuard.getEntryBlockReason());
-                    return;
-                }
-                submitMakerOrder(symbol, "BUY", price, qty, orderId, ChurnStatus.BUYING);
             }
             case SELLING -> {
                 ExitReason exitReason = exitReason(bestBid, rule);
@@ -950,99 +946,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
     }
 
-    private void fallbackMakerEntryToIoc(String symbol, long makerOrderId, BigDecimal bestAsk,
-                                         SymbolRuleManager.SymbolRule rule) {
-        if (!entryCancellationPending.compareAndSet(false, true)) return;
-        replacingOrderId.set(makerOrderId);
-        try {
-            tradeService.cancelOrder(symbol, makerOrderId);
-            JsonNode finalOrder = tradeService.getOrder(symbol, makerOrderId);
-            if (finalOrder == null || !isTerminal(finalOrder.path("status").asText())) {
-                liveArmed.set(false);
-                halt("Maker 转 IOC 前无法确认原买单已终止");
-                return;
-            }
-            BigDecimal exchangeExecuted = new BigDecimal(finalOrder.path("executedQty").asText("0"));
-            if (exchangeExecuted.signum() > 0) {
-                if (filledEntryQuantity.get().compareTo(exchangeExecuted) < 0) {
-                    nextOrderAttemptAt.set(System.currentTimeMillis() + 1_000);
-                    CompletableFuture.delayedExecutor(750, TimeUnit.MILLISECONDS)
-                            .execute(() -> reconcileMakerFillFromExchange(makerOrderId, exchangeExecuted));
-                    log.info("Maker 撤单终态包含成交 {}，等待账户成交流完成本地对账，不再追加 IOC", exchangeExecuted);
-                } else {
-                    clearActiveOrder();
-                    currentStatus.set(ChurnStatus.SELLING);
-                    log.info("Maker 已部分成交 {}，不再追加 IOC，转入持仓退出管理", exchangeExecuted);
-                }
-                return;
-            }
-            clearActiveOrder();
-            BigDecimal remaining = PrecisionUtil.roundDownToStep(
-                    targetEntryQuantity.get().subtract(filledEntryQuantity.get()).max(BigDecimal.ZERO), rule.stepSize());
-            BigDecimal limitPrice = PrecisionUtil.roundDownToStep(
-                    bestAsk.add(rule.tickSize().multiply(BigDecimal.valueOf(
-                            Math.max(0, properties.getStrategy().getEntryIocMaxSlippageTicks())))), rule.tickSize());
-            remaining = capEntryQuantity(remaining, limitPrice, rule);
-            if (!isValidOrder(remaining, limitPrice, rule)) {
-                finishAbandonedEntry(rule);
-                log.warn("Maker 转 IOC 的剩余数量不满足交易规则，放弃追加");
-                return;
-            }
-            if (!riskGuard.permitsNewEntry(remaining, limitPrice, System.currentTimeMillis(),
-                    properties.getStrategy())) {
-                finishAbandonedEntry(rule);
-                log.warn("Maker 转 IOC 前被风险熔断阻止: {}", riskGuard.getEntryBlockReason());
-                return;
-            }
-            String clientOrderId = nextClientOrderId("BUYI");
-            pendingClientOrderIds.add(clientOrderId);
-            activeClientOrderId.set(clientOrderId);
-            JsonNode response = tradeService.placeLimitIocBuy(symbol, remaining, limitPrice, clientOrderId);
-            if (response == null) {
-                reconcileAmbiguousSubmission(clientOrderId, ChurnStatus.BUYING, "IOC 买单结果未知");
-            } else if (response.has("orderId")) {
-                trackOrder(response.get("orderId").asLong(), clientOrderId, ChurnStatus.BUYING);
-                log.warn("Maker 未成交，已提交受限 IOC 买单: ID={} qty={} limitPrice={}",
-                        response.get("orderId").asLong(), remaining, limitPrice);
-            } else if (response.has("code")) {
-                pendingClientOrderIds.remove(clientOrderId);
-                activeClientOrderId.compareAndSet(clientOrderId, null);
-                nextOrderAttemptAt.set(System.currentTimeMillis() + 1_000);
-                finishAbandonedEntry(rule);
-                log.warn("受限 IOC 买单被交易所拒绝，已退避 1 秒: code={}, msg={}",
-                        response.path("code").asText("unknown"), response.path("msg").asText("unknown"));
-            } else {
-                reconcileAmbiguousSubmission(clientOrderId, ChurnStatus.BUYING, "IOC 买单响应无法解释");
-            }
-        } finally {
-            replacingOrderId.compareAndSet(makerOrderId, null);
-            entryCancellationPending.set(false);
-        }
-    }
-
-    private synchronized void reconcileMakerFillFromExchange(long makerOrderId, BigDecimal exchangeExecuted) {
-        if (!Long.valueOf(makerOrderId).equals(activeOrderId.get())
-                || currentStatus.get() != ChurnStatus.BUYING) return;
-        if (filledEntryQuantity.get().compareTo(exchangeExecuted) >= 0
-                && holdingInventory.get().signum() > 0) {
-            clearActiveOrder();
-            currentStatus.set(ChurnStatus.SELLING);
-            log.info("Maker 成交已由账户成交流对账，转入持仓退出管理");
-            return;
-        }
-        liveArmed.set(false);
-        halt("Maker 转 IOC 时成交回报超时，需人工对账");
-    }
-
-    private void finishAbandonedEntry(SymbolRuleManager.SymbolRule rule) {
-        if (holdingInventory.get().compareTo(rule.stepSize()) >= 0) {
-            currentStatus.set(ChurnStatus.SELLING);
-        } else {
-            currentStatus.set(ChurnStatus.IDLE);
-            resetEntryTarget();
-        }
-    }
-
     private BigDecimal capEntryQuantity(BigDecimal quantity, BigDecimal price,
                                         SymbolRuleManager.SymbolRule rule) {
         BigDecimal maxQuantity = properties.getStrategy().getMaxLiveOrderNotionalUsdt()
@@ -1075,7 +978,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 activeClientOrderId.compareAndSet(clientOrderId, null);
                 nextOrderAttemptAt.set(System.currentTimeMillis() + 1_000);
                 CompletableFuture.delayedExecutor(750, TimeUnit.MILLISECONDS)
-                        .execute(() -> reconcileMakerFillFromExchange(oldOrderId, exchangeExecuted));
+                        .execute(() -> reconcileCancelledMakerFill(oldOrderId, exchangeExecuted));
                 log.info("撤换单的原订单终态包含成交 {}，等待账户成交流对账", exchangeExecuted);
                 return;
             }
@@ -1110,6 +1013,21 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         reconcileAmbiguousSubmission(clientOrderId, status, "无法解释 cancelReplace 组合结果");
     }
 
+    private synchronized void reconcileCancelledMakerFill(long makerOrderId, BigDecimal exchangeExecuted) {
+        if (!Long.valueOf(makerOrderId).equals(activeOrderId.get())
+                || currentStatus.get() != ChurnStatus.BUYING) return;
+        if (filledEntryQuantity.get().compareTo(exchangeExecuted) >= 0
+                && holdingInventory.get().signum() > 0) {
+            clearActiveOrder();
+            currentStatus.set(ChurnStatus.SELLING);
+            statusReason.set("BUY 撤单包含成交，立即退出已成交持仓");
+            log.info("已撤销 Maker 买单的成交已由账户成交流对账，转入持仓退出管理");
+            return;
+        }
+        liveArmed.set(false);
+        halt("Maker 买单撤销后的成交回报超时，需人工对账");
+    }
+
     private void reconcileAmbiguousSubmission(String clientOrderId, ChurnStatus status, String reason) {
         JsonNode openOrders = tradeService.getOpenOrders(properties.getStrategy().getSymbol());
         if (openOrders == null) {
@@ -1141,6 +1059,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     private void emergencyExit(String symbol, BigDecimal requestedQty, SymbolRuleManager.SymbolRule rule, ExitReason reason) {
+        if (reason == ExitReason.STOP_LOSS) stopLossExitPending.set(true);
         Long makerOrderId = activeOrderId.get();
         if (makerOrderId != null) {
             JsonNode cancel = tradeService.cancelOrder(symbol, makerOrderId);
@@ -1316,8 +1235,15 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         syncDailyCounters();
         currentStatus.set(ChurnStatus.IDLE);
         resetEntryTarget();
-        statusReason.set(isRunning.get() ? "运行中，等待入场信号"
-                : "人工授权市价清仓已完成" + (restReconciled ? "（REST 对账）" : ""));
+        if (stopLossExitPending.getAndSet(false) && isRunning.get()) {
+            long cooldownUntil = System.currentTimeMillis()
+                    + Math.max(0, properties.getStrategy().getStopLossCooldownMs());
+            stopLossCooldownUntil.set(cooldownUntil);
+            statusReason.set("止损平仓完成，进入 3 分钟新开仓冷却");
+        } else {
+            statusReason.set(isRunning.get() ? "运行中，等待入场信号"
+                    : "人工授权市价清仓已完成" + (restReconciled ? "（REST 对账）" : ""));
+        }
     }
 
     private boolean continueAfterConfirmedFlatSell(long orderId, String side,
@@ -1654,6 +1580,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return credentialManager.profileViews();
     }
     public String getRiskBlockReason() { return riskGuard.getEntryBlockReason(); }
+    public long getStopLossCooldownUntilMs() { return stopLossCooldownUntil.get(); }
     public String getExecutionMode() { return properties.getStrategy().getExecutionMode(); }
     public boolean isAccountStreamReady() { return userDataStreamService.isReady(); }
     public int getMinimumPaperObservations() { return properties.getStrategy().getMinPaperObservations(); }

@@ -58,9 +58,7 @@ binance:
     order-ttl-ms: 5000
     # 盘口/深度的瞬时噪声不会立即撤单；强卖压、快速下跌等硬风险不受此限制。
     min-entry-order-rest-ms: 800
-    # Maker 两秒仍未成交且信号仍有效时，撤单确认后以受限 IOC 买入，最多越过卖一 1 tick。
-    maker-entry-fallback-ms: 2000
-    entry-ioc-max-slippage-ticks: 1
+    # 买入只允许 Maker；5 秒未成交就撤单等待，不追卖一、不转 IOC。
     # 每笔固定 11U；数量仅按交易所 stepSize 向下取整，不再随机放大/缩小。
     random-size-jitter: 0
     # 新开仓信号窗口与保护阈值；均应先在 Testnet 回测和验证后调整
@@ -84,6 +82,8 @@ binance:
     # take-profit-bps 是扣除预计卖出手续费后的净利润目标。
     take-profit-bps: 10
     stop-loss-bps: 30
+    # 只有止损平仓后暂停新开仓 3 分钟；正常盈利平仓不冷却。
+    stop-loss-cooldown-ms: 180000
     # 15 秒后允许向盘口下调 Maker 卖价，但永远不得跌破手续费后目标价。
     exit-reprice-after-ms: 15000
     exit-reprice-interval-ms: 5000
