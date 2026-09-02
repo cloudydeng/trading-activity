@@ -55,10 +55,10 @@ binance:
     # 初始卖单在卖一与手续费后净利润目标中取较高者；0 表示不额外抬高卖一。
     ask-depth-offset-ticks: 0
     # 挂单超时时间 (毫秒，超时后跟随最新盘口位移)
-    order-ttl-ms: 5000
+    order-ttl-ms: 20000
     # 盘口/深度的瞬时噪声不会立即撤单；强卖压、快速下跌等硬风险不受此限制。
     min-entry-order-rest-ms: 800
-    # 买入只允许 Maker；5 秒未成交就撤单等待，不追卖一、不转 IOC。
+    # 买入只允许 Maker；20 秒未成交就撤单等待，不追卖一、不转 IOC。
     # 每笔固定 11U；数量仅按交易所 stepSize 向下取整，不再随机放大/缩小。
     random-size-jitter: 0
     # 新开仓信号窗口与保护阈值；均应先在 Testnet 回测和验证后调整
