@@ -73,6 +73,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final TradeAccountingLedger accountingLedger = new TradeAccountingLedger();
     private final ConcurrentHashMap<String, CommissionPrice> commissionPriceCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, Integer> orderReconcileFailures = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, Integer> tradeReconcileFailures = new ConcurrentHashMap<>();
     private final AtomicLong orderPlacedTimestamp = new AtomicLong(0);
     private final AtomicLong nextOrderAttemptAt = new AtomicLong(0);
     private final AtomicLong clientOrderSequence = new AtomicLong(0);
@@ -734,7 +735,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private boolean reconcileTerminalEvent(long orderId, String side, BigDecimal expectedQuantity,
                                            BigDecimal expectedQuote, SymbolRuleManager.SymbolRule rule) {
         if (accountingLedger.accountedQuantity(orderId).compareTo(expectedQuantity) < 0
-                && !reconcileOrderTrades(orderId, side, expectedQuantity, expectedQuote)) return false;
+                && !reconcileOrderTrades(orderId, side, expectedQuantity, expectedQuote)) {
+            statusReason.set("等待订单 " + orderId + " 的 REST 成交明细完成同步");
+            scheduleOrderReconciliation(orderId);
+            return false;
+        }
         if (!reconcileInventory(rule, "订单 " + orderId + " 终态")) return false;
         markRestReconciled(orderId);
         return true;
@@ -744,8 +749,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                          BigDecimal expectedQuote) {
         JsonNode trades = tradeService.getMyTrades(properties.getStrategy().getSymbol(), orderId);
         if (trades == null || !trades.isArray()) {
-            liveArmed.set(false);
-            halt("无法读取订单 " + orderId + " 的真实成交与手续费明细");
+            log.warn("订单 {} 的真实成交与手续费明细暂不可用，等待 REST 重试", orderId);
             return false;
         }
         for (JsonNode trade : trades) {
@@ -763,8 +767,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         BigDecimal accountedQuote = accountingLedger.accountedQuote(orderId);
         if (accountedQuantity.compareTo(expectedQuantity) != 0
                 || (expectedQuote != null && expectedQuote.signum() > 0 && accountedQuote.compareTo(expectedQuote) != 0)) {
-            liveArmed.set(false);
-            halt("订单 " + orderId + " 成交明细与订单累计值不一致，需人工对账");
+            log.warn("订单 {} 成交明细尚未追平累计值: qty={}/{}, quote={}/{}",
+                    orderId, accountedQuantity, expectedQuantity, accountedQuote, expectedQuote);
             return false;
         }
         return true;
@@ -1155,6 +1159,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                         makerOrderId, finalOrder.path("status").asText());
             }
             reconcileTrackedOrder(makerOrderId);
+            if (Long.valueOf(makerOrderId).equals(activeOrderId.get())) {
+                statusReason.set("等待原卖单 REST 对账完成后继续退出管理");
+                return;
+            }
         }
         BigDecimal freeBalance = tradeService.getFreeAssetBalance(baseAsset());
         if (freeBalance == null) {
@@ -1267,8 +1275,21 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             halt("订单终态已确认，但交易规则不可用");
             return;
         }
-        if (executedQty.signum() > 0 && !reconcileOrderTrades(orderId, side, executedQty, cumulativeQuote)) return;
+        if (executedQty.signum() > 0 && !reconcileOrderTrades(orderId, side, executedQty, cumulativeQuote)) {
+            int failures = tradeReconcileFailures.merge(orderId, 1, Integer::sum);
+            if (failures < 3) {
+                statusReason.set("订单 " + orderId + " 对账同步中（" + failures + "/3）");
+                scheduleOrderReconciliation(orderId);
+                return;
+            }
+            tradeReconcileFailures.remove(orderId);
+            if (continueAfterConfirmedFlatSell(orderId, side, rule)) return;
+            liveArmed.set(false);
+            halt("订单 " + orderId + " 连续三次成交明细不一致，且无法确认安全空仓");
+            return;
+        }
         if (!reconcileInventory(rule, "订单 " + orderId + " REST 对账")) return;
+        tradeReconcileFailures.remove(orderId);
         BigDecimal reconciledInventory = holdingInventory.get();
         markRestReconciled(orderId);
         clearActiveOrder();
@@ -1285,6 +1306,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private void completeFlatExit(boolean restReconciled) {
         holdingInventory.set(BigDecimal.ZERO);
         riskGuard.reconcileExchangeFlat(System.currentTimeMillis(), properties.getStrategy());
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule(properties.getStrategy().getSymbol());
+        if (rule == null || !dailyStatsStore.reconcileFlatDust(credentialManager.currentAlias(),
+                properties.getStrategy().getSymbol(), rule.stepSize())) {
+            liveArmed.set(false);
+            halt("交易所已空仓，但每日账本无法安全归零");
+            return;
+        }
         syncDailyCounters();
         currentStatus.set(ChurnStatus.IDLE);
         resetEntryTarget();
@@ -1292,9 +1320,32 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 : "人工授权市价清仓已完成" + (restReconciled ? "（REST 对账）" : ""));
     }
 
+    private boolean continueAfterConfirmedFlatSell(long orderId, String side,
+                                                    SymbolRuleManager.SymbolRule rule) {
+        if (!"SELL".equalsIgnoreCase(side)) return false;
+        BinanceOptimizedTradeService.AssetBalance balance = tradeService.getAssetBalance(baseAsset());
+        if (balance == null) {
+            BigDecimal free = tradeService.getFreeAssetBalance(baseAsset());
+            if (free != null) balance = new BinanceOptimizedTradeService.AssetBalance(
+                    baseAsset(), free, BigDecimal.ZERO, free);
+        }
+        JsonNode openOrders = tradeService.getOpenOrders(properties.getStrategy().getSymbol());
+        if (balance == null || openOrders == null || !openOrders.isEmpty()
+                || balance.total().compareTo(rule.stepSize()) >= 0) return false;
+        holdingInventory.set(balance.total());
+        markRestReconciled(orderId);
+        clearActiveOrder();
+        completeFlatExit(true);
+        if (currentStatus.get() != ChurnStatus.HALTED) {
+            log.warn("订单 {} 的成交明细延迟，但交易所已确认空仓且无活动订单；继续运行", orderId);
+        }
+        return true;
+    }
+
     private void clearActiveOrder() {
         Long orderId = activeOrderId.getAndSet(null);
         if (orderId != null) knownOrderIds.remove(orderId);
+        if (orderId != null) tradeReconcileFailures.remove(orderId);
         String clientOrderId = activeClientOrderId.getAndSet(null);
         if (clientOrderId != null) pendingClientOrderIds.remove(clientOrderId);
         entryCancellationPending.set(false);
@@ -1308,6 +1359,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         pendingClientOrderIds.clear();
         restReconciledOrderIds.clear();
         orderReconcileFailures.clear();
+        tradeReconcileFailures.clear();
         replacingOrderId.set(null);
     }
 

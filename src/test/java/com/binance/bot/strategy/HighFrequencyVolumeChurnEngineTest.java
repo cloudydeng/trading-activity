@@ -84,6 +84,7 @@ class HighFrequencyVolumeChurnEngineTest {
         when(dailyStatsStore.recordTrade(anyString(), anyString(), anyLong(), anyLong(), anyString(),
                 any(), any(), any(), any(), any(), anyLong()))
                 .thenReturn(DailyTradeStatsStore.RecordResult.APPLIED);
+        when(dailyStatsStore.reconcileFlatDust(anyString(), anyString(), any())).thenReturn(true);
         when(dailyStatsStore.today(anyString(), anyString())).thenReturn(new DailyTradeStatsStore.DailyStatsSnapshot(
                 LocalDate.now(), "unlabeled", "ENSOUSDT", BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
                 BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
@@ -468,6 +469,38 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
         assertNull(atomic("activeOrderId", Long.class).get());
         assertTrue(engine.getStatusReason().get().contains("REST 对账"));
+    }
+
+    @Test
+    void delayedSellTradesContinueRunningAfterThreeRetriesWhenExchangeIsFlat() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        engine.getIsRunning().set(true);
+        engine.getLiveArmed().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
+        ((TradingRiskGuard) ReflectionTestUtils.getField(engine, "riskGuard"))
+                .recordFill("BUY", new BigDecimal("10"), new BigDecimal("0.60"), 1, properties.getStrategy());
+        ReflectionTestUtils.invokeMethod(engine, "trackOrder", 91L, "churn-SELLM-2",
+                HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        when(tradeService.getOrder("ENSOUSDT", 91L)).thenReturn(mapper.readTree("""
+                {"orderId":91,"status":"FILLED","side":"SELL","executedQty":"10",
+                 "cummulativeQuoteQty":"6.02","price":"0"}
+                """));
+        when(tradeService.getMyTrades("ENSOUSDT", 91L)).thenReturn(mapper.readTree("[]"));
+        when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(BigDecimal.ZERO);
+        when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
+
+        ReflectionTestUtils.invokeMethod(engine, "reconcileTrackedOrder", 91L);
+        ReflectionTestUtils.invokeMethod(engine, "reconcileTrackedOrder", 91L);
+        assertEquals(91L, atomic("activeOrderId", Long.class).get());
+        ReflectionTestUtils.invokeMethod(engine, "reconcileTrackedOrder", 91L);
+
+        assertNull(atomic("activeOrderId", Long.class).get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+        assertTrue(engine.getIsRunning().get());
+        assertTrue(engine.getLiveArmed().get());
+        assertEquals(0, engine.getRiskSnapshot().positionQty().signum());
+        assertEquals("运行中，等待入场信号", engine.getStatusReason().get());
     }
 
     @Test

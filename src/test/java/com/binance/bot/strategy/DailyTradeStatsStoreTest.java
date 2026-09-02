@@ -48,6 +48,24 @@ class DailyTradeStatsStoreTest {
         restarted.close();
     }
 
+    @Test
+    void exchangeFlatReconciliationNormalizesOnlySubStepDust() {
+        BinanceProperties properties = properties();
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties);
+        long now = System.currentTimeMillis();
+        store.recordTrade("lee", "ENSOUSDT", 20, 2001, "BUY", new BigDecimal("10"),
+                new BigDecimal("8.50"), BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, now);
+        store.recordTrade("lee", "ENSOUSDT", 21, 2002, "SELL", new BigDecimal("9.999"),
+                new BigDecimal("8.509149"), BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, now);
+
+        assertEquals(true, store.reconcileFlatDust("lee", "ENSOUSDT", new BigDecimal("0.01")));
+        DailyTradeStatsStore.DailyStatsSnapshot stats = store.today("lee", "ENSOUSDT");
+        assertDecimal("0", stats.positionQty());
+        assertDecimal("0", stats.positionCostQuote());
+        assertEquals(1, stats.roundTrips());
+        store.close();
+    }
+
     private BinanceProperties properties() {
         BinanceProperties properties = new BinanceProperties();
         properties.getStrategy().setSymbol("ENSOUSDT");

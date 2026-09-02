@@ -174,6 +174,38 @@ public class DailyTradeStatsStore {
         return snapshot(LocalDate.now(ZoneOffset.UTC), apiAlias, symbol);
     }
 
+    /** Normalizes only an untradeable remainder after the exchange has proved the account flat. */
+    public synchronized boolean reconcileFlatDust(String apiAlias, String symbol, BigDecimal stepSize) {
+        LocalDate date = LocalDate.now(ZoneOffset.UTC);
+        String alias = normalizeAlias(apiAlias);
+        String normalizedSymbol = symbol.toUpperCase();
+        try {
+            connection.setAutoCommit(false);
+            MutableStats stats = load(date, alias, normalizedSymbol);
+            if (stats == null || stats.positionQty.signum() == 0) {
+                connection.rollback();
+                return true;
+            }
+            if (stepSize == null || stepSize.signum() <= 0 || stats.positionQty.compareTo(stepSize) >= 0) {
+                connection.rollback();
+                return false;
+            }
+            stats.realizedGrossPnl = stats.realizedGrossPnl.subtract(stats.positionCostQuote);
+            stats.positionQty = BigDecimal.ZERO;
+            stats.positionCostQuote = BigDecimal.ZERO;
+            stats.roundTrips++;
+            upsert(stats);
+            connection.commit();
+            return true;
+        } catch (Exception e) {
+            rollbackQuietly();
+            log.error("每日账本粉尘归零失败: alias={} symbol={}", alias, normalizedSymbol, e);
+            return false;
+        } finally {
+            setAutoCommitQuietly(true);
+        }
+    }
+
     public synchronized DailyStatsSnapshot snapshot(LocalDate date, String apiAlias, String symbol) {
         try {
             MutableStats stats = load(date, normalizeAlias(apiAlias), symbol.toUpperCase());
