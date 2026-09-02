@@ -56,11 +56,11 @@ binance:
     ask-depth-offset-ticks: 0
     # 挂单超时时间 (毫秒，超时后跟随最新盘口位移)
     order-ttl-ms: 20000
-    # 每张卖单管理 60 秒；超时撤单对账后，将剩余持仓按最新卖一价重新挂 LIMIT GTC。
-    limit-sell-timeout-ms: 60000
+    # 每张卖单管理 2 分钟；超时撤单对账后，将剩余持仓按最新卖一价重新挂 LIMIT GTC。
+    limit-sell-timeout-ms: 120000
     # 仅作为兼容配置；买单现在固定驻留至 20 秒 TTL，不再因短线信号撤单。
     min-entry-order-rest-ms: 800
-    # 买入只允许 Maker；20 秒未成交就撤单等待，不追卖一、不转 IOC。
+    # 买入只允许 Maker；20 秒后若仍在买一则继续挂，否则撤单，不追卖一、不转 IOC。
     # 每笔固定 6U；数量仅按交易所 stepSize 向下取整，不再随机放大/缩小。
     random-size-jitter: 0
     # 新开仓信号窗口与保护阈值；均应先在 Testnet 回测和验证后调整

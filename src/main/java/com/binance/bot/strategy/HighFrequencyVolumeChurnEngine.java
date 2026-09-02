@@ -507,7 +507,14 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 long makerTimeoutMs = Math.max(properties.getStrategy().getOrderTtlMs(),
                         properties.getStrategy().getMinEntryOrderRestMs());
                 if (!entryCancellationPending.get() && restingMs >= makerTimeoutMs) {
-                    cancelActiveEntryOrder("Maker 买单超时，取消等待下一次信号（不转 IOC）");
+                    BigDecimal orderPrice = activeOrderPrice.get();
+                    BigDecimal currentBestBid = PrecisionUtil.roundDownToStep(bestBid, rule.tickSize());
+                    if (orderPrice != null && orderPrice.compareTo(currentBestBid) == 0) {
+                        statusReason.set("Maker 买单已满 20 秒但仍处于买一，继续挂单 @ "
+                                + orderPrice.toPlainString());
+                    } else {
+                        cancelActiveEntryOrder("Maker 买单已不在买一，撤单等待重新挂单（不转 IOC）");
+                    }
                 }
             }
             case SELLING -> {
@@ -801,7 +808,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     /**
-     * Every sell order has a 60-second working window. Once it expires, cancel and
+     * Every sell order has a two-minute working window. Once it expires, cancel and
      * reconcile the old order before placing the remaining inventory at the latest
      * best ask. This repeats for each replacement and never falls back to MARKET.
      */
@@ -813,7 +820,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             JsonNode finalOrder = tradeService.getOrder(symbol, orderId);
             if (finalOrder == null || !isTerminal(finalOrder.path("status").asText())) {
                 liveArmed.set(false);
-                halt("60 秒卖单超时后无法确认原限价卖单已撤销");
+                halt("2 分钟卖单超时后无法确认原限价卖单已撤销");
                 return;
             }
             if (cancel == null || cancel.has("code")) {
@@ -836,9 +843,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             JsonNode response = tradeService.placeLimitGtcSell(symbol, quantity, price, clientOrderId);
             if (response != null && response.has("orderId")) {
                 trackOrder(response.get("orderId").asLong(), clientOrderId, ChurnStatus.SELLING);
-                statusReason.set("上一张卖单满 60 秒，剩余持仓已按卖一价挂 LIMIT @ "
+                statusReason.set("上一张卖单满 2 分钟，剩余持仓已按卖一价挂 LIMIT @ "
                         + price.toPlainString());
-                log.info("卖单满 60 秒，已按最新卖一价重新挂 LIMIT {} {} @ {}",
+                log.info("卖单满 2 分钟，已按最新卖一价重新挂 LIMIT {} {} @ {}",
                         quantity, baseAsset(), price);
             } else {
                 reconcileAmbiguousSubmission(clientOrderId, ChurnStatus.SELLING,

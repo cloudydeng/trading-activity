@@ -337,7 +337,7 @@ class HighFrequencyVolumeChurnEngineTest {
         atomic("activeOrderId", Long.class).set(77L);
         atomic("activeClientOrderId", String.class).set("churn-SELLG-old");
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
-                .set(System.currentTimeMillis() - 61_000);
+                .set(System.currentTimeMillis() - 121_000);
         TradingRiskGuard guard = (TradingRiskGuard) ReflectionTestUtils.getField(engine, "riskGuard");
         guard.recordFill("BUY", new BigDecimal("10"), new BigDecimal("0.60"),
                 System.currentTimeMillis(), properties.getStrategy());
@@ -363,7 +363,7 @@ class HighFrequencyVolumeChurnEngineTest {
         assertTrue(engine.getStatusReason().get().contains("卖一价"));
 
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
-                .set(System.currentTimeMillis() - 61_000);
+                .set(System.currentTimeMillis() - 121_000);
         when(tradeService.cancelOrder("ENSOUSDT", 88L))
                 .thenReturn(mapper.readTree("{\"orderId\":88,\"status\":\"CANCELED\"}"));
         when(tradeService.getOrder("ENSOUSDT", 88L)).thenReturn(mapper.readTree(
@@ -621,6 +621,7 @@ class HighFrequencyVolumeChurnEngineTest {
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
         atomic("activeOrderId", Long.class).set(42L);
         atomic("activeClientOrderId", String.class).set("churn-BUY-maker");
+        atomic("activeOrderPrice", BigDecimal.class).set(new BigDecimal("0.861"));
         atomic("targetEntryQuantity", BigDecimal.class).set(new BigDecimal("7.00"));
         atomic("filledEntryQuantity", BigDecimal.class).set(BigDecimal.ZERO);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
@@ -645,6 +646,24 @@ class HighFrequencyVolumeChurnEngineTest {
         assertNull(atomic("activeOrderId", Long.class).get());
         assertTrue(engine.getIsRunning().get());
         assertTrue(engine.getLiveArmed().get());
+    }
+
+    @Test
+    void makerEntryPastTimeoutRemainsWhenItIsStillBestBid() {
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
+        atomic("activeOrderId", Long.class).set(42L);
+        atomic("activeClientOrderId", String.class).set("churn-BUY-maker");
+        atomic("activeOrderPrice", BigDecimal.class).set(new BigDecimal("0.862"));
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis() - 25_000);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.862"), new BigDecimal("0.863"));
+
+        verify(tradeService, never()).cancelOrder("ENSOUSDT", 42L);
+        assertEquals(42L, atomic("activeOrderId", Long.class).get());
+        assertTrue(engine.getStatusReason().get().contains("仍处于买一"));
     }
 
     @Test
