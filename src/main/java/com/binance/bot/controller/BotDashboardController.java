@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.http.ResponseEntity;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -116,9 +117,17 @@ public class BotDashboardController {
     }
 
     private OrderView orderView(JsonNode order) {
+        BigDecimal executedQty = decimal(order.path("executedQty").asText("0"));
+        BigDecimal quoteQty = decimal(order.path("cummulativeQuoteQty").asText("0"));
+        String displayPrice = order.path("price").asText("0");
+        if ("MARKET".equalsIgnoreCase(order.path("type").asText())
+                && executedQty.signum() > 0 && quoteQty.signum() > 0) {
+            displayPrice = quoteQty.divide(executedQty, 16, RoundingMode.HALF_UP)
+                    .stripTrailingZeros().toPlainString();
+        }
         return new OrderView(order.path("orderId").asLong(0), order.path("clientOrderId").asText(""),
                 order.path("side").asText(""), order.path("type").asText(""), order.path("status").asText(""),
-                order.path("price").asText("0"), order.path("origQty").asText("0"),
+                displayPrice, order.path("origQty").asText("0"),
                 order.path("executedQty").asText("0"), order.path("cummulativeQuoteQty").asText("0"),
                 order.path("time").asLong(order.path("updateTime").asLong(0)));
     }

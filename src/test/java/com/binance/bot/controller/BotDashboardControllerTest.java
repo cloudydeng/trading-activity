@@ -45,6 +45,7 @@ class BotDashboardControllerTest {
                 """));
         when(tradeService.getAllOrders("ENSOUSDT", 100)).thenReturn(mapper.readTree("""
                 [{"orderId":1,"side":"BUY","type":"LIMIT_MAKER","status":"FILLED","executedQty":"7","price":"0.8","time":10},
+                 {"orderId":3,"side":"SELL","type":"MARKET","status":"FILLED","executedQty":"12.89","cummulativeQuoteQty":"10.9565","price":"0","time":30},
                  {"orderId":2,"side":"BUY","type":"LIMIT_MAKER","status":"CANCELED","executedQty":"0","price":"0.8","time":20}]
                 """));
         when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
@@ -56,8 +57,9 @@ class BotDashboardControllerTest {
         BotDashboardController.AccountSnapshot body = (BotDashboardController.AccountSnapshot) response.getBody();
         assertEquals("lee-sub-account-bot", body.apiKeyAlias());
         assertEquals(1, body.balances().size());
-        assertEquals(1, body.filledOrders().size());
+        assertEquals(2, body.filledOrders().size());
         assertEquals(0, body.openOrders().size());
-        assertEquals(1L, body.filledOrders().get(0).orderId());
+        assertEquals(3L, body.filledOrders().get(0).orderId());
+        assertEquals("0.85", body.filledOrders().get(0).price());
     }
 }
