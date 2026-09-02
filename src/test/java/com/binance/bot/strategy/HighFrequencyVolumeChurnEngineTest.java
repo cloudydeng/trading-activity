@@ -290,36 +290,21 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void stopLossUsesEmergencyMarketSellInsteadOfPostOnlyMaker() throws Exception {
-        ObjectMapper mapper = new ObjectMapper();
+    void priceDropNeverTriggersAutomaticMarketSell() {
         engine.getIsRunning().set(true);
         engine.getLiveArmed().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
         atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
-        TradingRiskGuard guard = (TradingRiskGuard) ReflectionTestUtils.getField(engine, "riskGuard");
-        guard.recordFill("BUY", new BigDecimal("10"), new BigDecimal("0.60"), 1, properties.getStrategy());
-        when(tradeService.getFreeAssetBalance("ENSO"))
-                .thenReturn(new BigDecimal("10"), BigDecimal.ZERO);
-        when(tradeService.placeMarketSell(eq("ENSOUSDT"), eq(new BigDecimal("10.0")), anyString()))
-                .thenReturn(mapper.readTree("{\"orderId\":88}"));
+        atomic("activeOrderId", Long.class).set(77L);
+        atomic("activeClientOrderId", String.class).set("churn-SELLG-active");
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis());
 
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine", new BigDecimal("0.59"), new BigDecimal("0.591"));
 
-        verify(tradeService).placeMarketSell(eq("ENSOUSDT"), eq(new BigDecimal("10.0")), anyString());
-        verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
-                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any(), anyString());
-
-        orderUpdate(88L, atomic("activeClientOrderId", String.class).get(), "SELL", "TRADE", "FILLED",
-                "10", "0.59", "0.0059", "USDT");
-
-        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
-        assertTrue(engine.getStopLossCooldownUntilMs() > System.currentTimeMillis());
-        assertTrue(engine.getStatusReason().get().contains("3 分钟"));
-        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
-                new BigDecimal("0.60"), new BigDecimal("0.601"));
-        verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
-                any(), any(), any(), anyString());
+        verify(tradeService, never()).placeMarketSell(anyString(), any(), anyString());
+        verify(tradeService, never()).cancelOrder("ENSOUSDT", 77L);
+        assertEquals(77L, atomic("activeOrderId", Long.class).get());
     }
 
     @Test
@@ -343,7 +328,7 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void entryPriceSellTimeoutCancelsThenMarketsRemainingPosition() throws Exception {
+    void everySellTimeoutRollsRemainingPositionToLatestBestAskLimit() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         engine.getIsRunning().set(true);
         engine.getLiveArmed().set(true);
@@ -363,21 +348,41 @@ class HighFrequencyVolumeChurnEngineTest {
         when(tradeService.getAssetBalance("ENSO")).thenReturn(
                 new BinanceOptimizedTradeService.AssetBalance("ENSO", new BigDecimal("10"), BigDecimal.ZERO,
                         new BigDecimal("10")));
-        when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(new BigDecimal("10"));
-        when(tradeService.placeMarketSell(eq("ENSOUSDT"), decimalEquals("10"), anyString()))
+        when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.6001"), anyString()))
                 .thenReturn(mapper.readTree("{\"orderId\":88}"));
 
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
                 new BigDecimal("0.6000"), new BigDecimal("0.6001"));
 
         verify(tradeService).cancelOrder("ENSOUSDT", 77L);
-        verify(tradeService).placeMarketSell(eq("ENSOUSDT"), decimalEquals("10"), anyString());
+        verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.6001"), anyString());
+        verify(tradeService, never()).placeMarketSell(anyString(), any(), anyString());
         assertEquals(88L, atomic("activeOrderId", Long.class).get());
-        assertTrue(engine.getStatusReason().get().contains("SELL_TIMEOUT"));
+        assertTrue(engine.getStatusReason().get().contains("卖一价"));
+
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis() - 61_000);
+        when(tradeService.cancelOrder("ENSOUSDT", 88L))
+                .thenReturn(mapper.readTree("{\"orderId\":88,\"status\":\"CANCELED\"}"));
+        when(tradeService.getOrder("ENSOUSDT", 88L)).thenReturn(mapper.readTree(
+                "{\"orderId\":88,\"status\":\"CANCELED\",\"side\":\"SELL\",\"executedQty\":\"0\",\"cummulativeQuoteQty\":\"0\"}"));
+        when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.5991"), anyString()))
+                .thenReturn(mapper.readTree("{\"orderId\":99}"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.5990"), new BigDecimal("0.5991"));
+
+        verify(tradeService).cancelOrder("ENSOUSDT", 88L);
+        verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.5991"), anyString());
+        assertEquals(99L, atomic("activeOrderId", Long.class).get());
     }
 
     @Test
-    void emergencyExitReconcilesAlreadyFilledMakerBeforeLateAccountEvent() throws Exception {
+    void timedRollReconcilesAlreadyFilledLimitBeforeLateAccountEvent() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         engine.getIsRunning().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);

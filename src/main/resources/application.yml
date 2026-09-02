@@ -56,7 +56,7 @@ binance:
     ask-depth-offset-ticks: 0
     # 挂单超时时间 (毫秒，超时后跟随最新盘口位移)
     order-ttl-ms: 20000
-    # 买入成交后按实际成交均价挂 GTC 卖单；60 秒未成交则撤单并市价卖出剩余持仓。
+    # 每张卖单管理 60 秒；超时撤单对账后，将剩余持仓按最新卖一价重新挂 LIMIT GTC。
     limit-sell-timeout-ms: 60000
     # 仅作为兼容配置；买单现在固定驻留至 20 秒 TTL，不再因短线信号撤单。
     min-entry-order-rest-ms: 800
@@ -87,9 +87,6 @@ binance:
     max-inventory-age-ms: 600000
     # take-profit-bps 是扣除预计卖出手续费后的净利润目标。
     take-profit-bps: 10
-    stop-loss-bps: 30
-    # 只有止损平仓后暂停新开仓 3 分钟；正常盈利平仓不冷却。
-    stop-loss-cooldown-ms: 180000
     # 15 秒后允许向盘口下调 Maker 卖价，但永远不得跌破手续费后目标价。
     exit-reprice-after-ms: 15000
     exit-reprice-interval-ms: 5000

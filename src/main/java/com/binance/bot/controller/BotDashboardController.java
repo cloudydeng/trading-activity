@@ -46,7 +46,6 @@ public class BotDashboardController {
                 Map.entry("symbol", engine.getSymbol()),
                 Map.entry("totalVolumeUsdt", engine.getTotalVolumeUsdt().get()),
                 Map.entry("roundTripsCompleted", engine.getRoundTripsCompleted().get()),
-                Map.entry("stopLossCooldownUntilMs", engine.getStopLossCooldownUntilMs()),
                 Map.entry("usedApiWeight1m", engine.getUsedApiWeight()),
                 Map.entry("marketData", engine.getMarketDataSnapshot()),
                 Map.entry("entrySignal", engine.getLastEntryDecision()),

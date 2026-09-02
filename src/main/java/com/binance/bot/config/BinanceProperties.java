@@ -80,9 +80,6 @@ public class BinanceProperties {
         private long maxInventoryAgeMs = 60_000;
         /** Desired net profit after the estimated exit commission has been deducted. */
         private double takeProfitBps = 10;
-        private double stopLossBps = 30;
-        /** Block new entries for this period after a stop-loss position has fully flattened. */
-        private long stopLossCooldownMs = 180_000;
         /** Keep the original fee-aware maker target untouched for this recovery window. */
         private long exitRepriceAfterMs = 15_000;
         /** Once recovery time expires, only lower a passive sell at this cadence. */
