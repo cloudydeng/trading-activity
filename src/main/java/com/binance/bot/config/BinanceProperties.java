@@ -55,6 +55,8 @@ public class BinanceProperties {
         private double randomSizeJitter;
         private long signalLookbackMs = 3000;
         private long marketDataStaleMs = 1000;
+        /** Partial-depth frames use an independent freshness window to avoid edge jitter. */
+        private long depthDataStaleMs = 2500;
         /**
          * Connection-liveness timeout. Binance sends WebSocket ping frames about every 20 seconds,
          * so this must be substantially longer than the trading-data freshness threshold.

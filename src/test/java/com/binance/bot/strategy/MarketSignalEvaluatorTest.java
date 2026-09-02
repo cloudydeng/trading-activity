@@ -57,6 +57,19 @@ class MarketSignalEvaluatorTest {
     }
 
     @Test
+    void depthUsesIndependentFreshnessWindow() {
+        MarketSignalEvaluator evaluator = new MarketSignalEvaluator();
+        config.setMarketDataStaleMs(1_000);
+        config.setDepthDataStaleMs(2_500);
+        evaluator.recordDepth(decimal("1100"), decimal("900"), 1_000);
+        evaluator.recordQuote(decimal("100"), decimal("100"), decimal("101"), decimal("100"), 2_900, config);
+        evaluator.recordQuote(decimal("100"), decimal("110"), decimal("101"), decimal("90"), 3_000, config);
+
+        assertEquals("ALLOWED", evaluator.evaluate(3_000, config).reason());
+        assertEquals("STALE_DEPTH_DATA", evaluator.evaluate(3_501, config).reason());
+    }
+
+    @Test
     void requiresReclaimAfterSelloffBeforeAllowingAnotherEntry() {
         MarketSignalEvaluator evaluator = new MarketSignalEvaluator();
         config.setSignalLookbackMs(1_000);

@@ -49,7 +49,7 @@ public class MarketSignalEvaluator {
         Quote latest = quotes.peekLast();
         if (latest == null || nowMs - latest.timestampMs() > config.getMarketDataStaleMs()) return set(EntryDecision.block("STALE_MARKET_DATA"));
         if (quotes.size() < 2) return set(EntryDecision.block("INSUFFICIENT_SIGNAL_HISTORY"));
-        if (latestDepth == null || nowMs - latestDepth.timestampMs() > config.getMarketDataStaleMs()) return set(EntryDecision.block("STALE_DEPTH_DATA"));
+        if (latestDepth == null || nowMs - latestDepth.timestampMs() > config.getDepthDataStaleMs()) return set(EntryDecision.block("STALE_DEPTH_DATA"));
 
         BigDecimal mid = latest.bid().add(latest.ask()).divide(BigDecimal.valueOf(2), MC);
         BigDecimal totalQty = latest.bidQty().add(latest.askQty());
