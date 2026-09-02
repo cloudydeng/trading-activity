@@ -4,12 +4,25 @@ import com.binance.bot.config.BinanceProperties;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TradingRiskGuardTest {
+    @Test
+    void realizedDailyLossAloneDoesNotBlockNewEntries() {
+        BinanceProperties.Strategy config = defaults();
+        config.setMaxDailyDrawdownUsdt(decimal("100"));
+        TradingRiskGuard guard = new TradingRiskGuard();
+
+        guard.restoreFlatDaily(decimal("-6"), decimal("2"), LocalDate.of(2026, 9, 3), config);
+
+        assertEquals(null, guard.getEntryBlockReason());
+        assertTrue(guard.permitsNewEntry(decimal("0.1"), decimal("100"), 1_000, config));
+    }
+
     @Test
     void blocksNewEntriesWhenProjectedInventoryExceedsLimit() {
         BinanceProperties.Strategy config = defaults();

@@ -61,7 +61,7 @@ binance:
     # 仅作为兼容配置；买单现在固定驻留至 20 秒 TTL，不再因短线信号撤单。
     min-entry-order-rest-ms: 800
     # 买入只允许 Maker；20 秒后若仍在买一则继续挂，否则撤单，不追卖一、不转 IOC。
-    # 每笔固定 6U；数量仅按交易所 stepSize 向下取整，不再随机放大/缩小。
+    # 每笔固定 12U；数量仅按交易所 stepSize 向下取整，不再随机放大/缩小。
     random-size-jitter: 0
     # 新开仓信号窗口与保护阈值；均应先在 Testnet 回测和验证后调整
     signal-lookback-ms: 3000
@@ -82,7 +82,6 @@ binance:
     min-post-selloff-reclaim-bps: 3
     # 生产安全上限：达到任一限制后只允许继续降低已有仓位，禁止新开仓。
     max-inventory-usdt: 40
-    max-daily-realized-loss-usdt: 5
     max-daily-drawdown-usdt: 8
     max-inventory-age-ms: 600000
     # take-profit-bps 是扣除预计卖出手续费后的净利润目标。

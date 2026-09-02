@@ -144,7 +144,6 @@ public class TradingRiskGuard {
     private void evaluate(long nowMs, BinanceProperties.Strategy config) {
         BigDecimal netPnl = realizedPnlUsdt.add(unrealizedPnl());
         peakNetPnlUsdt = peakNetPnlUsdt.max(netPnl);
-        if (realizedPnlUsdt.negate().compareTo(config.getMaxDailyRealizedLossUsdt()) >= 0) trip("MAX_DAILY_REALIZED_LOSS");
         if (peakNetPnlUsdt.subtract(netPnl).compareTo(config.getMaxDailyDrawdownUsdt()) >= 0) trip("MAX_DAILY_DRAWDOWN");
         if (positionOpenedAtMs >= 0 && nowMs - positionOpenedAtMs >= config.getMaxInventoryAgeMs()) trip("MAX_INVENTORY_AGE");
     }
