@@ -55,9 +55,26 @@ class MarketSignalEvaluatorTest {
         evaluator.recordQuote(decimal("100"), decimal("100"), decimal("101"), decimal("100"), 1_000, config);
         evaluator.recordQuote(decimal("100"), decimal("110"), decimal("101"), decimal("90"), 1_500, config);
         evaluator.recordDepth(decimal("1100"), decimal("900"), 1_500);
+        evaluator.recordAggTrade(decimal("20"), true, 1_300, config);
+        evaluator.recordAggTrade(decimal("20"), true, 1_400, config);
         evaluator.recordAggTrade(decimal("20"), true, 1_500, config);
 
         assertEquals("SELL_TAKER_PRESSURE", evaluator.evaluate(1_500, config).reason());
+    }
+
+    @Test
+    void treatsSparseSingleSellAsNeutralFlow() {
+        MarketSignalEvaluator evaluator = new MarketSignalEvaluator();
+        config.setMinTakerFlowSamples(3);
+        evaluator.recordQuote(decimal("100"), decimal("100"), decimal("101"), decimal("100"), 1_000, config);
+        evaluator.recordQuote(decimal("100"), decimal("110"), decimal("101"), decimal("90"), 1_500, config);
+        evaluator.recordDepth(decimal("600"), decimal("1400"), 1_500);
+        evaluator.recordAggTrade(decimal("20"), true, 1_500, config);
+
+        MarketSignalEvaluator.EntryDecision decision = evaluator.evaluate(1_500, config);
+
+        assertTrue(decision.allowed());
+        assertEquals(0, BigDecimal.ZERO.compareTo(decision.takerFlowImbalance()));
     }
 
     @Test

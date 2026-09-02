@@ -63,6 +63,8 @@ public class BinanceProperties {
          */
         private long marketStreamWatchdogMs = 45_000;
         private double minBookImbalance = 0.05;
+        /** Ignore sparse taker flow until this many trades exist in the signal window. */
+        private int minTakerFlowSamples = 3;
         private double minTakerFlowImbalance = -0.20;
         private double maxDownwardMoveBps = 8;
         private double maxShortTermVolatilityBps = 20;
