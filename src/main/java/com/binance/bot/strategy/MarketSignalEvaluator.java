@@ -78,7 +78,6 @@ public class MarketSignalEvaluator {
         BigDecimal takerFlowImbalance = totalTradeQty.signum() == 0 ? BigDecimal.ZERO : signedTradeQty.divide(totalTradeQty, MC);
 
         if (imbalance.compareTo(BigDecimal.valueOf(config.getMinBookImbalance())) < 0) return set(EntryDecision.block("WEAK_TOP_OF_BOOK", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
-        if (depthImbalance.compareTo(BigDecimal.valueOf(config.getMinDepthImbalance())) < 0) return set(EntryDecision.block("WEAK_MULTI_LEVEL_BIDS", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
         if (takerFlowImbalance.compareTo(BigDecimal.valueOf(config.getMinTakerFlowImbalance())) < 0) {
             recordSelloff(mid, nowMs);
             return set(EntryDecision.block("SELL_TAKER_PRESSURE", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));

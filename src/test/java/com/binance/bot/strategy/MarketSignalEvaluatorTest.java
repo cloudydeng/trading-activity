@@ -25,17 +25,18 @@ class MarketSignalEvaluatorTest {
     }
 
     @Test
-    void permitsMildTopBookAskImbalanceWhenDepthAndFlowRemainSafe() {
+    void permitsMildTopBookAskImbalanceRegardlessOfDepthDirection() {
         MarketSignalEvaluator evaluator = new MarketSignalEvaluator();
         config.setMinBookImbalance(-0.35);
         evaluator.recordQuote(decimal("100"), decimal("80"), decimal("101"), decimal("120"), 1_000, config);
         evaluator.recordQuote(decimal("100"), decimal("80"), decimal("101"), decimal("120"), 1_500, config);
-        evaluator.recordDepth(decimal("1000"), decimal("1000"), 1_500);
+        evaluator.recordDepth(decimal("600"), decimal("1400"), 1_500);
 
         MarketSignalEvaluator.EntryDecision decision = evaluator.evaluate(1_500, config);
 
         assertTrue(decision.allowed());
         assertEquals("ALLOWED", decision.reason());
+        assertEquals(0, decimal("-0.4").compareTo(decision.depthImbalance()));
     }
 
     @Test

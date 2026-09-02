@@ -70,7 +70,6 @@ binance:
     market-stream-watchdog-ms: 45000
     # ENSO 买一经常小于卖一；允许轻度卖一占优，强卖压仍由成交流和跌幅保护拦截。
     min-book-imbalance: -0.35
-    min-depth-imbalance: -0.10
     min-taker-flow-imbalance: -0.20
     max-downward-move-bps: 8
     max-short-term-volatility-bps: 20
