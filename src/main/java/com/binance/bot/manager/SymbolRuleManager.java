@@ -27,6 +27,7 @@ public class SymbolRuleManager {
             String symbol,
             BigDecimal tickSize,
             BigDecimal stepSize,
+            BigDecimal minQty,
             BigDecimal minNotional
     ) {}
 
@@ -70,6 +71,7 @@ public class SymbolRuleManager {
                     }
                     BigDecimal tickSize = new BigDecimal("0.0001");
                     BigDecimal stepSize = new BigDecimal("0.1");
+                    BigDecimal minQty = new BigDecimal("0.1");
                     BigDecimal minNotional = new BigDecimal("5.0");
 
                     for (JsonNode f : s.get("filters")) {
@@ -78,13 +80,16 @@ public class SymbolRuleManager {
                             tickSize = new BigDecimal(f.get("tickSize").asText());
                         } else if ("LOT_SIZE".equals(filterType)) {
                             stepSize = new BigDecimal(f.get("stepSize").asText());
+                            if (f.has("minQty")) {
+                                minQty = new BigDecimal(f.get("minQty").asText());
+                            }
                         } else if ("NOTIONAL".equals(filterType) || "MIN_NOTIONAL".equals(filterType)) {
                             if (f.has("minNotional")) {
                                 minNotional = new BigDecimal(f.get("minNotional").asText());
                             }
                         }
                     }
-                    SymbolRule rule = new SymbolRule(symbol, tickSize, stepSize, minNotional);
+                    SymbolRule rule = new SymbolRule(symbol, tickSize, stepSize, minQty, minNotional);
                     symbolRules.put(symbol, rule);
                     log.info("加载交易规则成功: {}", rule);
                     return rule;

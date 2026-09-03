@@ -186,6 +186,7 @@ public class BotDashboardController {
                 Map.entry("apiWeightEntrySafeLimit1m", engine.getApiWeightEntrySafeLimit()),
                 Map.entry("marketData", engine.getMarketDataSnapshot()),
                 Map.entry("entrySignal", engine.getLastEntryDecision()),
+                Map.entry("sellability", engine.getSellabilitySnapshot()),
                 Map.entry("marketBaseline", engine.getBaselineOutcomes()),
                 Map.entry("qualifiedSignals", engine.getQualifiedSignalOutcomes()),
                 Map.entry("risk", engine.getRiskSnapshot()),

@@ -87,7 +87,8 @@ class HighFrequencyVolumeChurnEngineTest {
                 BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
                 BigDecimal.ZERO, 0, 0, true));
         when(ruleManager.getRule("ENSOUSDT")).thenReturn(new SymbolRuleManager.SymbolRule(
-                "ENSOUSDT", new BigDecimal("0.0001"), new BigDecimal("0.1"), new BigDecimal("5")));
+                "ENSOUSDT", new BigDecimal("0.0001"), new BigDecimal("0.1"),
+                new BigDecimal("0.1"), new BigDecimal("5")));
         when(marketSignalEvaluator.markBestBidMakerReady()).thenReturn(
                 new MarketSignalEvaluator.EntryDecision(true, "BEST_BID_MAKER", BigDecimal.ZERO,
                         BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
@@ -166,7 +167,8 @@ class HighFrequencyVolumeChurnEngineTest {
     void symbolSwitchRequiresStoppedFlatAccountAndPersistsSelection() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         when(ruleManager.refreshRule("BTCUSDT")).thenReturn(new SymbolRuleManager.SymbolRule(
-                "BTCUSDT", new BigDecimal("0.01"), new BigDecimal("0.00001"), new BigDecimal("5")));
+                "BTCUSDT", new BigDecimal("0.01"), new BigDecimal("0.00001"),
+                new BigDecimal("0.00001"), new BigDecimal("5")));
         when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
         when(tradeService.getOpenOrders("BTCUSDT")).thenReturn(mapper.readTree("[]"));
         when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
@@ -214,7 +216,8 @@ class HighFrequencyVolumeChurnEngineTest {
     void symbolSwitchIgnoresDurableLedgerPositionsAfterExchangeFlatCheck() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         when(ruleManager.refreshRule("BTCUSDT")).thenReturn(new SymbolRuleManager.SymbolRule(
-                "BTCUSDT", new BigDecimal("0.01"), new BigDecimal("0.00001"), new BigDecimal("5")));
+                "BTCUSDT", new BigDecimal("0.01"), new BigDecimal("0.00001"),
+                new BigDecimal("0.00001"), new BigDecimal("5")));
         when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
         when(tradeService.getOpenOrders("BTCUSDT")).thenReturn(mapper.readTree("[]"));
         when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
@@ -287,6 +290,133 @@ class HighFrequencyVolumeChurnEngineTest {
         verify(tradeService, never()).cancelOrder("ENSOUSDT", 42L);
         verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
                 any(), any(), any(), anyString());
+    }
+
+    @Test
+    void partialBuyDustDoesNotBlockNextMakerBuy() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
+        atomic("activeOrderId", Long.class).set(42L);
+        atomic("activeClientOrderId", String.class).set("churn-BUY-1");
+        atomic("lastBestAsk", BigDecimal.class).set(new BigDecimal("0.60"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "ENSO", new BigDecimal("5"), BigDecimal.ZERO, new BigDecimal("5")));
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString()))
+                .thenReturn(mapper.readTree("{\"orderId\":43}"));
+
+        orderUpdate(42L, "churn-BUY-1", "BUY", "TRADE", "PARTIALLY_FILLED",
+                "5", "0.60", "0", "USDT");
+        orderUpdate(42L, "churn-BUY-1", "BUY", "CANCELED", "CANCELED",
+                "0", "0", "0", "USDT");
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.862"), new BigDecimal("0.863"));
+
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING, engine.getCurrentStatus().get());
+        assertTrue(engine.getSellabilitySnapshot().dustReason()
+                == HighFrequencyVolumeChurnEngine.DustReason.BELOW_MIN_NOTIONAL);
+        verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(),
+                isNull(), anyString());
+        verify(tradeService, never()).placeLimitGtcSell(eq("ENSOUSDT"), any(), any(), anyString());
+    }
+
+    @Test
+    void dustMergedWithNewBuyCreatesOneSellForCombinedInventory() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
+        atomic("activeOrderId", Long.class).set(43L);
+        atomic("activeClientOrderId", String.class).set("churn-BUY-2");
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("5"));
+        atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("5"));
+        atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("3.00"));
+        ((AtomicReference<BigDecimal>) ReflectionTestUtils.getField(engine, "lastKnownFreeBaseBalance"))
+                .set(new BigDecimal("5"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "ENSO", new BigDecimal("10"), BigDecimal.ZERO, new BigDecimal("10")));
+        when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10.0"),
+                decimalEquals("0.70"), anyString()))
+                .thenReturn(mapper.readTree("{\"orderId\":99}"));
+
+        orderUpdate(43L, "churn-BUY-2", "BUY", "TRADE", "FILLED",
+                "5", "0.80", "0", "USDT");
+
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
+        assertEquals(99L, atomic("activeOrderId", Long.class).get());
+        verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10.0"),
+                decimalEquals("0.70"), anyString());
+    }
+
+    @Test
+    void partialSellLeavesDustWithoutCreatingReplacementSell() throws Exception {
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("activeOrderId", Long.class).set(77L);
+        atomic("activeClientOrderId", String.class).set("churn-SELL-1");
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6.00"));
+        ((AtomicReference<BigDecimal>) ReflectionTestUtils.getField(engine, "activeSellCoveredQty"))
+                .set(new BigDecimal("10"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "ENSO", new BigDecimal("3"), BigDecimal.ZERO, new BigDecimal("3")));
+
+        orderUpdate(77L, "churn-SELL-1", "SELL", "TRADE", "PARTIALLY_FILLED",
+                "7", "0.60", "0", "USDT");
+        orderUpdate(77L, "churn-SELL-1", "SELL", "CANCELED", "CANCELED",
+                "0", "0", "0", "USDT");
+
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+        assertFalse(engine.getSellabilitySnapshot().sellable());
+        assertEquals(HighFrequencyVolumeChurnEngine.DustReason.BELOW_MIN_NOTIONAL,
+                engine.getSellabilitySnapshot().dustReason());
+        verify(tradeService, never()).placeLimitGtcSell(eq("ENSOUSDT"), any(), any(), anyString());
+    }
+
+    @Test
+    void activeSellCoveredQuantityPreventsDuplicateSell() {
+        HighFrequencyVolumeChurnEngine.SellabilityResult result = engine.evaluateSellability(
+                new BigDecimal("10"), new BigDecimal("7"), new BigDecimal("3"),
+                new BigDecimal("0.60"), rule("0.1", "0.1", "5"));
+
+        assertFalse(result.sellable());
+        assertEquals(0, new BigDecimal("3.0").compareTo(result.normalizedQty()));
+        assertEquals(HighFrequencyVolumeChurnEngine.DustReason.BELOW_MIN_NOTIONAL, result.dustReason());
+    }
+
+    @Test
+    void sellabilityRoundsDownToStepSize() {
+        HighFrequencyVolumeChurnEngine.SellabilityResult result = engine.evaluateSellability(
+                new BigDecimal("1.23456"), BigDecimal.ZERO, new BigDecimal("1.23456"),
+                BigDecimal.ONE, rule("0.01", "0.01", "0.1"));
+
+        assertTrue(result.sellable());
+        assertEquals(0, new BigDecimal("1.23").compareTo(result.normalizedQty()));
+    }
+
+    @Test
+    void sellabilityReportsBelowMinQty() {
+        HighFrequencyVolumeChurnEngine.SellabilityResult result = engine.evaluateSellability(
+                new BigDecimal("0.50"), BigDecimal.ZERO, new BigDecimal("0.50"),
+                BigDecimal.ONE, rule("0.01", "1", "0.1"));
+
+        assertFalse(result.sellable());
+        assertEquals(HighFrequencyVolumeChurnEngine.DustReason.BELOW_MIN_QTY, result.dustReason());
+    }
+
+    @Test
+    void sellabilityAppliesMinNotionalBuffer() {
+        HighFrequencyVolumeChurnEngine.SellabilityResult belowBuffer = engine.evaluateSellability(
+                new BigDecimal("5.10"), BigDecimal.ZERO, new BigDecimal("5.10"),
+                BigDecimal.ONE, rule("0.01", "0.01", "5"));
+        HighFrequencyVolumeChurnEngine.SellabilityResult atBuffer = engine.evaluateSellability(
+                new BigDecimal("5.25"), BigDecimal.ZERO, new BigDecimal("5.25"),
+                BigDecimal.ONE, rule("0.01", "0.01", "5"));
+
+        assertFalse(belowBuffer.sellable());
+        assertEquals(HighFrequencyVolumeChurnEngine.DustReason.BELOW_MIN_NOTIONAL,
+                belowBuffer.dustReason());
+        assertTrue(atBuffer.sellable());
     }
 
     @Test
@@ -546,11 +676,14 @@ class HighFrequencyVolumeChurnEngineTest {
                   "quoteQty":"6.018","commission":"0.006","commissionAsset":"USDT","isBuyer":true}]
                 """));
         when(tradeService.getFreeAssetBalance("ENSO")).thenReturn(new BigDecimal("7.08"));
+        when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("7.0"),
+                decimalEquals("0.85"), anyString()))
+                .thenReturn(mapper.readTree("{\"orderId\":92}"));
 
         ReflectionTestUtils.invokeMethod(engine, "reconcileTrackedOrder", 91L);
 
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
-        assertNull(atomic("activeOrderId", Long.class).get());
+        assertEquals(92L, atomic("activeOrderId", Long.class).get());
         assertEquals(0, new BigDecimal("7.08").compareTo(engine.getRiskSnapshot().positionQty()));
 
         orderUpdate(91L, "churn-BUYI-1", "BUY", "TRADE", "FILLED",
@@ -852,6 +985,11 @@ class HighFrequencyVolumeChurnEngineTest {
     private BigDecimal decimalEquals(String expected) {
         BigDecimal value = new BigDecimal(expected);
         return argThat(actual -> actual != null && actual.compareTo(value) == 0);
+    }
+
+    private SymbolRuleManager.SymbolRule rule(String stepSize, String minQty, String minNotional) {
+        return new SymbolRuleManager.SymbolRule("ENSOUSDT", new BigDecimal("0.0001"),
+                new BigDecimal(stepSize), new BigDecimal(minQty), new BigDecimal(minNotional));
     }
 
     private DailyTradeStatsStore.DailyStatsSnapshot dailyStatsWithPosition(String symbol, String quantity,
