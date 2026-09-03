@@ -106,10 +106,9 @@ class DailyTradeStatsStoreTest {
         }
         BinanceProperties properties = new BinanceProperties();
         properties.getStorage().setDailyStatsDb(database.toString());
-        BinanceProperties.CredentialProfile primary = new BinanceProperties.CredentialProfile();
-        primary.setAlias("legacy-bot");
-        primary.setEnabled(true);
-        properties.getApi().getProfiles().put("primary", primary);
+        properties.getApi().setProfilesJson("""
+                {"primary":{"alias":"legacy-bot","apiKey":"key","secretKey":"secret"}}
+                """);
 
         DailyTradeStatsStore store = new DailyTradeStatsStore(properties);
 

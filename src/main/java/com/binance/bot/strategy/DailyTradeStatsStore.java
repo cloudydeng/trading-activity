@@ -22,6 +22,7 @@ import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -181,7 +182,8 @@ public class DailyTradeStatsStore {
     private Map<String, String> legacyAliasMappings(BinanceProperties properties) {
         Map<String, String> unique = new HashMap<>();
         Set<String> ambiguous = new LinkedHashSet<>();
-        properties.getApi().getProfiles().forEach((accountId, profile) -> {
+        Map<String, BinanceProperties.CredentialProfile> profiles = configuredProfiles(properties);
+        profiles.forEach((accountId, profile) -> {
             if (profile == null || !profile.isEnabled() || profile.getAlias() == null
                     || profile.getAlias().isBlank() || accountId == null
                     || !accountId.trim().matches("[A-Za-z0-9._-]{1,64}")) return;
@@ -193,12 +195,32 @@ public class DailyTradeStatsStore {
             unique.remove(alias);
             log.error("多个账号配置使用相同 alias={}，无法自动迁移该别名的旧统计", alias);
         });
-        if (properties.getApi().getProfiles().isEmpty()
+        if (profiles.isEmpty()
+                && (properties.getApi().getProfilesJson() == null
+                    || properties.getApi().getProfilesJson().isBlank())
                 && properties.getApi().getApiKeyAlias() != null
                 && !properties.getApi().getApiKeyAlias().isBlank()) {
             unique.put(properties.getApi().getApiKeyAlias().trim(), "default");
         }
         return unique;
+    }
+
+    private Map<String, BinanceProperties.CredentialProfile> configuredProfiles(BinanceProperties properties) {
+        Map<String, BinanceProperties.CredentialProfile> result = new LinkedHashMap<>(
+                properties.getApi().getProfiles());
+        String profilesJson = properties.getApi().getProfilesJson();
+        if (profilesJson == null || profilesJson.isBlank()) return result;
+        try {
+            var root = objectMapper.readTree(profilesJson);
+            if (root == null || !root.isObject()) throw new IllegalArgumentException("profiles must be an object");
+            root.fields().forEachRemaining(entry -> result.put(entry.getKey(),
+                    objectMapper.convertValue(entry.getValue(), BinanceProperties.CredentialProfile.class)));
+        } catch (Exception e) {
+            // Parser excerpts may contain credentials, so never log the exception message.
+            log.error("BINANCE_API_PROFILES_JSON 无效，跳过旧统计别名迁移");
+            result.clear();
+        }
+        return result;
     }
 
     public synchronized RecordResult recordTrade(String accountId, String accountAlias, String symbol,

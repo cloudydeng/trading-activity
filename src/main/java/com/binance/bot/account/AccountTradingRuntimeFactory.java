@@ -5,6 +5,7 @@ import com.binance.bot.manager.SymbolRuleManager;
 import com.binance.bot.notification.TradeNotificationService;
 import com.binance.bot.service.AccountUserDataStream;
 import com.binance.bot.service.BinanceAccountTradeClient;
+import com.binance.bot.service.BinanceIpRateLimitCoordinator;
 import com.binance.bot.service.BinanceSigner;
 import com.binance.bot.strategy.DailyTradeStatsStore;
 import com.binance.bot.strategy.HighFrequencyVolumeChurnEngine;
@@ -24,15 +25,19 @@ public class AccountTradingRuntimeFactory {
     private final BinanceProperties applicationProperties;
     private final BinanceSigner signer;
     private final SymbolRuleManager ruleManager;
+    private final BinanceIpRateLimitCoordinator rateLimitCoordinator;
     private final DailyTradeStatsStore dailyStatsStore;
     private final TradeNotificationService notificationService;
 
     public AccountTradingRuntimeFactory(BinanceProperties applicationProperties, BinanceSigner signer,
-                                        SymbolRuleManager ruleManager, DailyTradeStatsStore dailyStatsStore,
+                                        SymbolRuleManager ruleManager,
+                                        BinanceIpRateLimitCoordinator rateLimitCoordinator,
+                                        DailyTradeStatsStore dailyStatsStore,
                                         TradeNotificationService notificationService) {
         this.applicationProperties = applicationProperties;
         this.signer = signer;
         this.ruleManager = ruleManager;
+        this.rateLimitCoordinator = rateLimitCoordinator;
         this.dailyStatsStore = dailyStatsStore;
         this.notificationService = notificationService;
     }
@@ -43,7 +48,7 @@ public class AccountTradingRuntimeFactory {
                 .ifPresent(accountProperties.getStrategy()::setSymbol);
 
         BinanceAccountTradeClient tradeClient =
-                new BinanceAccountTradeClient(accountProperties, signer, credentials);
+                new BinanceAccountTradeClient(accountProperties, signer, credentials, rateLimitCoordinator);
         MarketSignalEvaluator signalEvaluator = new MarketSignalEvaluator();
         TradingRiskGuard riskGuard = new TradingRiskGuard();
         String journalPath = accountObservationPath(accountProperties.getStrategy().getObservationOutputFile(),

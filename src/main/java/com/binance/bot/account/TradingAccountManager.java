@@ -1,6 +1,8 @@
 package com.binance.bot.account;
 
 import com.binance.bot.config.BinanceProperties;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
@@ -20,6 +22,7 @@ import java.util.concurrent.ConcurrentMap;
 public class TradingAccountManager {
     private final BinanceProperties properties;
     private final AccountTradingRuntimeFactory runtimeFactory;
+    private final ObjectMapper objectMapper = new ObjectMapper();
     private final ConcurrentMap<String, AccountTradingRuntime> runtimes = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, String> initializationErrors = new ConcurrentHashMap<>();
 
@@ -130,8 +133,10 @@ public class TradingAccountManager {
 
     private Map<String, AccountCredentials> configuredAccounts() {
         Map<String, AccountCredentials> result = new LinkedHashMap<>();
-        boolean profilesConfigured = !properties.getApi().getProfiles().isEmpty();
-        properties.getApi().getProfiles().forEach((accountId, profile) -> {
+        Map<String, BinanceProperties.CredentialProfile> configuredProfiles = configuredProfiles();
+        boolean profilesConfigured = !configuredProfiles.isEmpty()
+                || notBlank(properties.getApi().getProfilesJson());
+        configuredProfiles.forEach((accountId, profile) -> {
             String errorId = safeProfileId(accountId);
             try {
                 if (profile == null) throw new IllegalArgumentException("credential profile is missing");
@@ -153,8 +158,27 @@ public class TradingAccountManager {
                     displayAlias(properties.getApi().getApiKeyAlias(), "default"),
                     properties.getApi().getApiKey(), properties.getApi().getSecretKey()));
         }
-        if (result.isEmpty() && properties.getStrategy().isObserveMode()) {
+        if (!profilesConfigured && result.isEmpty() && properties.getStrategy().isObserveMode()) {
             result.put("default", new AccountCredentials("default", "default", "", ""));
+        }
+        return result;
+    }
+
+    private Map<String, BinanceProperties.CredentialProfile> configuredProfiles() {
+        Map<String, BinanceProperties.CredentialProfile> result = new LinkedHashMap<>(
+                properties.getApi().getProfiles());
+        String profilesJson = properties.getApi().getProfilesJson();
+        if (!notBlank(profilesJson)) return result;
+        try {
+            JsonNode root = objectMapper.readTree(profilesJson);
+            if (root == null || !root.isObject()) throw new IllegalArgumentException("profiles must be an object");
+            root.fields().forEachRemaining(entry -> result.put(entry.getKey(),
+                    objectMapper.convertValue(entry.getValue(), BinanceProperties.CredentialProfile.class)));
+        } catch (Exception e) {
+            // Never include parser excerpts because the JSON contains credentials.
+            initializationErrors.put("profiles-json", "BINANCE_API_PROFILES_JSON is invalid");
+            log.error("BINANCE_API_PROFILES_JSON 无效；拒绝使用 legacy 凭据回退");
+            result.clear();
         }
         return result;
     }

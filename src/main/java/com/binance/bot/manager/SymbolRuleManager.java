@@ -1,6 +1,7 @@
 package com.binance.bot.manager;
 
 import com.binance.bot.config.BinanceProperties;
+import com.binance.bot.service.BinanceIpRateLimitCoordinator;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
@@ -18,6 +19,7 @@ public class SymbolRuleManager {
 
     private final RestClient restClient;
     private final BinanceProperties properties;
+    private final BinanceIpRateLimitCoordinator rateLimitCoordinator;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Map<String, SymbolRule> symbolRules = new ConcurrentHashMap<>();
 
@@ -28,8 +30,10 @@ public class SymbolRuleManager {
             BigDecimal minNotional
     ) {}
 
-    public SymbolRuleManager(BinanceProperties properties) {
+    public SymbolRuleManager(BinanceProperties properties,
+                             BinanceIpRateLimitCoordinator rateLimitCoordinator) {
         this.properties = properties;
+        this.rateLimitCoordinator = rateLimitCoordinator;
         this.restClient = RestClient.builder()
                 .baseUrl(properties.getApi().getBaseUrl())
                 .build();
@@ -55,6 +59,7 @@ public class SymbolRuleManager {
                     .body(String.class);
 
             JsonNode root = objectMapper.readTree(response);
+            rateLimitCoordinator.updateLimitFromExchangeInfo(root);
             if (root != null && root.has("symbols")) {
                 for (JsonNode s : root.get("symbols")) {
                     String symbol = s.get("symbol").asText();

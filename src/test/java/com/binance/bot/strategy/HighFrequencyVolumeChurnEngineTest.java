@@ -587,6 +587,24 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void localIpWeightThrottleDefersEntryWithoutHaltingEngine() throws Exception {
+        engine.getIsRunning().set(true);
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString()))
+                .thenReturn(new ObjectMapper().readTree("""
+                        {"localRateLimited":true,"usedWeight1m":4800,
+                         "safeRequestWeightLimit1m":4800,"retryAfterMs":5000}
+                        """));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.862"), new BigDecimal("0.863"));
+
+        assertTrue(engine.getIsRunning().get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+        assertTrue(engine.getStatusReason().get().contains("暂缓新报单"));
+        verify(tradeService, never()).getOpenOrders(anyString());
+    }
+
+    @Test
     void softSignalNoiseDoesNotImmediatelyCancelFreshBuy() {
         engine.getIsRunning().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);

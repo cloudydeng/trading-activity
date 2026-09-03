@@ -1017,6 +1017,19 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             reconcileAmbiguousSubmission(clientOrderId, status, "报单请求结果未知");
             return;
         }
+        if (response.path("localRateLimited").asBoolean(false)) {
+            pendingClientOrderIds.remove(clientOrderId);
+            activeClientOrderId.compareAndSet(clientOrderId, null);
+            if (oldOrderId == null && status == ChurnStatus.BUYING) resetEntryTarget();
+            long retryAfterMs = Math.max(1_000, response.path("retryAfterMs").asLong(1_000));
+            nextOrderAttemptAt.set(System.currentTimeMillis() + retryAfterMs);
+            statusReason.set("共享 IP API 权重达到入场安全线，暂缓新报单约 "
+                    + Math.max(1, (retryAfterMs + 999) / 1_000) + " 秒");
+            log.warn("[accountId={} alias={}] 本地入场节流，不按报单结果未知处理: used={}/{}",
+                    accountId, accountAlias, response.path("usedWeight1m").asInt(),
+                    response.path("safeRequestWeightLimit1m").asInt());
+            return;
+        }
         // Binance wraps cancelReplace failure details in `data`, while successful responses
         // expose the same result fields at the root. Normalize both shapes before deciding.
         JsonNode result = response.path("data").isObject() ? response.path("data") : response;
@@ -1472,7 +1485,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return "USDT";
     }
     public String getSymbol() { return properties.getStrategy().getSymbol(); }
-    public int getUsedApiWeight() { return tradeService.getUsedWeight1m().get(); }
+    public int getUsedApiWeight() { return tradeService.getUsedWeight1m(); }
+    public int getApiWeightLimit() { return tradeService.getRequestWeightLimit1m(); }
+    public int getApiWeightEntrySafeLimit() { return tradeService.getSafeRequestWeightLimit1m(); }
     public MarketSignalEvaluator.EntryDecision getLastEntryDecision() { return marketSignalEvaluator.getLastDecision(); }
     public PostFillOutcomeTracker.OutcomeSummary getBaselineOutcomes() { return postFillOutcomeTracker.getBaselineSummary(); }
     public PostFillOutcomeTracker.OutcomeSummary getQualifiedSignalOutcomes() { return postFillOutcomeTracker.getQualifiedSignalSummary(); }

@@ -170,6 +170,52 @@ class TradingAccountManagerTest {
         assertEquals("legacy-bot", credentials.getValue().alias());
     }
 
+    @Test
+    void profilesJsonSupportsArbitraryAccountCountWithoutNamedSlots() {
+        BinanceProperties properties = new BinanceProperties();
+        StringBuilder json = new StringBuilder("{");
+        for (int i = 1; i <= 10; i++) {
+            if (i > 1) json.append(',');
+            json.append("\"account-").append(i).append("\":{")
+                    .append("\"alias\":\"bot-").append(i).append("\",")
+                    .append("\"apiKey\":\"key-").append(i).append("\",")
+                    .append("\"secretKey\":\"secret-").append(i).append("\"}");
+        }
+        properties.getApi().setProfilesJson(json.append('}').toString());
+        AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
+        when(factory.create(any())).thenAnswer(invocation -> {
+            AccountCredentials credentials = invocation.getArgument(0);
+            AccountTradingRuntime runtime = mock(AccountTradingRuntime.class);
+            when(runtime.accountId()).thenReturn(credentials.accountId());
+            when(runtime.alias()).thenReturn(credentials.alias());
+            return runtime;
+        });
+        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+
+        manager.initialize();
+
+        assertEquals(10, manager.runtimes().size());
+        assertTrue(manager.find("account-10").isPresent());
+        verify(factory, times(10)).create(any());
+    }
+
+    @Test
+    void invalidProfilesJsonNeverFallsBackToLegacyCredential() {
+        BinanceProperties properties = new BinanceProperties();
+        properties.getApi().setProfilesJson("not-json");
+        properties.getApi().setApiKey("legacy-key");
+        properties.getApi().setSecretKey("legacy-secret");
+        AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+
+        manager.initialize();
+
+        assertTrue(manager.runtimes().isEmpty());
+        assertTrue(manager.summaries().stream().anyMatch(summary ->
+                "profiles-json".equals(summary.accountId()) && !summary.initialized()));
+        verifyNoInteractions(factory);
+    }
+
     private BinanceProperties propertiesWith(String idA, String aliasA, String keyA, String secretA,
                                                String idB, String aliasB, String keyB, String secretB) {
         BinanceProperties properties = new BinanceProperties();

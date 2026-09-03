@@ -4,7 +4,6 @@ import com.binance.bot.account.AccountCredentials;
 import com.binance.bot.config.BinanceProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -13,8 +12,6 @@ import org.springframework.web.client.RestClient;
 import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -24,17 +21,16 @@ public class BinanceAccountTradeClient {
     private final BinanceProperties properties;
     private final AccountCredentials credentials;
     private final BinanceSigner signer;
+    private final BinanceIpRateLimitCoordinator rateLimitCoordinator;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    @Getter
-    private final AtomicInteger usedWeight1m = new AtomicInteger(0);
-    private final AtomicLong lastWeightUpdateMs = new AtomicLong(0);
-
     public BinanceAccountTradeClient(BinanceProperties properties, BinanceSigner signer,
-                                     AccountCredentials credentials) {
+                                     AccountCredentials credentials,
+                                     BinanceIpRateLimitCoordinator rateLimitCoordinator) {
         this.properties = properties;
         this.signer = signer;
         this.credentials = credentials;
+        this.rateLimitCoordinator = rateLimitCoordinator;
         this.restClient = RestClient.builder()
                 .baseUrl(properties.getApi().getBaseUrl())
                 .build();
@@ -45,10 +41,16 @@ public class BinanceAccountTradeClient {
      */
     public JsonNode cancelAndReplaceOrder(String symbol, String side, BigDecimal price, BigDecimal quantity,
                                           Long cancelOrderId, String clientOrderId) {
-        if (usedWeight1m.get() > 1000 && System.currentTimeMillis() - lastWeightUpdateMs.get() < 60_000) {
-            log.warn("[accountId={} alias={}] API 权重过高 (used: {})，节流保护",
-                    credentials.accountId(), credentials.alias(), usedWeight1m.get());
-            return null;
+        boolean entryRequest = "BUY".equalsIgnoreCase(side);
+        if (entryRequest) {
+            BinanceIpRateLimitCoordinator.Permit permit = rateLimitCoordinator.tryAcquireEntryRequest(1);
+            if (!permit.allowed()) {
+                log.warn("[accountId={} alias={}] 共享 IP API 权重达到入场安全线 ({}/{})，暂缓新报单",
+                        credentials.accountId(), credentials.alias(), permit.usedWeight1m(), permit.safeLimit1m());
+                return localRateLimitedResponse(permit);
+            }
+        } else {
+            rateLimitCoordinator.reserveSafetyRequest(1);
         }
 
         long timestamp = System.currentTimeMillis();
@@ -81,11 +83,7 @@ public class BinanceAccountTradeClient {
                     .contentType(MediaType.APPLICATION_FORM_URLENCODED)
                     .exchange((request, response) -> {
                         HttpHeaders headers = response.getHeaders();
-                        String weightStr = headers.getFirst("x-mbx-used-weight-1m");
-                        if (weightStr != null) {
-                            usedWeight1m.set(Integer.parseInt(weightStr));
-                            lastWeightUpdateMs.set(System.currentTimeMillis());
-                        }
+                        rateLimitCoordinator.updateFromHeaders(headers);
                         JsonNode body = objectMapper.readTree(response.getBody());
                         if (!response.getStatusCode().is2xxSuccessful()) {
                             log.warn("[accountId={} alias={}] 报单请求失败: HTTP {}, code={}, msg={}",
@@ -394,17 +392,24 @@ public class BinanceAccountTradeClient {
     }
 
     private void updateWeight(HttpHeaders headers) {
-        String weightStr = headers.getFirst("x-mbx-used-weight-1m");
-        if (weightStr != null) {
-            usedWeight1m.set(Integer.parseInt(weightStr));
-            lastWeightUpdateMs.set(System.currentTimeMillis());
-        }
+        rateLimitCoordinator.updateFromHeaders(headers);
     }
 
-    public void resetRequestWeight() {
-        usedWeight1m.set(0);
-        lastWeightUpdateMs.set(0);
+    private JsonNode localRateLimitedResponse(BinanceIpRateLimitCoordinator.Permit permit) {
+        var response = objectMapper.createObjectNode();
+        response.put("localRateLimited", true);
+        response.put("code", "LOCAL_IP_WEIGHT_LIMIT");
+        response.put("msg", "shared IP request-weight entry reserve reached");
+        response.put("usedWeight1m", permit.usedWeight1m());
+        response.put("requestWeightLimit1m", permit.limit1m());
+        response.put("safeRequestWeightLimit1m", permit.safeLimit1m());
+        response.put("retryAfterMs", permit.retryAfterMs());
+        return response;
     }
+
+    public int getUsedWeight1m() { return rateLimitCoordinator.snapshot().usedWeight1m(); }
+    public int getRequestWeightLimit1m() { return rateLimitCoordinator.snapshot().limit1m(); }
+    public int getSafeRequestWeightLimit1m() { return rateLimitCoordinator.snapshot().safeLimit1m(); }
 
     public record AssetBalance(String asset, BigDecimal free, BigDecimal locked, BigDecimal total) { }
 }
