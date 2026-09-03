@@ -135,7 +135,7 @@ public class TradingAccountManager {
         Map<String, AccountCredentials> result = new LinkedHashMap<>();
         Map<String, BinanceProperties.CredentialProfile> configuredProfiles = configuredProfiles();
         boolean profilesConfigured = !configuredProfiles.isEmpty()
-                || notBlank(properties.getApi().getProfilesJson());
+                || notBlank(properties.getAccountProfilesJson());
         configuredProfiles.forEach((accountId, profile) -> {
             String errorId = safeProfileId(accountId);
             try {
@@ -167,7 +167,7 @@ public class TradingAccountManager {
     private Map<String, BinanceProperties.CredentialProfile> configuredProfiles() {
         Map<String, BinanceProperties.CredentialProfile> result = new LinkedHashMap<>(
                 properties.getApi().getProfiles());
-        String profilesJson = properties.getApi().getProfilesJson();
+        String profilesJson = properties.getAccountProfilesJson();
         if (!notBlank(profilesJson)) return result;
         try {
             JsonNode root = objectMapper.readTree(profilesJson);

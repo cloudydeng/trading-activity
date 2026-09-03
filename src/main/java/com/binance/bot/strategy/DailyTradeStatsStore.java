@@ -196,8 +196,8 @@ public class DailyTradeStatsStore {
             log.error("多个账号配置使用相同 alias={}，无法自动迁移该别名的旧统计", alias);
         });
         if (profiles.isEmpty()
-                && (properties.getApi().getProfilesJson() == null
-                    || properties.getApi().getProfilesJson().isBlank())
+                && (properties.getAccountProfilesJson() == null
+                    || properties.getAccountProfilesJson().isBlank())
                 && properties.getApi().getApiKeyAlias() != null
                 && !properties.getApi().getApiKeyAlias().isBlank()) {
             unique.put(properties.getApi().getApiKeyAlias().trim(), "default");
@@ -208,7 +208,7 @@ public class DailyTradeStatsStore {
     private Map<String, BinanceProperties.CredentialProfile> configuredProfiles(BinanceProperties properties) {
         Map<String, BinanceProperties.CredentialProfile> result = new LinkedHashMap<>(
                 properties.getApi().getProfiles());
-        String profilesJson = properties.getApi().getProfilesJson();
+        String profilesJson = properties.getAccountProfilesJson();
         if (profilesJson == null || profilesJson.isBlank()) return result;
         try {
             var root = objectMapper.readTree(profilesJson);

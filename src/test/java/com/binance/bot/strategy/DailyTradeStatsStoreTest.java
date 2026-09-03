@@ -106,7 +106,7 @@ class DailyTradeStatsStoreTest {
         }
         BinanceProperties properties = new BinanceProperties();
         properties.getStorage().setDailyStatsDb(database.toString());
-        properties.getApi().setProfilesJson("""
+        properties.setAccountProfilesJson("""
                 {"primary":{"alias":"legacy-bot","apiKey":"key","secretKey":"secret"}}
                 """);
 

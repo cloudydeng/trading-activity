@@ -19,6 +19,8 @@ spring:
       enabled: true
 
 binance:
+  # Kept outside api.profiles to avoid Spring treating the JSON scalar as a map entry.
+  account-profiles-json: '${BINANCE_API_PROFILES_JSON:}'
   storage:
     daily-stats-db: "${BOT_DAILY_STATS_DB:data/daily-stats.db}"
   security:
@@ -31,9 +33,6 @@ binance:
     api-key-alias: "${BINANCE_API_KEY_ALIAS:unlabeled}"
     api-key: "${BINANCE_API_API_KEY:}"
     secret-key: "${BINANCE_API_SECRET_KEY:}"
-    # Arbitrary account-id keyed JSON map; supports any account count without named slots.
-    # Example shape: {"account-a":{"alias":"A","apiKey":"...","secretKey":"...","enabled":true}}
-    profiles-json: '${BINANCE_API_PROFILES_JSON:}'
   strategy:
     # OBSERVE: 只消费公开行情并记录虚拟入场结果，绝不发认证请求或订单。
     # LIVE requires both of the environment switches below; defaults never trade.

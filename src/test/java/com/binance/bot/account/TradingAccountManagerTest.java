@@ -181,7 +181,7 @@ class TradingAccountManagerTest {
                     .append("\"apiKey\":\"key-").append(i).append("\",")
                     .append("\"secretKey\":\"secret-").append(i).append("\"}");
         }
-        properties.getApi().setProfilesJson(json.append('}').toString());
+        properties.setAccountProfilesJson(json.append('}').toString());
         AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
         when(factory.create(any())).thenAnswer(invocation -> {
             AccountCredentials credentials = invocation.getArgument(0);
@@ -202,7 +202,7 @@ class TradingAccountManagerTest {
     @Test
     void invalidProfilesJsonNeverFallsBackToLegacyCredential() {
         BinanceProperties properties = new BinanceProperties();
-        properties.getApi().setProfilesJson("not-json");
+        properties.setAccountProfilesJson("not-json");
         properties.getApi().setApiKey("legacy-key");
         properties.getApi().setSecretKey("legacy-secret");
         AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);

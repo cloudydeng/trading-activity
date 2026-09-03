@@ -14,6 +14,8 @@ import java.util.Map;
 public class BinanceProperties {
 
     private Api api = new Api();
+    /** Arbitrary account-id keyed credential map supplied through BINANCE_API_PROFILES_JSON. */
+    private String accountProfilesJson;
     private Strategy strategy = new Strategy();
     private Security security = new Security();
     private Storage storage = new Storage();
@@ -27,8 +29,6 @@ public class BinanceProperties {
         private String apiKeyAlias;
         private String apiKey;
         private String secretKey;
-        /** Arbitrary account-id keyed credential map supplied through BINANCE_API_PROFILES_JSON. */
-        private String profilesJson;
         /** Additional server-side credential profiles. Secrets are never exposed through an API. */
         private Map<String, CredentialProfile> profiles = new LinkedHashMap<>();
     }
