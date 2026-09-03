@@ -305,12 +305,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             halt("发现既有标的持仓，成本未知；拒绝自动接管");
             return false;
         }
-        SymbolRuleManager.SymbolRule currentRule = ruleManager.getRule(properties.getStrategy().getSymbol());
-        DailyTradeStatsStore.DailyStatsSnapshot durableStats = getDailyStatsSnapshot();
-        if (currentRule == null || durableStats.positionQty().compareTo(currentRule.stepSize()) >= 0) {
-            halt("本地每日账本仍记录有持仓，和交易所空仓状态不一致；拒绝启动，需人工对账");
-            return false;
-        }
         clearTrackedOrders();
         isRunning.set(true);
         currentStatus.set(ChurnStatus.IDLE);
@@ -1404,14 +1398,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             if (targetBalance.total().compareTo(targetRule.stepSize()) >= 0) {
                 return SymbolSwitchResult.rejected(current, "目标标的已有持仓 " + targetBalance.total().toPlainString()
                         + " " + baseAsset(target) + "，成本未知，拒绝自动接管");
-            }
-            DailyTradeStatsStore.DailyStatsSnapshot currentStats = dailyStatsStore.today(
-                    accountId, accountAlias, current);
-            DailyTradeStatsStore.DailyStatsSnapshot targetStats = dailyStatsStore.today(
-                    accountId, accountAlias, target);
-            if (currentStats.positionQty().compareTo(currentRule.stepSize()) >= 0
-                    || targetStats.positionQty().compareTo(targetRule.stepSize()) >= 0) {
-                return SymbolSwitchResult.rejected(current, "每日账本仍记录旧或新标的持仓，需先人工对账");
             }
         }
 

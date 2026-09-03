@@ -188,6 +188,54 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void startTradingIgnoresDurableLedgerPositionWhenExchangeIsFlat() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        long now = System.currentTimeMillis();
+        engine.getLiveArmed().set(true);
+        stubObservationSummaries();
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
+                .set(now);
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
+                .set(now);
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "ENSO", BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
+        when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
+        when(dailyStatsStore.today(eq("test-account"), eq("test-bot"), eq("ENSOUSDT")))
+                .thenReturn(dailyStatsWithPosition("ENSOUSDT", "10", "6"));
+
+        assertTrue(engine.startTrading());
+
+        assertTrue(engine.getIsRunning().get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+        assertEquals("运行中，等待入场信号", engine.getStatusReason().get());
+    }
+
+    @Test
+    void symbolSwitchIgnoresDurableLedgerPositionsAfterExchangeFlatCheck() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        when(ruleManager.refreshRule("BTCUSDT")).thenReturn(new SymbolRuleManager.SymbolRule(
+                "BTCUSDT", new BigDecimal("0.01"), new BigDecimal("0.00001"), new BigDecimal("5")));
+        when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
+        when(tradeService.getOpenOrders("BTCUSDT")).thenReturn(mapper.readTree("[]"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "ENSO", BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
+        when(tradeService.getAssetBalance("BTC")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "BTC", BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
+        when(dailyStatsStore.today(eq("test-account"), eq("test-bot"), eq("ENSOUSDT")))
+                .thenReturn(dailyStatsWithPosition("ENSOUSDT", "10", "6"));
+        when(dailyStatsStore.today(eq("test-account"), eq("test-bot"), eq("BTCUSDT")))
+                .thenReturn(dailyStatsWithPosition("BTCUSDT", "0.01", "1200"));
+        ((java.util.concurrent.atomic.AtomicBoolean) ReflectionTestUtils.getField(engine, "acceptingMarketConnections"))
+                .set(false);
+
+        HighFrequencyVolumeChurnEngine.SymbolSwitchResult result = engine.switchSymbol("BTCUSDT");
+
+        assertTrue(result.accepted());
+        assertEquals("BTCUSDT", engine.getSymbol());
+        verify(dailyStatsStore).saveActiveSymbol("test-account", "BTCUSDT");
+    }
+
+    @Test
     void symbolSwitchIsRejectedBeforeExchangeCallsWhileEngineRuns() {
         engine.getIsRunning().set(true);
 
@@ -804,5 +852,21 @@ class HighFrequencyVolumeChurnEngineTest {
     private BigDecimal decimalEquals(String expected) {
         BigDecimal value = new BigDecimal(expected);
         return argThat(actual -> actual != null && actual.compareTo(value) == 0);
+    }
+
+    private DailyTradeStatsStore.DailyStatsSnapshot dailyStatsWithPosition(String symbol, String quantity,
+                                                                           String cost) {
+        return new DailyTradeStatsStore.DailyStatsSnapshot(
+                LocalDate.now(), "test-account", "test-bot", symbol,
+                BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
+                new BigDecimal(quantity), new BigDecimal(cost), 0, 0, true);
+    }
+
+    private void stubObservationSummaries() {
+        PostFillOutcomeTracker tracker = (PostFillOutcomeTracker) ReflectionTestUtils.getField(
+                engine, "postFillOutcomeTracker");
+        when(tracker.getBaselineSummary()).thenReturn(PostFillOutcomeTracker.OutcomeSummary.empty(0));
+        when(tracker.getQualifiedSignalSummary()).thenReturn(PostFillOutcomeTracker.OutcomeSummary.empty(0));
     }
 }
