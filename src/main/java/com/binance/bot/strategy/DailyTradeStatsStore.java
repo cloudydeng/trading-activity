@@ -217,7 +217,7 @@ public class DailyTradeStatsStore {
                     objectMapper.convertValue(entry.getValue(), BinanceProperties.CredentialProfile.class)));
         } catch (Exception e) {
             // Parser excerpts may contain credentials, so never log the exception message.
-            log.error("BINANCE_API_PROFILES_JSON 无效，跳过旧统计别名迁移");
+            log.error("BOT_ACCOUNT_PROFILES_JSON 无效，跳过旧统计别名迁移");
             result.clear();
         }
         return result;

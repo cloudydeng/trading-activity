@@ -176,8 +176,8 @@ public class TradingAccountManager {
                     objectMapper.convertValue(entry.getValue(), BinanceProperties.CredentialProfile.class)));
         } catch (Exception e) {
             // Never include parser excerpts because the JSON contains credentials.
-            initializationErrors.put("profiles-json", "BINANCE_API_PROFILES_JSON is invalid");
-            log.error("BINANCE_API_PROFILES_JSON 无效；拒绝使用 legacy 凭据回退");
+            initializationErrors.put("profiles-json", "BOT_ACCOUNT_PROFILES_JSON is invalid");
+            log.error("BOT_ACCOUNT_PROFILES_JSON 无效；拒绝使用 legacy 凭据回退");
             result.clear();
         }
         return result;

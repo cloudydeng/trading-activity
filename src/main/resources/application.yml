@@ -20,7 +20,7 @@ spring:
 
 binance:
   # Kept outside api.profiles to avoid Spring treating the JSON scalar as a map entry.
-  account-profiles-json: '${BINANCE_API_PROFILES_JSON:}'
+  account-profiles-json: '${BOT_ACCOUNT_PROFILES_JSON:}'
   storage:
     daily-stats-db: "${BOT_DAILY_STATS_DB:data/daily-stats.db}"
   security:

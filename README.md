@@ -19,13 +19,13 @@
 账户配置是以稳定账户 ID 为键的 JSON，不限制为三组；同一配置可承载 1～10 或更多账户：
 
 ```bash
-BINANCE_API_PROFILES_JSON='{
+BOT_ACCOUNT_PROFILES_JSON='{
   "account-a":{"alias":"bot-a","apiKey":"...","secretKey":"...","enabled":true},
   "account-b":{"alias":"bot-b","apiKey":"...","secretKey":"...","enabled":true}
 }'
 ```
 
-单账户旧配置仍作为兼容回退，仅在未配置 `BINANCE_API_PROFILES_JSON` 时生效：
+单账户旧配置仍作为兼容回退，仅在未配置 `BOT_ACCOUNT_PROFILES_JSON` 时生效：
 
 ```bash
 BINANCE_API_KEY_ALIAS=bot-a
