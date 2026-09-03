@@ -1,7 +1,6 @@
 package com.binance.bot.strategy;
 
 import com.binance.bot.config.BinanceProperties;
-import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.math.MathContext;
@@ -13,7 +12,6 @@ import java.util.concurrent.atomic.AtomicReference;
  * A conservative entry gate. It never asks the engine to buy; it only rejects
  * new entries when the best-book data indicates stale, weak, or unstable flow.
  */
-@Component
 public class MarketSignalEvaluator {
     private static final MathContext MC = MathContext.DECIMAL64;
     private final Deque<Quote> quotes = new ArrayDeque<>();

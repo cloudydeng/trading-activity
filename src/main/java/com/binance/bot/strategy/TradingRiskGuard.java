@@ -1,7 +1,6 @@
 package com.binance.bot.strategy;
 
 import com.binance.bot.config.BinanceProperties;
-import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.math.MathContext;
@@ -14,7 +13,6 @@ import java.util.concurrent.atomic.AtomicReference;
  * once a loss, drawdown, inventory or holding-time limit trips, only reducing an
  * existing position remains possible until an operator investigates and restarts.
  */
-@Component
 public class TradingRiskGuard {
     private static final MathContext MC = MathContext.DECIMAL64;
     private final AtomicReference<String> entryBlockReason = new AtomicReference<>();

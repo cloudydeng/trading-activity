@@ -26,7 +26,8 @@ public class AdminTokenFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        return !request.getRequestURI().startsWith("/api/bot/");
+        String uri = request.getRequestURI();
+        return !uri.startsWith("/api/bot/") && !uri.startsWith("/api/accounts");
     }
 
     @Override

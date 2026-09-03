@@ -36,6 +36,8 @@ public class BinanceProperties {
         private String alias;
         private String apiKey;
         private String secretKey;
+        /** Disabled profiles are visible to configuration binding but do not create a runtime. */
+        private boolean enabled = true;
     }
 
     @Data

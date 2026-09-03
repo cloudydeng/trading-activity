@@ -31,16 +31,23 @@ binance:
     api-key-alias: "${BINANCE_API_KEY_ALIAS:unlabeled}"
     api-key: "${BINANCE_API_API_KEY:}"
     secret-key: "${BINANCE_API_SECRET_KEY:}"
-    # Optional second account. The browser sees only alias and active state, never these secrets.
+    # Map key is the stable internal accountId. Alias is display-only; secrets never leave the server.
     profiles:
+      primary:
+        alias: "${BINANCE_API_KEY_ALIAS:}"
+        api-key: "${BINANCE_API_API_KEY:}"
+        secret-key: "${BINANCE_API_SECRET_KEY:}"
+        enabled: "${BINANCE_PRIMARY_API_ENABLED:true}"
       secondary:
         alias: "${BINANCE_SECONDARY_API_KEY_ALIAS:}"
         api-key: "${BINANCE_SECONDARY_API_API_KEY:}"
         secret-key: "${BINANCE_SECONDARY_API_SECRET_KEY:}"
+        enabled: "${BINANCE_SECONDARY_API_ENABLED:true}"
       tertiary:
         alias: "${BINANCE_TERTIARY_API_KEY_ALIAS:}"
         api-key: "${BINANCE_TERTIARY_API_API_KEY:}"
         secret-key: "${BINANCE_TERTIARY_API_SECRET_KEY:}"
+        enabled: "${BINANCE_TERTIARY_API_ENABLED:true}"
   strategy:
     # OBSERVE: 只消费公开行情并记录虚拟入场结果，绝不发认证请求或订单。
     # LIVE requires both of the environment switches below; defaults never trade.
