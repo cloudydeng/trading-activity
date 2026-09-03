@@ -5,37 +5,35 @@
 ## 安全边界
 
 - BUY 部分成交会立即进入 SELL 管理，成交以账户事件流和 REST 对账为准。
-- 买入只使用买一价 `LIMIT_MAKER`；每笔最多 `6 USDT`，20 秒后若订单仍是买一则继续挂，只有不再是买一时才撤单；不转 IOC、不因短线信号提前撤单。
+- 买入只使用买一价 `LIMIT_MAKER`；每笔最多 `12 USDT`，20 秒后若订单仍是买一则继续挂，只有不再是买一时才撤单；不转 IOC、不因短线信号提前撤单。
 - BUY 一旦真实成交（包括达到最小可卖额的部分成交），立即撤销剩余买单并按实际加权买入均价（按 tick 向上取整）挂 `LIMIT GTC SELL`；例如买入均价 `0.862` 就先挂卖价 `0.862`。
 - 每张卖单有效管理窗口为 2 分钟；未完全成交时先撤单并完成成交与库存对账，再将剩余数量按最新卖一价挂新的 `LIMIT GTC SELL`，之后每 2 分钟重复，直至空仓。
 - 自动交易流程没有价格止损、止损冷却或 MARKET 卖出；MARKET 只保留给人工授权清仓。库存对账与防重复卖出始终是强制保护。
-- 交易对或 API 账户切换前必须停止策略、锁定 LIVE、确认无活动订单和当前标的持仓。
+- 每个 API 账户拥有独立运行时、交易对、订单、持仓、风控和统计；交易对切换前必须停止该账户、锁定 LIVE，并确认无活动订单和当前标的持仓。
+- 所有账户共享服务器公网 IP 的 Binance 请求权重；系统动态读取每分钟上限，在 80% 处暂停新开仓并保留退出、撤单和对账余量。
 - API Key、Secret、管理密码仅从服务器环境变量加载，不通过浏览器提交或返回。
-- 每日成交量、手续费、净盈亏和成本按 `UTC 日期 + API 别名 + 交易对` 写入 SQLite。
+- 每日成交量、手续费、净盈亏和成本按 `稳定账户 ID + UTC 日期 + 交易对` 写入 SQLite。
 
 ## 环境变量
 
-主 API 账户：
+账户配置是以稳定账户 ID 为键的 JSON，不限制为三组；同一配置可承载 1～10 或更多账户：
 
 ```bash
-BINANCE_API_KEY_ALIAS=huaqin-bot
+BOT_ACCOUNT_PROFILES_JSON='{
+  "account-a":{"alias":"bot-a","apiKey":"...","secretKey":"...","enabled":true},
+  "account-b":{"alias":"bot-b","apiKey":"...","secretKey":"...","enabled":true}
+}'
+```
+
+单账户旧配置仍作为兼容回退，仅在未配置 `BOT_ACCOUNT_PROFILES_JSON` 时生效：
+
+```bash
+BINANCE_API_KEY_ALIAS=bot-a
 BINANCE_API_API_KEY=...
 BINANCE_API_SECRET_KEY=...
 ```
 
-可选的第二 API 账户：
-
-```bash
-BINANCE_SECONDARY_API_KEY_ALIAS=second-bot
-BINANCE_SECONDARY_API_API_KEY=...
-BINANCE_SECONDARY_API_SECRET_KEY=...
-
-BINANCE_TERTIARY_API_KEY_ALIAS=third-bot
-BINANCE_TERTIARY_API_API_KEY=...
-BINANCE_TERTIARY_API_SECRET_KEY=...
-```
-
-第二套凭据必须三项同时配置，否则服务拒绝启动。网页只会显示别名。成功切换的别名写入 SQLite，服务重启后会恢复；如果对应环境变量不再存在，则回退到主账户。
+每个启用账户的 API Key 和 Secret 必须同时配置。网页只显示账户 ID 和别名，绝不返回密钥。各账户切换后的交易对按账户 ID 写入 SQLite，服务重启后独立恢复。
 
 ## 构建与启动
 
@@ -46,10 +44,12 @@ java -jar target/binance-spot-competition-bot-3.0.0.jar
 
 控制接口均受浏览器登录会话或 `X-Bot-Admin-Token` 保护：
 
-- `GET /api/bot/status`
-- `POST /api/bot/start`
-- `POST /api/bot/stop`
-- `POST /api/bot/symbol`
-- `GET /api/bot/api-profiles`
-- `POST /api/bot/api-profile`
-- `GET /api/bot/stats/daily`
+- `GET /api/accounts`
+- `GET /api/accounts/{accountId}/status`
+- `POST /api/accounts/{accountId}/live/arm`
+- `POST /api/accounts/{accountId}/start`
+- `POST /api/accounts/{accountId}/stop`
+- `POST /api/accounts/{accountId}/symbol`
+- `POST /api/accounts/arm-all`
+- `POST /api/accounts/start-all`
+- `POST /api/accounts/stop-all`

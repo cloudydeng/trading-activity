@@ -1,42 +1,36 @@
 package com.binance.bot.service;
 
+import com.binance.bot.account.AccountCredentials;
 import com.binance.bot.config.BinanceProperties;
-import com.binance.bot.config.BinanceCredentialManager;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
-import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
 import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 @Slf4j
-@Service
-public class BinanceOptimizedTradeService {
+public class BinanceAccountTradeClient {
 
     private final RestClient restClient;
     private final BinanceProperties properties;
-    private final BinanceCredentialManager credentialManager;
+    private final AccountCredentials credentials;
     private final BinanceSigner signer;
+    private final BinanceIpRateLimitCoordinator rateLimitCoordinator;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    @Getter
-    private final AtomicInteger usedWeight1m = new AtomicInteger(0);
-    private final AtomicLong lastWeightUpdateMs = new AtomicLong(0);
-
-    public BinanceOptimizedTradeService(BinanceProperties properties, BinanceSigner signer,
-                                        BinanceCredentialManager credentialManager) {
+    public BinanceAccountTradeClient(BinanceProperties properties, BinanceSigner signer,
+                                     AccountCredentials credentials,
+                                     BinanceIpRateLimitCoordinator rateLimitCoordinator) {
         this.properties = properties;
         this.signer = signer;
-        this.credentialManager = credentialManager;
+        this.credentials = credentials;
+        this.rateLimitCoordinator = rateLimitCoordinator;
         this.restClient = RestClient.builder()
                 .baseUrl(properties.getApi().getBaseUrl())
                 .build();
@@ -47,9 +41,16 @@ public class BinanceOptimizedTradeService {
      */
     public JsonNode cancelAndReplaceOrder(String symbol, String side, BigDecimal price, BigDecimal quantity,
                                           Long cancelOrderId, String clientOrderId) {
-        if (usedWeight1m.get() > 1000 && System.currentTimeMillis() - lastWeightUpdateMs.get() < 60_000) {
-            log.warn("⚠️ API 权重过高 (used: {})，节流保护", usedWeight1m.get());
-            return null;
+        boolean entryRequest = "BUY".equalsIgnoreCase(side);
+        if (entryRequest) {
+            BinanceIpRateLimitCoordinator.Permit permit = rateLimitCoordinator.tryAcquireEntryRequest(1);
+            if (!permit.allowed()) {
+                log.warn("[accountId={} alias={}] 共享 IP API 权重达到入场安全线 ({}/{})，暂缓新报单",
+                        credentials.accountId(), credentials.alias(), permit.usedWeight1m(), permit.safeLimit1m());
+                return localRateLimitedResponse(permit);
+            }
+        } else {
+            rateLimitCoordinator.reserveSafetyRequest(1);
         }
 
         long timestamp = System.currentTimeMillis();
@@ -70,7 +71,6 @@ public class BinanceOptimizedTradeService {
         params.put("timestamp", String.valueOf(timestamp));
 
         String queryString = buildQueryString(params);
-        BinanceCredentialManager.CredentialSnapshot credentials = credentialManager.current();
         String signature = signer.sign(queryString, credentials.secretKey());
         String uri = (cancelOrderId != null && cancelOrderId > 0)
                 ? "/api/v3/order/cancelReplace?" + queryString + "&signature=" + signature
@@ -83,20 +83,18 @@ public class BinanceOptimizedTradeService {
                     .contentType(MediaType.APPLICATION_FORM_URLENCODED)
                     .exchange((request, response) -> {
                         HttpHeaders headers = response.getHeaders();
-                        String weightStr = headers.getFirst("x-mbx-used-weight-1m");
-                        if (weightStr != null) {
-                            usedWeight1m.set(Integer.parseInt(weightStr));
-                            lastWeightUpdateMs.set(System.currentTimeMillis());
-                        }
+                        rateLimitCoordinator.updateFromHeaders(headers);
                         JsonNode body = objectMapper.readTree(response.getBody());
                         if (!response.getStatusCode().is2xxSuccessful()) {
-                            log.warn("报单请求失败: HTTP {}, code={}, msg={}", response.getStatusCode().value(),
+                            log.warn("[accountId={} alias={}] 报单请求失败: HTTP {}, code={}, msg={}",
+                                    credentials.accountId(), credentials.alias(), response.getStatusCode().value(),
                                     body.path("code").asText("unknown"), body.path("msg").asText("unknown"));
                         }
                         return body;
                     });
         } catch (Exception e) {
-            log.warn("报单请求状态未知: {}", e.getMessage());
+            log.warn("[accountId={} alias={}] 报单请求状态未知: {}",
+                    credentials.accountId(), credentials.alias(), e.getMessage());
             return null;
         }
     }
@@ -109,7 +107,6 @@ public class BinanceOptimizedTradeService {
         params.put("timestamp", String.valueOf(timestamp));
 
         String queryString = buildQueryString(params);
-        BinanceCredentialManager.CredentialSnapshot credentials = credentialManager.current();
         String signature = signer.sign(queryString, credentials.secretKey());
         String uri = "/api/v3/order?" + queryString + "&signature=" + signature;
 
@@ -121,14 +118,16 @@ public class BinanceOptimizedTradeService {
                         updateWeight(response.getHeaders());
                         JsonNode body = objectMapper.readTree(response.getBody());
                         if (!response.getStatusCode().is2xxSuccessful()) {
-                            log.warn("撤单失败: ID={}, HTTP {}, code={}, msg={}", orderId,
+                            log.warn("[accountId={} alias={}] 撤单失败: ID={}, HTTP {}, code={}, msg={}",
+                                    credentials.accountId(), credentials.alias(), orderId,
                                     response.getStatusCode().value(), body.path("code").asText("unknown"),
                                     body.path("msg").asText("unknown"));
                         }
                         return body;
                     });
         } catch (Exception e) {
-            log.warn("撤单请求状态未知: ID={}, {}", orderId, e.getMessage());
+            log.warn("[accountId={} alias={}] 撤单请求状态未知: ID={}, {}",
+                    credentials.accountId(), credentials.alias(), orderId, e.getMessage());
             return null;
         }
     }
@@ -146,7 +145,6 @@ public class BinanceOptimizedTradeService {
         params.put("selfTradePreventionMode", "EXPIRE_BOTH");
         params.put("timestamp", String.valueOf(timestamp));
         String queryString = buildQueryString(params);
-        BinanceCredentialManager.CredentialSnapshot credentials = credentialManager.current();
         String signature = signer.sign(queryString, credentials.secretKey());
         try {
             return restClient.post()
@@ -157,13 +155,15 @@ public class BinanceOptimizedTradeService {
                         updateWeight(response.getHeaders());
                         JsonNode body = objectMapper.readTree(response.getBody());
                         if (!response.getStatusCode().is2xxSuccessful()) {
-                            log.error("紧急市价卖单失败: HTTP {}, code={}, msg={}", response.getStatusCode().value(),
+                            log.error("[accountId={} alias={}] 紧急市价卖单失败: HTTP {}, code={}, msg={}",
+                                    credentials.accountId(), credentials.alias(), response.getStatusCode().value(),
                                     body.path("code").asText("unknown"), body.path("msg").asText("unknown"));
                         }
                         return body;
                     });
         } catch (Exception e) {
-            log.error("紧急市价卖单请求状态未知: {}", e.getMessage());
+            log.error("[accountId={} alias={}] 紧急市价卖单请求状态未知: {}",
+                    credentials.accountId(), credentials.alias(), e.getMessage());
             return null;
         }
     }
@@ -183,7 +183,6 @@ public class BinanceOptimizedTradeService {
         params.put("selfTradePreventionMode", "EXPIRE_BOTH");
         params.put("timestamp", String.valueOf(timestamp));
         String queryString = buildQueryString(params);
-        BinanceCredentialManager.CredentialSnapshot credentials = credentialManager.current();
         String signature = signer.sign(queryString, credentials.secretKey());
         try {
             return restClient.post()
@@ -220,7 +219,6 @@ public class BinanceOptimizedTradeService {
         params.put("selfTradePreventionMode", "EXPIRE_BOTH");
         params.put("timestamp", String.valueOf(timestamp));
         String queryString = buildQueryString(params);
-        BinanceCredentialManager.CredentialSnapshot credentials = credentialManager.current();
         String signature = signer.sign(queryString, credentials.secretKey());
         try {
             return restClient.post()
@@ -257,7 +255,6 @@ public class BinanceOptimizedTradeService {
         params.put("selfTradePreventionMode", "EXPIRE_BOTH");
         params.put("timestamp", String.valueOf(timestamp));
         String queryString = buildQueryString(params);
-        BinanceCredentialManager.CredentialSnapshot credentials = credentialManager.current();
         String signature = signer.sign(queryString, credentials.secretKey());
         try {
             return restClient.post()
@@ -268,13 +265,15 @@ public class BinanceOptimizedTradeService {
                         updateWeight(response.getHeaders());
                         JsonNode body = objectMapper.readTree(response.getBody());
                         if (!response.getStatusCode().is2xxSuccessful()) {
-                            log.error("GTC 限价卖单失败: HTTP {}, code={}, msg={}", response.getStatusCode().value(),
+                            log.error("[accountId={} alias={}] GTC 限价卖单失败: HTTP {}, code={}, msg={}",
+                                    credentials.accountId(), credentials.alias(), response.getStatusCode().value(),
                                     body.path("code").asText("unknown"), body.path("msg").asText("unknown"));
                         }
                         return body;
                     });
         } catch (Exception e) {
-            log.error("GTC 限价卖单请求状态未知: {}", e.getMessage());
+            log.error("[accountId={} alias={}] GTC 限价卖单请求状态未知: {}",
+                    credentials.accountId(), credentials.alias(), e.getMessage());
             return null;
         }
     }
@@ -370,7 +369,6 @@ public class BinanceOptimizedTradeService {
 
     private JsonNode getSignedJson(String path, Map<String, String> params, String errorMessage) {
         String queryString = buildQueryString(params);
-        BinanceCredentialManager.CredentialSnapshot credentials = credentialManager.current();
         String signature = signer.sign(queryString, credentials.secretKey());
         try {
             return restClient.get().uri(path + "?" + queryString + "&signature=" + signature)
@@ -379,30 +377,39 @@ public class BinanceOptimizedTradeService {
                         updateWeight(response.getHeaders());
                         JsonNode body = objectMapper.readTree(response.getBody());
                         if (!response.getStatusCode().is2xxSuccessful()) {
-                            log.warn("{}: HTTP {}, code={}, msg={}", errorMessage,
+                            log.warn("[accountId={} alias={}] {}: HTTP {}, code={}, msg={}",
+                                    credentials.accountId(), credentials.alias(), errorMessage,
                                     response.getStatusCode().value(), body.path("code").asText("unknown"),
                                     body.path("msg").asText("unknown"));
                         }
                         return body;
                     });
         } catch (Exception e) {
-            log.error("{}: {}", errorMessage, e.getMessage());
+            log.error("[accountId={} alias={}] {}: {}", credentials.accountId(), credentials.alias(),
+                    errorMessage, e.getMessage());
             return null;
         }
     }
 
     private void updateWeight(HttpHeaders headers) {
-        String weightStr = headers.getFirst("x-mbx-used-weight-1m");
-        if (weightStr != null) {
-            usedWeight1m.set(Integer.parseInt(weightStr));
-            lastWeightUpdateMs.set(System.currentTimeMillis());
-        }
+        rateLimitCoordinator.updateFromHeaders(headers);
     }
 
-    public void resetRequestWeight() {
-        usedWeight1m.set(0);
-        lastWeightUpdateMs.set(0);
+    private JsonNode localRateLimitedResponse(BinanceIpRateLimitCoordinator.Permit permit) {
+        var response = objectMapper.createObjectNode();
+        response.put("localRateLimited", true);
+        response.put("code", "LOCAL_IP_WEIGHT_LIMIT");
+        response.put("msg", "shared IP request-weight entry reserve reached");
+        response.put("usedWeight1m", permit.usedWeight1m());
+        response.put("requestWeightLimit1m", permit.limit1m());
+        response.put("safeRequestWeightLimit1m", permit.safeLimit1m());
+        response.put("retryAfterMs", permit.retryAfterMs());
+        return response;
     }
+
+    public int getUsedWeight1m() { return rateLimitCoordinator.snapshot().usedWeight1m(); }
+    public int getRequestWeightLimit1m() { return rateLimitCoordinator.snapshot().limit1m(); }
+    public int getSafeRequestWeightLimit1m() { return rateLimitCoordinator.snapshot().safeLimit1m(); }
 
     public record AssetBalance(String asset, BigDecimal free, BigDecimal locked, BigDecimal total) { }
 }

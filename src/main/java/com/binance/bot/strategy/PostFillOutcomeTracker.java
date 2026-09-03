@@ -1,7 +1,5 @@
 package com.binance.bot.strategy;
 
-import org.springframework.stereotype.Component;
-import org.springframework.beans.factory.annotation.Autowired;
 
 import java.math.BigDecimal;
 import java.math.MathContext;
@@ -14,7 +12,6 @@ import java.util.Map;
 import java.util.TreeMap;
 
 /** Records post-fill market outcomes for validation; it does not make trading decisions. */
-@Component
 public class PostFillOutcomeTracker {
     private static final long[] HORIZONS_MS = {1_000, 5_000, 15_000, 60_000};
     private static final MathContext MC = MathContext.DECIMAL64;
@@ -27,7 +24,6 @@ public class PostFillOutcomeTracker {
         this.observationJournal = null;
     }
 
-    @Autowired
     public PostFillOutcomeTracker(ObservationJournal observationJournal) {
         this.observationJournal = observationJournal;
     }

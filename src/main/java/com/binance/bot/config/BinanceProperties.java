@@ -14,6 +14,8 @@ import java.util.Map;
 public class BinanceProperties {
 
     private Api api = new Api();
+    /** Arbitrary account-id keyed credential map supplied through BOT_ACCOUNT_PROFILES_JSON. */
+    private String accountProfilesJson;
     private Strategy strategy = new Strategy();
     private Security security = new Security();
     private Storage storage = new Storage();
@@ -36,6 +38,8 @@ public class BinanceProperties {
         private String alias;
         private String apiKey;
         private String secretKey;
+        /** Disabled profiles are visible to configuration binding but do not create a runtime. */
+        private boolean enabled = true;
     }
 
     @Data
@@ -85,6 +89,10 @@ public class BinanceProperties {
         private long exitRepriceIntervalMs = 5_000;
         /** A pessimistic fee estimate, until actual commission events are accounted for. */
         private BigDecimal assumedMakerFeeBps = new BigDecimal("10");
+        /** Extra room above Binance's minNotional before residual inventory is considered sellable. */
+        private BigDecimal sellMinNotionalBufferPercent = new BigDecimal("5");
+        /** Stop accumulating residual base inventory if it grows beyond this notional value. */
+        private BigDecimal maxDustNotionalUsdt = new BigDecimal("20");
         /** Unconditional OBSERVE-only market baseline cadence; kept separate from qualified signal samples. */
         private long benchmarkObservationIntervalMs = 2_000;
         private long paperEntryIntervalMs = 1_500;
