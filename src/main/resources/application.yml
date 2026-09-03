@@ -83,6 +83,10 @@ binance:
     exit-reprice-interval-ms: 5000
     # 仅用于下单前的风险估算；成交后由 executionReport/myTrades 的真实 commission 覆盖记账。
     assumed-maker-fee-bps: 10
+    # 残余库存必须高于交易所最小名义额 5% 才重新合并卖出，避免贴边被过滤器拒单。
+    sell-min-notional-buffer-percent: 5
+    # 粉尘库存超过该 USDT 名义额说明异常，停止继续买入等待人工处理。
+    max-dust-notional-usdt: 20
     # Observation can be enabled for research; signal execution does not depend on it.
     collect-observations: false
     benchmark-observation-interval-ms: 2000

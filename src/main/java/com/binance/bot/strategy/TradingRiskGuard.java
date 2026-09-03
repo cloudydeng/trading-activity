@@ -82,7 +82,13 @@ public class TradingRiskGuard {
 
     public synchronized boolean permitsNewEntry(BigDecimal newOrderQty, BigDecimal entryPrice, long nowMs,
                                                 BinanceProperties.Strategy config) {
-        evaluate(nowMs, config);
+        return permitsNewEntry(newOrderQty, entryPrice, nowMs, config, false);
+    }
+
+    public synchronized boolean permitsNewEntry(BigDecimal newOrderQty, BigDecimal entryPrice, long nowMs,
+                                                BinanceProperties.Strategy config,
+                                                boolean ignoreInventoryAgeBlock) {
+        evaluate(nowMs, config, ignoreInventoryAgeBlock);
         if (entryBlockReason.get() != null) return false;
         BigDecimal projectedNotional = positionQty.add(newOrderQty).multiply(entryPrice);
         if (projectedNotional.compareTo(config.getMaxInventoryUsdt()) > 0) {
@@ -140,10 +146,18 @@ public class TradingRiskGuard {
     }
 
     private void evaluate(long nowMs, BinanceProperties.Strategy config) {
+        evaluate(nowMs, config, false);
+    }
+
+    private void evaluate(long nowMs, BinanceProperties.Strategy config, boolean ignoreInventoryAgeBlock) {
+        if (ignoreInventoryAgeBlock && "MAX_INVENTORY_AGE".equals(entryBlockReason.get())) {
+            entryBlockReason.set(null);
+        }
         BigDecimal netPnl = realizedPnlUsdt.add(unrealizedPnl());
         peakNetPnlUsdt = peakNetPnlUsdt.max(netPnl);
         if (peakNetPnlUsdt.subtract(netPnl).compareTo(config.getMaxDailyDrawdownUsdt()) >= 0) trip("MAX_DAILY_DRAWDOWN");
-        if (positionOpenedAtMs >= 0 && nowMs - positionOpenedAtMs >= config.getMaxInventoryAgeMs()) trip("MAX_INVENTORY_AGE");
+        if (!ignoreInventoryAgeBlock && positionOpenedAtMs >= 0
+                && nowMs - positionOpenedAtMs >= config.getMaxInventoryAgeMs()) trip("MAX_INVENTORY_AGE");
     }
 
     private BigDecimal unrealizedPnl() {
