@@ -50,7 +50,7 @@ class DailyTradeStatsStoreTest {
     }
 
     @Test
-    void exchangeFlatReconciliationNormalizesOnlySubStepDust() {
+    void exchangeFlatReconciliationNormalizesSubStepDust() {
         BinanceProperties properties = properties();
         DailyTradeStatsStore store = new DailyTradeStatsStore(properties);
         long now = System.currentTimeMillis();
@@ -63,6 +63,23 @@ class DailyTradeStatsStoreTest {
         DailyTradeStatsStore.DailyStatsSnapshot stats = store.today("account-b", "lee", "ENSOUSDT");
         assertDecimal("0", stats.positionQty());
         assertDecimal("0", stats.positionCostQuote());
+        assertEquals(1, stats.roundTrips());
+        store.close();
+    }
+
+    @Test
+    void exchangeFlatReconciliationNormalizesTradeableLedgerRemainder() {
+        BinanceProperties properties = properties();
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties);
+        long now = System.currentTimeMillis();
+        store.recordTrade("account-b", "lee", "ENSOUSDT", 20, 2001, "BUY", new BigDecimal("10"),
+                new BigDecimal("8.50"), BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, now);
+
+        assertEquals(true, store.reconcileFlatDust("account-b", "ENSOUSDT", new BigDecimal("0.01")));
+        DailyTradeStatsStore.DailyStatsSnapshot stats = store.today("account-b", "lee", "ENSOUSDT");
+        assertDecimal("0", stats.positionQty());
+        assertDecimal("0", stats.positionCostQuote());
+        assertDecimal("-8.50", stats.realizedGrossPnlQuote());
         assertEquals(1, stats.roundTrips());
         store.close();
     }

@@ -314,7 +314,10 @@ public class DailyTradeStatsStore {
         return today(accountId, accountId, symbol);
     }
 
-    /** Normalizes only an untradeable remainder after the exchange has proved the account flat. */
+    /**
+     * Normalizes the durable position ledger after the exchange has proved the account flat.
+     * Any remaining cost is conservatively realized as a loss instead of blocking the engine.
+     */
     public synchronized boolean reconcileFlatDust(String accountId, String symbol, BigDecimal stepSize) {
         LocalDate date = LocalDate.now(ZoneOffset.UTC);
         String normalizedAccountId = normalizeAccountId(accountId);
@@ -326,9 +329,9 @@ public class DailyTradeStatsStore {
                 connection.rollback();
                 return true;
             }
-            if (stepSize == null || stepSize.signum() <= 0 || stats.positionQty.compareTo(stepSize) >= 0) {
-                connection.rollback();
-                return false;
+            if (stepSize != null && stepSize.signum() > 0 && stats.positionQty.compareTo(stepSize) >= 0) {
+                log.warn("交易所已确认空仓，但每日账本仍记录可交易持仓；按残余成本记亏并归零: accountId={} symbol={} qty={} cost={}",
+                        normalizedAccountId, normalizedSymbol, stats.positionQty, stats.positionCostQuote);
             }
             stats.realizedGrossPnl = stats.realizedGrossPnl.subtract(stats.positionCostQuote);
             stats.positionQty = BigDecimal.ZERO;
