@@ -62,6 +62,26 @@ class TradingAccountManagerTest {
     }
 
     @Test
+    void malformedProfileIdDoesNotPreventHealthyAccountInitialization() {
+        BinanceProperties properties = new BinanceProperties();
+        properties.getApi().getProfiles().put("invalid account", profile("broken", "key-a", "secret-a"));
+        properties.getApi().getProfiles().put("account-b", profile("B", "key-b", "secret-b"));
+        AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
+        AccountTradingRuntime healthy = mock(AccountTradingRuntime.class);
+        when(healthy.accountId()).thenReturn("account-b");
+        when(healthy.alias()).thenReturn("B");
+        when(factory.create(any())).thenReturn(healthy);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+
+        assertDoesNotThrow(manager::initialize);
+
+        assertSame(healthy, manager.find("account-b").orElseThrow());
+        assertTrue(manager.find("invalid account").isEmpty());
+        verify(factory, times(1)).create(any());
+        verify(healthy).initialize();
+    }
+
+    @Test
     void startAllContinuesAfterOneAccountThrows() {
         BinanceProperties properties = propertiesWith("account-a", "A", "key-a", "secret-a",
                 "account-b", "B", "key-b", "secret-b");

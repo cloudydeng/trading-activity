@@ -115,11 +115,20 @@ public class TradingAccountManager {
         Map<String, AccountCredentials> result = new LinkedHashMap<>();
         boolean profilesConfigured = !properties.getApi().getProfiles().isEmpty();
         properties.getApi().getProfiles().forEach((accountId, profile) -> {
-            if (!profile.isEnabled()) return;
-            AccountCredentials credentials = new AccountCredentials(accountId,
-                    displayAlias(profile.getAlias(), accountId), profile.getApiKey(), profile.getSecretKey());
-            if (credentials.complete()) result.put(accountId, credentials);
-            else if (hasAnyCredentialValue(profile)) initializationErrors.put(accountId, "API credentials are incomplete");
+            String errorId = safeProfileId(accountId);
+            try {
+                if (profile == null) throw new IllegalArgumentException("credential profile is missing");
+                if (!profile.isEnabled()) return;
+                AccountCredentials credentials = new AccountCredentials(accountId,
+                        displayAlias(profile.getAlias(), accountId), profile.getApiKey(), profile.getSecretKey());
+                if (credentials.complete()) result.put(accountId, credentials);
+                else if (hasAnyCredentialValue(profile)) {
+                    initializationErrors.put(errorId, "API credentials are incomplete");
+                }
+            } catch (Exception e) {
+                initializationErrors.put(errorId, safeMessage(e));
+                log.error("[accountId={}] 账号配置无效；其他账号继续初始化: {}", errorId, safeMessage(e));
+            }
         });
         if (!profilesConfigured && result.isEmpty()
                 && complete(properties.getApi().getApiKey(), properties.getApi().getSecretKey())) {
@@ -140,6 +149,9 @@ public class TradingAccountManager {
     private boolean complete(String apiKey, String secretKey) { return notBlank(apiKey) && notBlank(secretKey); }
     private boolean notBlank(String value) { return value != null && !value.isBlank(); }
     private String displayAlias(String alias, String fallback) { return notBlank(alias) ? alias : fallback; }
+    private String safeProfileId(String accountId) {
+        return accountId == null || accountId.isBlank() ? "invalid-profile" : accountId;
+    }
     private String safeMessage(Exception e) {
         String value = e.getMessage();
         return value == null || value.isBlank() ? e.getClass().getSimpleName() : value;

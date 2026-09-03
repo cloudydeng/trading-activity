@@ -9,6 +9,8 @@ import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.CompletableFuture;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
@@ -33,6 +35,23 @@ class AccountTradingRuntimeTest {
         verify(engineB).startTrading();
         verify(engineA).disarmLiveTrading();
         verify(engineB, never()).disarmLiveTrading();
+    }
+
+    @Test
+    void shutdownAlwaysClosesUserStreamWhenEngineCleanupFails() {
+        HighFrequencyVolumeChurnEngine engine = mock(HighFrequencyVolumeChurnEngine.class);
+        AccountUserDataStream stream = mock(AccountUserDataStream.class);
+        AccountTradingRuntime runtime = new AccountTradingRuntime(
+                new AccountCredentials("account-a", "A", "key", "secret"),
+                mock(BinanceAccountTradeClient.class), stream, engine,
+                mock(TradingRiskGuard.class), mock(PostFillOutcomeTracker.class));
+        runtime.initialize();
+        doThrow(new IllegalStateException("engine cleanup failed")).when(engine).shutdown();
+
+        assertThrows(IllegalStateException.class, runtime::shutdown);
+
+        verify(stream).shutdown();
+        assertFalse(runtime.initialized());
     }
 
     private AccountTradingRuntime runtime(String accountId, HighFrequencyVolumeChurnEngine engine) {

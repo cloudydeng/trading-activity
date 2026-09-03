@@ -26,6 +26,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
@@ -85,6 +86,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicBoolean exitSubmissionInFlight = new AtomicBoolean(false);
     private final AtomicBoolean marketConnectInProgress = new AtomicBoolean(false);
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
+    private final AtomicInteger marketReconnectAttempts = new AtomicInteger(0);
     private final AtomicBoolean acceptingMarketConnections = new AtomicBoolean(true);
     private final AtomicReference<WebSocket> activeMarketWebSocket = new AtomicReference<>();
     private final ScheduledExecutorService marketWatchdog;
@@ -154,6 +156,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     // watchdog can never observe a false "no connection" gap and queue a duplicate.
                     marketConnectInProgress.set(false);
                     reconnectScheduled.set(false);
+                    marketReconnectAttempts.set(0);
                     log.info("[accountId={} alias={}] 已连接盘口数据流: {}", accountId, accountAlias, wsUrl);
                 })
                 .exceptionally(ex -> {
@@ -197,14 +200,22 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         log.warn("[accountId={} alias={}] 行情流不可用: {}", accountId, accountAlias, reason);
         if (isRunning.get() && !properties.getStrategy().isObserveMode()) protectOnStreamLoss("行情流不可用: " + reason);
         if (reconnectScheduled.compareAndSet(false, true)) {
-            CompletableFuture.delayedExecutor(1, TimeUnit.SECONDS).execute(() -> {
+            int attempt = marketReconnectAttempts.incrementAndGet();
+            long delayMs = reconnectDelayMs(attempt);
+            marketWatchdog.schedule(() -> {
                 if (!acceptingMarketConnections.get()) {
                     reconnectScheduled.set(false);
                     return;
                 }
                 connectMarketData();
-            });
+            }, delayMs, TimeUnit.MILLISECONDS);
         }
+    }
+
+    private long reconnectDelayMs(int attempt) {
+        int exponent = Math.min(Math.max(0, attempt - 1), 6);
+        long baseMs = Math.min(60_000L, 1_000L << exponent);
+        return baseMs + ThreadLocalRandom.current().nextLong(Math.max(1L, baseMs / 4));
     }
 
     private void checkMarketStreamHealth() {

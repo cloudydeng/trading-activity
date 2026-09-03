@@ -13,6 +13,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
 class AccountUserDataStreamTest {
@@ -90,6 +93,25 @@ class AccountUserDataStreamTest {
         assertEquals(90, update.get().orderId());
     }
 
+    @Test
+    void authenticationRejectionStopsAutomaticReconnectForOnlyThatAccount() {
+        BinanceProperties properties = properties();
+        AtomicInteger lifecycleCallbacks = new AtomicInteger();
+        AccountUserDataStream service = service("account-a", properties, event -> { },
+                reason -> lifecycleCallbacks.incrementAndGet());
+        WebSocket webSocket = mock(WebSocket.class);
+        activeSocket(service).set(webSocket);
+
+        service.onText(webSocket,
+                "{\"id\":\"account-events\",\"status\":401,\"error\":{\"msg\":\"invalid api key\"}}", true);
+
+        assertTrue(atomicBoolean(service, "terminalAuthenticationFailure").get());
+        assertFalse(atomicBoolean(service, "reconnectScheduled").get());
+        assertEquals(0, lifecycleCallbacks.get());
+        assertNull(activeSocket(service).get());
+        service.shutdown();
+    }
+
     private BinanceProperties properties() {
         BinanceProperties properties = new BinanceProperties();
         properties.getStrategy().setSymbol("ENSOUSDT");
@@ -114,5 +136,9 @@ class AccountUserDataStreamTest {
     @SuppressWarnings("unchecked")
     private AtomicReference<WebSocket> activeSocket(AccountUserDataStream service) {
         return (AtomicReference<WebSocket>) ReflectionTestUtils.getField(service, "activeWebSocket");
+    }
+
+    private java.util.concurrent.atomic.AtomicBoolean atomicBoolean(AccountUserDataStream service, String field) {
+        return (java.util.concurrent.atomic.AtomicBoolean) ReflectionTestUtils.getField(service, field);
     }
 }

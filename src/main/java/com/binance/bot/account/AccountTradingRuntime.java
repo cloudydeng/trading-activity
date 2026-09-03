@@ -44,9 +44,16 @@ public class AccountTradingRuntime {
     public boolean disarm() { return engine.disarmLiveTrading(); }
 
     public synchronized void shutdown() {
-        if (!initialized.compareAndSet(true, false)) return;
-        engine.shutdown();
-        userDataStream.shutdown();
+        if (!initialized.get()) return;
+        try {
+            engine.shutdown();
+        } finally {
+            try {
+                userDataStream.shutdown();
+            } finally {
+                initialized.set(false);
+            }
+        }
     }
 
     public String accountId() { return credentials.accountId(); }

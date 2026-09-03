@@ -21,8 +21,10 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -45,14 +47,14 @@ public class DailyTradeStatsStore {
             Path parent = dbPath.getParent();
             if (parent != null) Files.createDirectories(parent);
             connection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
-            initializeSchema();
+            initializeSchema(properties);
             log.info("每日交易统计已启用: {}", dbPath);
         } catch (Exception e) {
             throw new IllegalStateException("无法初始化每日交易统计数据库", e);
         }
     }
 
-    private void initializeSchema() throws SQLException {
+    private void initializeSchema(BinanceProperties properties) throws SQLException {
         try (Statement statement = connection.createStatement()) {
             statement.execute("PRAGMA journal_mode=WAL");
             statement.execute("PRAGMA synchronous=FULL");
@@ -92,6 +94,7 @@ public class DailyTradeStatsStore {
                     )
                     """);
         }
+        rekeyLegacyAccountIds(properties);
     }
 
     private boolean tableExists(String table) throws SQLException {
@@ -143,6 +146,59 @@ public class DailyTradeStatsStore {
         } finally {
             connection.setAutoCommit(true);
         }
+    }
+
+    /**
+     * The v1 schema used the display alias as its primary identity. Multi-account runtimes use the
+     * profile map key instead, so move those rows to the stable id before any engine restores risk.
+     * Running this on every startup also repairs databases first opened by an early v2 build.
+     */
+    private void rekeyLegacyAccountIds(BinanceProperties properties) throws SQLException {
+        Map<String, String> aliasToAccountId = legacyAliasMappings(properties);
+        if (aliasToAccountId.isEmpty()) return;
+        try (PreparedStatement update = connection.prepareStatement(
+                "UPDATE daily_trade_stats SET account_id=? WHERE account_id=?")) {
+            for (Map.Entry<String, String> mapping : aliasToAccountId.entrySet()) {
+                if (mapping.getKey().equals(mapping.getValue())) continue;
+                update.setString(1, mapping.getValue());
+                update.setString(2, mapping.getKey());
+                try {
+                    int changed = update.executeUpdate();
+                    if (changed > 0) {
+                        log.warn("已将旧统计账号标识从 alias={} 迁移为 accountId={}，记录数={}",
+                                mapping.getKey(), mapping.getValue(), changed);
+                    }
+                } catch (SQLException conflict) {
+                    // Never merge aggregates implicitly. Keeping the legacy row is recoverable and
+                    // safer than overwriting an existing account/date/symbol record.
+                    log.error("旧统计账号标识迁移冲突，保留原记录: alias={} accountId={}",
+                            mapping.getKey(), mapping.getValue(), conflict);
+                }
+            }
+        }
+    }
+
+    private Map<String, String> legacyAliasMappings(BinanceProperties properties) {
+        Map<String, String> unique = new HashMap<>();
+        Set<String> ambiguous = new LinkedHashSet<>();
+        properties.getApi().getProfiles().forEach((accountId, profile) -> {
+            if (profile == null || !profile.isEnabled() || profile.getAlias() == null
+                    || profile.getAlias().isBlank() || accountId == null
+                    || !accountId.trim().matches("[A-Za-z0-9._-]{1,64}")) return;
+            String alias = profile.getAlias().trim();
+            String previous = unique.putIfAbsent(alias, accountId.trim());
+            if (previous != null && !previous.equals(accountId.trim())) ambiguous.add(alias);
+        });
+        ambiguous.forEach(alias -> {
+            unique.remove(alias);
+            log.error("多个账号配置使用相同 alias={}，无法自动迁移该别名的旧统计", alias);
+        });
+        if (properties.getApi().getProfiles().isEmpty()
+                && properties.getApi().getApiKeyAlias() != null
+                && !properties.getApi().getApiKeyAlias().isBlank()) {
+            unique.put(properties.getApi().getApiKeyAlias().trim(), "default");
+        }
+        return unique;
     }
 
     public synchronized RecordResult recordTrade(String accountId, String accountAlias, String symbol,

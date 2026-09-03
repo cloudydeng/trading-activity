@@ -17,9 +17,11 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -36,6 +38,8 @@ public class AccountUserDataStream implements WebSocket.Listener {
     private final AtomicLong connectingGeneration = new AtomicLong(-1);
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
     private final AtomicBoolean acceptingConnections = new AtomicBoolean(true);
+    private final AtomicBoolean terminalAuthenticationFailure = new AtomicBoolean(false);
+    private final AtomicInteger reconnectAttempts = new AtomicInteger(0);
     private final AtomicBoolean ready = new AtomicBoolean(false);
     private final AtomicReference<WebSocket> activeWebSocket = new AtomicReference<>();
     private final AtomicLong lastFrameTimestamp = new AtomicLong(0);
@@ -83,7 +87,7 @@ public class AccountUserDataStream implements WebSocket.Listener {
 
     public void connect() {
         long generation = streamGeneration.get();
-        if (!acceptingConnections.get() || activeWebSocket.get() != null
+        if (!acceptingConnections.get() || terminalAuthenticationFailure.get() || activeWebSocket.get() != null
                 || !connectingGeneration.compareAndSet(-1, generation)) return;
         httpClient.newWebSocketBuilder()
                 .buildAsync(URI.create(properties.getApi().getWsUserUrl()), this)
@@ -143,12 +147,19 @@ public class AccountUserDataStream implements WebSocket.Listener {
             if (root.has("id") && "account-events".equals(root.get("id").asText())) {
                 if (root.path("status").asInt() == 200) {
                     ready.set(true);
+                    reconnectAttempts.set(0);
                     readinessFuture.get().complete(true);
                     log.info("[accountId={} alias={}] 已成功订阅币安账户 User Data Stream",
                             credentials.accountId(), credentials.alias());
                 } else {
-                    markUnavailable(webSocket,
-                            "账户流签名订阅失败: " + root.path("error").path("msg").asText("unknown"));
+                    int status = root.path("status").asInt(500);
+                    String reason = "账户流签名订阅失败: "
+                            + root.path("error").path("msg").asText("unknown");
+                    if (status >= 400 && status < 500 && status != 429) {
+                        markAuthenticationRejected(webSocket, reason);
+                    } else {
+                        markUnavailable(webSocket, reason);
+                    }
                 }
                 // The JDK WebSocket API is demand-driven. Request the next message after
                 // the subscription ACK, otherwise no execution reports are ever delivered.
@@ -233,6 +244,24 @@ public class AccountUserDataStream implements WebSocket.Listener {
         scheduleReconnect(reason);
     }
 
+    private void markAuthenticationRejected(WebSocket source, String reason) {
+        if (source != null && !activeWebSocket.compareAndSet(source, null)) return;
+        if (source != null) source.abort();
+        terminalAuthenticationFailure.set(true);
+        boolean wasReady = ready.getAndSet(false);
+        readinessFuture.get().complete(false);
+        if (wasReady) {
+            try {
+                streamLifecycleCallback.onUnavailable(reason);
+            } catch (Exception e) {
+                log.error("[accountId={} alias={}] 账户流认证失败保护回调异常",
+                        credentials.accountId(), credentials.alias(), e);
+            }
+        }
+        log.error("[accountId={} alias={}] {}；停止自动重连，修正凭据后需重启服务",
+                credentials.accountId(), credentials.alias(), reason);
+    }
+
     private void checkStreamHealth() {
         if (!acceptingConnections.get()) return;
         WebSocket socket = activeWebSocket.get();
@@ -245,20 +274,28 @@ public class AccountUserDataStream implements WebSocket.Listener {
     }
 
     private void scheduleReconnect(String reason) {
-        if (!acceptingConnections.get()) return;
-        log.warn("[accountId={} alias={}] 账户成交流不可用，准备重连: {}",
-                credentials.accountId(), credentials.alias(), reason);
+        if (!acceptingConnections.get() || terminalAuthenticationFailure.get()) return;
         long generation = streamGeneration.get();
         if (reconnectScheduled.compareAndSet(false, true)) {
-            CompletableFuture.delayedExecutor(1, TimeUnit.SECONDS).execute(() -> {
+            int attempt = reconnectAttempts.incrementAndGet();
+            long delayMs = reconnectDelayMs(attempt);
+            log.warn("[accountId={} alias={}] 账户成交流不可用，{} ms 后进行第 {} 次重连: {}",
+                    credentials.accountId(), credentials.alias(), delayMs, attempt, reason);
+            watchdog.schedule(() -> {
                 if (generation != streamGeneration.get()) {
                     reconnectScheduled.compareAndSet(true, false);
                     return;
                 }
                 reconnectScheduled.set(false);
                 if (activeWebSocket.get() == null) connect();
-            });
+            }, delayMs, TimeUnit.MILLISECONDS);
         }
+    }
+
+    private long reconnectDelayMs(int attempt) {
+        int exponent = Math.min(Math.max(0, attempt - 1), 6);
+        long baseMs = Math.min(60_000L, 1_000L << exponent);
+        return baseMs + ThreadLocalRandom.current().nextLong(Math.max(1L, baseMs / 4));
     }
 
     public boolean isReady() { return ready.get(); }
@@ -268,6 +305,8 @@ public class AccountUserDataStream implements WebSocket.Listener {
         if (properties.getStrategy().isObserveMode()) return true;
         CompletableFuture<Boolean> future = new CompletableFuture<>();
         readinessFuture.set(future);
+        terminalAuthenticationFailure.set(false);
+        reconnectAttempts.set(0);
         ready.set(false);
         lastFrameTimestamp.set(0);
         streamGeneration.incrementAndGet();

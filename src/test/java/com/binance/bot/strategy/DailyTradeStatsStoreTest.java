@@ -106,12 +106,17 @@ class DailyTradeStatsStoreTest {
         }
         BinanceProperties properties = new BinanceProperties();
         properties.getStorage().setDailyStatsDb(database.toString());
+        BinanceProperties.CredentialProfile primary = new BinanceProperties.CredentialProfile();
+        primary.setAlias("legacy-bot");
+        primary.setEnabled(true);
+        properties.getApi().getProfiles().put("primary", primary);
 
         DailyTradeStatsStore store = new DailyTradeStatsStore(properties);
 
-        DailyTradeStatsStore.DailyStatsSnapshot stats = store.today("legacy-bot", "legacy-bot", "ENSOUSDT");
+        DailyTradeStatsStore.DailyStatsSnapshot stats = store.today("primary", "legacy-bot", "ENSOUSDT");
         assertEquals(2, stats.tradeCount());
         assertDecimal("12.02", stats.totalVolumeQuote());
+        assertEquals(0, store.today("legacy-bot", "legacy-bot", "ENSOUSDT").tradeCount());
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + database);
              var row = connection.createStatement().executeQuery(
                      "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='daily_trade_stats_legacy_v1'")) {
