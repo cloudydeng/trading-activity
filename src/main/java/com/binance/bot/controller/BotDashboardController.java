@@ -110,6 +110,9 @@ public class BotDashboardController {
     @PostMapping("/api/accounts/start-all")
     public Map<String, TradingAccountManager.OperationResult> startAll() { return accountManager.startAll(); }
 
+    @PostMapping("/api/accounts/arm-all")
+    public Map<String, TradingAccountManager.OperationResult> armAll() { return accountManager.armAll(); }
+
     @PostMapping("/api/accounts/stop-all")
     public Map<String, TradingAccountManager.OperationResult> stopAll() { return accountManager.stopAll(); }
 

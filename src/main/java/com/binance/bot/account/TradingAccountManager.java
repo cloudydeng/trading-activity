@@ -94,6 +94,23 @@ public class TradingAccountManager {
         return results;
     }
 
+    public Map<String, OperationResult> armAll() {
+        Map<String, OperationResult> results = new LinkedHashMap<>();
+        runtimes().forEach(runtime -> {
+            try {
+                boolean accepted = runtime.arm();
+                results.put(runtime.accountId(), new OperationResult(accepted,
+                        accepted ? "LIVE armed" : "LIVE 双开关未配置或账号成交流未就绪"));
+            } catch (Exception e) {
+                results.put(runtime.accountId(), new OperationResult(false, safeMessage(e)));
+                log.error("[accountId={}] 批量解锁 LIVE 失败；继续处理其他账号: {}",
+                        runtime.accountId(), safeMessage(e));
+            }
+        });
+        initializationErrors.forEach((id, error) -> results.put(id, new OperationResult(false, error)));
+        return results;
+    }
+
     public Map<String, OperationResult> stopAll() {
         Map<String, OperationResult> results = new LinkedHashMap<>();
         runtimes().forEach(runtime -> {

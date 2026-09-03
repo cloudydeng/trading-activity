@@ -105,6 +105,33 @@ class TradingAccountManagerTest {
     }
 
     @Test
+    void armAllArmsEveryAccountAndContinuesAfterOneFailure() {
+        BinanceProperties properties = propertiesWith("account-a", "A", "key-a", "secret-a",
+                "account-b", "B", "key-b", "secret-b");
+        AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
+        AccountTradingRuntime accountA = mock(AccountTradingRuntime.class);
+        AccountTradingRuntime accountB = mock(AccountTradingRuntime.class);
+        when(accountA.accountId()).thenReturn("account-a");
+        when(accountB.accountId()).thenReturn("account-b");
+        when(factory.create(any())).thenAnswer(invocation ->
+                "account-a".equals(((AccountCredentials) invocation.getArgument(0)).accountId()) ? accountA : accountB);
+        when(accountA.arm()).thenThrow(new IllegalStateException("A unavailable"));
+        when(accountB.arm()).thenReturn(true);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+        manager.initialize();
+
+        Map<String, TradingAccountManager.OperationResult> result = manager.armAll();
+
+        assertFalse(result.get("account-a").success());
+        assertEquals("A unavailable", result.get("account-a").reason());
+        assertTrue(result.get("account-b").success());
+        verify(accountA).arm();
+        verify(accountB).arm();
+        verify(accountA, never()).start();
+        verify(accountB, never()).start();
+    }
+
+    @Test
     void disabledProfilesAreNotResurrectedThroughLegacyFallback() {
         BinanceProperties properties = new BinanceProperties();
         properties.getStrategy().setExecutionMode("LIVE");
