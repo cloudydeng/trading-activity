@@ -16,6 +16,8 @@ public class BinanceProperties {
     private Api api = new Api();
     /** Arbitrary account-id keyed credential map supplied through BOT_ACCOUNT_PROFILES_JSON. */
     private String accountProfilesJson;
+    /** Protected server-side env file re-read by the account hot-reload endpoint. */
+    private String accountProfilesEnvFile = "/etc/trading-activity.env";
     private Strategy strategy = new Strategy();
     private Security security = new Security();
     private Storage storage = new Storage();

@@ -4,7 +4,10 @@ import com.binance.bot.config.BinanceProperties;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -197,6 +200,42 @@ class TradingAccountManagerTest {
         assertEquals(10, manager.runtimes().size());
         assertTrue(manager.find("account-10").isPresent());
         verify(factory, times(10)).create(any());
+    }
+
+    @Test
+    void reloadAddsOnlyNewProfilesAndLeavesExistingRuntimeUntouched() throws Exception {
+        BinanceProperties properties = new BinanceProperties();
+        properties.getApi().getProfiles().put("account-a", profile("A", "key-a", "secret-a"));
+        Path envFile = Files.createTempFile("trading-activity", ".env");
+        properties.setAccountProfilesEnvFile(envFile.toString());
+        Files.writeString(envFile, "BOT_ACCOUNT_PROFILES_JSON='{" +
+                "\"account-a\":{\"alias\":\"A\",\"apiKey\":\"key-a\",\"secretKey\":\"secret-a\"}," +
+                "\"account-c\":{\"alias\":\"C\",\"apiKey\":\"key-c\",\"secretKey\":\"secret-c\"}}'\n");
+
+        AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
+        AccountTradingRuntime existing = mock(AccountTradingRuntime.class);
+        AccountTradingRuntime added = mock(AccountTradingRuntime.class);
+        when(existing.accountId()).thenReturn("account-a");
+        when(existing.alias()).thenReturn("A");
+        when(added.accountId()).thenReturn("account-c");
+        when(added.alias()).thenReturn("C");
+        when(factory.create(any())).thenAnswer(invocation ->
+                "account-a".equals(((AccountCredentials) invocation.getArgument(0)).accountId())
+                        ? existing : added);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+
+        manager.initialize();
+        clearInvocations(existing);
+        TradingAccountManager.ReloadResult result = manager.reloadProfiles();
+
+        assertEquals(List.of("account-c"), result.addedAccounts());
+        assertTrue(result.errors().isEmpty());
+        assertSame(existing, manager.find("account-a").orElseThrow());
+        assertSame(added, manager.find("account-c").orElseThrow());
+        verifyNoInteractions(existing);
+        verify(added).initialize();
+        verify(factory, times(2)).create(any());
+        Files.deleteIfExists(envFile);
     }
 
     @Test

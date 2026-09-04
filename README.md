@@ -53,3 +53,8 @@ java -jar target/binance-spot-competition-bot-3.0.0.jar
 - `POST /api/accounts/arm-all`
 - `POST /api/accounts/start-all`
 - `POST /api/accounts/stop-all`
+- `POST /api/accounts/reload`（从服务器受保护环境文件热加载新增账户；不会替换或停止已有账户）
+
+账户热加载只读取 `BOT_ACCOUNT_PROFILES_ENV_FILE` 指向的服务器环境文件（默认 `/etc/trading-activity.env`）。
+它仅为清单中尚未运行的启用账户创建 User Data Stream；新账户始终以 `running=false`、`liveArmed=false` 加入，
+不会触碰已有账户的持仓、活动 SELL 订单或 LIVE 状态。修改环境文件后可从控制台点击“热加载账户”，无需重启 JVM。

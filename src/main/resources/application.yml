@@ -21,6 +21,7 @@ spring:
 binance:
   # Kept outside api.profiles to avoid Spring treating the JSON scalar as a map entry.
   account-profiles-json: '${BOT_ACCOUNT_PROFILES_JSON:}'
+  account-profiles-env-file: "${BOT_ACCOUNT_PROFILES_ENV_FILE:/etc/trading-activity.env}"
   storage:
     daily-stats-db: "${BOT_DAILY_STATS_DB:data/daily-stats.db}"
   security:

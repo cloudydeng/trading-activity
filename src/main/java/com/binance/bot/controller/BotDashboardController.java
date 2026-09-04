@@ -116,6 +116,9 @@ public class BotDashboardController {
     @PostMapping("/api/accounts/stop-all")
     public Map<String, TradingAccountManager.OperationResult> stopAll() { return accountManager.stopAll(); }
 
+    @PostMapping("/api/accounts/reload")
+    public TradingAccountManager.ReloadResult reloadAccounts() { return accountManager.reloadProfiles(); }
+
     /* Legacy dashboard routes select a stable first runtime; credentials are never hot-switched. */
     @GetMapping("/api/bot/status")
     public ResponseEntity<?> legacyStatus() {
