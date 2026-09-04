@@ -21,9 +21,20 @@
 ```bash
 BOT_ACCOUNT_PROFILES_JSON='{
   "account-a":{"alias":"bot-a","apiKey":"...","secretKey":"...","enabled":true},
-  "account-b":{"alias":"bot-b","apiKey":"...","secretKey":"...","enabled":true}
+  "account-b":{"alias":"bot-b","apiKey":"...","secretKey":"...","enabled":true,
+                "orderAmountsUsdt":{"ENSOUSDT":6,"BTCUSDT":12},
+                "symbolStrategies":{"ENSOUSDT":{"mode":"CURRENT"},
+                                     "BTCUSDT":{"mode":"BID_ASK_MAKER","orderAmountUsdt":6,
+                                                 "entryTimeoutMs":180000,"exitTimeoutMs":180000}}}
 }'
 ```
+
+`orderAmountsUsdt` 可为每个账户按交易对设置单笔 USDT 名义金额；未配置的交易对回退到全局
+`binance.strategy.order-amount-usdt`。单笔金额仍不能超过 `max-live-order-notional-usdt`，并会在控制台显示当前生效值。
+
+`symbolStrategies` 可为每个账户的每个交易对选择策略：`CURRENT` 保留现有按成本/手续费保护的卖出逻辑；
+`BID_ASK_MAKER` 在买一挂买单、成交后按卖一挂限价卖单。买单或卖单达到各自超时时，先对账撤单，
+再按最新盘口价继续挂单；买单若超时但仍是当前买一，则不撤单继续等待。未配置的交易对回退到 `CURRENT`。
 
 单账户旧配置仍作为兼容回退，仅在未配置 `BOT_ACCOUNT_PROFILES_JSON` 时生效：
 
@@ -45,6 +56,7 @@ java -jar target/binance-spot-competition-bot-3.0.0.jar
 控制接口均受浏览器登录会话或 `X-Bot-Admin-Token` 保护：
 
 - `GET /api/accounts`
+- `GET /api/accounts/stats/summary?days=10`（按账户汇总近 N 天所有已成交交易对）
 - `GET /api/accounts/{accountId}/status`
 - `POST /api/accounts/{accountId}/live/arm`
 - `POST /api/accounts/{accountId}/start`
@@ -53,3 +65,10 @@ java -jar target/binance-spot-competition-bot-3.0.0.jar
 - `POST /api/accounts/arm-all`
 - `POST /api/accounts/start-all`
 - `POST /api/accounts/stop-all`
+- `POST /api/accounts/reload`（从服务器受保护环境文件热加载新增账户；不会替换或停止已有账户）
+
+控制台的“API 账户10天汇总”页面展示上述汇总，只保留窗口内有真实成交的账户。
+
+账户热加载只读取 `BOT_ACCOUNT_PROFILES_ENV_FILE` 指向的服务器环境文件（默认 `/etc/trading-activity.env`）。
+它仅为清单中尚未运行的启用账户创建 User Data Stream；新账户始终以 `running=false`、`liveArmed=false` 加入，
+不会触碰已有账户的持仓、活动 SELL 订单或 LIVE 状态。修改环境文件后可从控制台点击“热加载账户”，无需重启 JVM。

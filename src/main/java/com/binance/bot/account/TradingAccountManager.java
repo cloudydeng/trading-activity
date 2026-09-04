@@ -10,6 +10,9 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,7 +35,7 @@ public class TradingAccountManager {
     }
 
     @PostConstruct
-    public void initialize() {
+    public synchronized void initialize() {
         configuredAccounts().forEach((accountId, credentials) -> {
             AccountTradingRuntime runtime = null;
             try {
@@ -50,6 +53,99 @@ public class TradingAccountManager {
                 log.error("[accountId={}] 账户运行时初始化失败；其他账号继续运行: {}", accountId, safeMessage(e));
             }
         });
+    }
+
+    /**
+     * Re-reads the protected environment file and creates only account runtimes that are not
+     * already present. Existing runtimes are deliberately never replaced or stopped: a reload
+     * must not disturb an active SELL order or an account's LIVE state.
+     */
+    public synchronized ReloadResult reloadProfiles() {
+        Map<String, BinanceProperties.CredentialProfile> profiles = profilesFromEnvironmentFile();
+        if (profiles == null) return new ReloadResult(0, List.of(), Map.of("profiles-json", "无法读取或解析账户配置"));
+        Map<String, AccountCredentials> candidates = credentialsFromProfiles(profiles);
+        List<String> added = new ArrayList<>();
+        Map<String, String> errors = new LinkedHashMap<>();
+        profiles.forEach((accountId, profile) -> {
+            if (profile == null || !profile.isEnabled() || runtimes.containsKey(accountId)) return;
+            if (!candidates.containsKey(accountId)) {
+                errors.put(safeProfileId(accountId), "API credentials are incomplete or invalid");
+                return;
+            }
+            AccountTradingRuntime runtime = null;
+            try {
+                runtime = runtimeFactory.create(candidates.get(accountId));
+                AccountTradingRuntime duplicate = runtimes.putIfAbsent(accountId, runtime);
+                if (duplicate != null) {
+                    runtime.shutdown();
+                    return;
+                }
+                runtime.initialize();
+                added.add(accountId);
+                initializationErrors.remove(accountId);
+                log.info("[accountId={} alias={}] 热加载账户运行时完成（默认停止且 LIVE 锁定）",
+                        accountId, candidates.get(accountId).alias());
+            } catch (Exception e) {
+                if (runtime != null) runtimes.remove(accountId, runtime);
+                if (runtime != null) try { runtime.shutdown(); } catch (Exception ignored) { }
+                String message = safeMessage(e);
+                errors.put(safeProfileId(accountId), message);
+                initializationErrors.put(safeProfileId(accountId), message);
+                log.error("[accountId={}] 热加载账户失败；不影响已有账户: {}", safeProfileId(accountId), message);
+            }
+        });
+        return new ReloadResult(added.size(), List.copyOf(added), Map.copyOf(errors));
+    }
+
+    private Map<String, BinanceProperties.CredentialProfile> profilesFromEnvironmentFile() {
+        String configuredPath = properties.getAccountProfilesEnvFile();
+        if (configuredPath == null || configuredPath.isBlank()) return Map.of();
+        try {
+            String json = readEnvironmentAssignment(Path.of(configuredPath), "BOT_ACCOUNT_PROFILES_JSON");
+            if (json == null || json.isBlank()) return Map.of();
+            JsonNode root = objectMapper.readTree(json);
+            if (root == null || !root.isObject()) return null;
+            Map<String, BinanceProperties.CredentialProfile> result = new LinkedHashMap<>();
+            root.fields().forEachRemaining(entry ->
+                    result.put(entry.getKey(), objectMapper.convertValue(entry.getValue(),
+                            BinanceProperties.CredentialProfile.class)));
+            return result;
+        } catch (Exception e) {
+            log.error("账户环境文件无效，热加载已拒绝（不输出文件内容）: {}", safeMessage(e));
+            return null;
+        }
+    }
+
+    private String readEnvironmentAssignment(Path file, String key) throws Exception {
+        if (!Files.isRegularFile(file)) return null;
+        String prefix = key + "=";
+        for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
+            if (!line.startsWith(prefix)) continue;
+            String value = line.substring(prefix.length()).trim();
+            if (value.length() >= 2 && ((value.startsWith("'") && value.endsWith("'"))
+                    || (value.startsWith("\"") && value.endsWith("\"")))) {
+                return value.substring(1, value.length() - 1);
+            }
+            return value;
+        }
+        return null;
+    }
+
+    private Map<String, AccountCredentials> credentialsFromProfiles(
+            Map<String, BinanceProperties.CredentialProfile> profiles) {
+        Map<String, AccountCredentials> result = new LinkedHashMap<>();
+        profiles.forEach((accountId, profile) -> {
+            try {
+                if (profile == null || !profile.isEnabled()) return;
+                AccountCredentials credentials = new AccountCredentials(accountId,
+                        displayAlias(profile.getAlias(), accountId), profile.getApiKey(), profile.getSecretKey(),
+                        profile.getOrderAmountsUsdt(), profile.getSymbolStrategies());
+                if (credentials.complete()) result.put(accountId, credentials);
+            } catch (Exception ignored) {
+                // Caller returns a redacted validation error for this profile.
+            }
+        });
+        return result;
     }
 
     @PreDestroy
@@ -142,7 +238,8 @@ public class TradingAccountManager {
                 if (profile == null) throw new IllegalArgumentException("credential profile is missing");
                 if (!profile.isEnabled()) return;
                 AccountCredentials credentials = new AccountCredentials(accountId,
-                        displayAlias(profile.getAlias(), accountId), profile.getApiKey(), profile.getSecretKey());
+                        displayAlias(profile.getAlias(), accountId), profile.getApiKey(), profile.getSecretKey(),
+                        profile.getOrderAmountsUsdt(), profile.getSymbolStrategies());
                 if (credentials.complete()) result.put(accountId, credentials);
                 else if (hasAnyCredentialValue(profile)) {
                     initializationErrors.put(errorId, "API credentials are incomplete");
@@ -202,4 +299,5 @@ public class TradingAccountManager {
                                  boolean liveArmed, String status, String symbol,
                                  boolean accountStreamReady, String error) { }
     public record OperationResult(boolean success, String reason) { }
+    public record ReloadResult(int added, List<String> addedAccounts, Map<String, String> errors) { }
 }

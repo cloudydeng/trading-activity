@@ -4,7 +4,10 @@ import com.binance.bot.config.BinanceProperties;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -200,6 +203,42 @@ class TradingAccountManagerTest {
     }
 
     @Test
+    void reloadAddsOnlyNewProfilesAndLeavesExistingRuntimeUntouched() throws Exception {
+        BinanceProperties properties = new BinanceProperties();
+        properties.getApi().getProfiles().put("account-a", profile("A", "key-a", "secret-a"));
+        Path envFile = Files.createTempFile("trading-activity", ".env");
+        properties.setAccountProfilesEnvFile(envFile.toString());
+        Files.writeString(envFile, "BOT_ACCOUNT_PROFILES_JSON='{" +
+                "\"account-a\":{\"alias\":\"A\",\"apiKey\":\"key-a\",\"secretKey\":\"secret-a\"}," +
+                "\"account-c\":{\"alias\":\"C\",\"apiKey\":\"key-c\",\"secretKey\":\"secret-c\"}}'\n");
+
+        AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
+        AccountTradingRuntime existing = mock(AccountTradingRuntime.class);
+        AccountTradingRuntime added = mock(AccountTradingRuntime.class);
+        when(existing.accountId()).thenReturn("account-a");
+        when(existing.alias()).thenReturn("A");
+        when(added.accountId()).thenReturn("account-c");
+        when(added.alias()).thenReturn("C");
+        when(factory.create(any())).thenAnswer(invocation ->
+                "account-a".equals(((AccountCredentials) invocation.getArgument(0)).accountId())
+                        ? existing : added);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+
+        manager.initialize();
+        clearInvocations(existing);
+        TradingAccountManager.ReloadResult result = manager.reloadProfiles();
+
+        assertEquals(List.of("account-c"), result.addedAccounts());
+        assertTrue(result.errors().isEmpty());
+        assertSame(existing, manager.find("account-a").orElseThrow());
+        assertSame(added, manager.find("account-c").orElseThrow());
+        verifyNoInteractions(existing);
+        verify(added).initialize();
+        verify(factory, times(2)).create(any());
+        Files.deleteIfExists(envFile);
+    }
+
+    @Test
     void invalidProfilesJsonNeverFallsBackToLegacyCredential() {
         BinanceProperties properties = new BinanceProperties();
         properties.setAccountProfilesJson("not-json");
@@ -214,6 +253,31 @@ class TradingAccountManagerTest {
         assertTrue(manager.summaries().stream().anyMatch(summary ->
                 "profiles-json".equals(summary.accountId()) && !summary.initialized()));
         verifyNoInteractions(factory);
+    }
+
+    @Test
+    void passesPerSymbolStrategyToTheAccountRuntime() {
+        BinanceProperties properties = new BinanceProperties();
+        BinanceProperties.CredentialProfile profile = profile("A", "key-a", "secret-a");
+        BinanceProperties.SymbolStrategyProfile strategy = new BinanceProperties.SymbolStrategyProfile();
+        strategy.setMode("BID_ASK_MAKER");
+        strategy.setEntryTimeoutMs(180_000L);
+        strategy.setExitTimeoutMs(180_000L);
+        strategy.setOrderAmountUsdt(new java.math.BigDecimal("6"));
+        profile.getSymbolStrategies().put("btcusdt", strategy);
+        properties.getApi().getProfiles().put("account-a", profile);
+        AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
+        AccountTradingRuntime runtime = mock(AccountTradingRuntime.class);
+        when(factory.create(any())).thenReturn(runtime);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+
+        manager.initialize();
+
+        ArgumentCaptor<AccountCredentials> captor = ArgumentCaptor.forClass(AccountCredentials.class);
+        verify(factory).create(captor.capture());
+        assertEquals("BID_ASK_MAKER", captor.getValue().symbolStrategies().get("BTCUSDT").getMode());
+        assertEquals(new java.math.BigDecimal("6"),
+                captor.getValue().symbolStrategies().get("BTCUSDT").getOrderAmountUsdt());
     }
 
     private BinanceProperties propertiesWith(String idA, String aliasA, String keyA, String secretA,

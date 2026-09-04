@@ -6,6 +6,7 @@ import com.binance.bot.config.BinanceProperties;
 import com.binance.bot.notification.TradeNotificationService;
 import com.binance.bot.service.BinanceAccountTradeClient;
 import com.binance.bot.strategy.HighFrequencyVolumeChurnEngine;
+import com.binance.bot.strategy.DailyTradeStatsStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -31,6 +32,16 @@ public class BotDashboardController {
 
     @GetMapping("/api/accounts")
     public List<TradingAccountManager.AccountSummary> accounts() { return accountManager.summaries(); }
+
+    @GetMapping("/api/accounts/stats/summary")
+    public List<DailyTradeStatsStore.AccountVolumeSummary> accountVolumeSummary(
+            @RequestParam(defaultValue = "10") int days) {
+        int safeDays = Math.max(1, Math.min(90, days));
+        return accountManager.runtimes().stream()
+                .map(runtime -> runtime.engine().getAccountVolumeSummary(safeDays))
+                .filter(summary -> summary.totalVolumeQuote().signum() > 0)
+                .toList();
+    }
 
     @GetMapping("/api/accounts/{accountId}/status")
     public ResponseEntity<?> status(@PathVariable String accountId) {
@@ -116,6 +127,9 @@ public class BotDashboardController {
     @PostMapping("/api/accounts/stop-all")
     public Map<String, TradingAccountManager.OperationResult> stopAll() { return accountManager.stopAll(); }
 
+    @PostMapping("/api/accounts/reload")
+    public TradingAccountManager.ReloadResult reloadAccounts() { return accountManager.reloadProfiles(); }
+
     /* Legacy dashboard routes select a stable first runtime; credentials are never hot-switched. */
     @GetMapping("/api/bot/status")
     public ResponseEntity<?> legacyStatus() {
@@ -179,6 +193,8 @@ public class BotDashboardController {
                 Map.entry("liveArmed", engine.getLiveArmed().get()),
                 Map.entry("accountStreamReady", engine.isAccountStreamReady()),
                 Map.entry("symbol", engine.getSymbol()),
+                Map.entry("strategyMode", engine.getStrategyMode()),
+                Map.entry("orderAmountUsdt", engine.getOrderAmountUsdt()),
                 Map.entry("totalVolumeUsdt", engine.getTotalVolumeUsdt().get()),
                 Map.entry("roundTripsCompleted", engine.getRoundTripsCompleted().get()),
                 Map.entry("usedApiWeight1m", engine.getUsedApiWeight()),

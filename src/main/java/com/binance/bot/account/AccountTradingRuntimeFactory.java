@@ -44,6 +44,8 @@ public class AccountTradingRuntimeFactory {
 
     public AccountTradingRuntime create(AccountCredentials credentials) {
         BinanceProperties accountProperties = copyProperties();
+        accountProperties.getStrategy().setOrderAmountsUsdt(credentials.orderAmountsUsdt());
+        accountProperties.getStrategy().setSymbolStrategies(credentials.symbolStrategies());
         dailyStatsStore.loadActiveSymbol(credentials.accountId())
                 .ifPresent(accountProperties.getStrategy()::setSymbol);
 

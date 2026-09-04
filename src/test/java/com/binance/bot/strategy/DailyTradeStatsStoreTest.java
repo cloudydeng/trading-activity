@@ -7,6 +7,9 @@ import org.junit.jupiter.api.io.TempDir;
 import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.sql.DriverManager;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -96,6 +99,50 @@ class DailyTradeStatsStoreTest {
                 BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, now));
         assertEquals(1, store.today("account-a", "A", "ENSOUSDT").tradeCount());
         assertEquals(1, store.today("account-b", "B", "ENSOUSDT").tradeCount());
+        store.close();
+    }
+
+    @Test
+    void recentCalendarIncludesZeroVolumeDays() {
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
+        long now = System.currentTimeMillis();
+        store.recordTrade("account-a", "huaqin-bot", "ENSOUSDT", 42, 7001, "BUY",
+                new BigDecimal("10"), new BigDecimal("6.00"), BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, now);
+
+        List<DailyTradeStatsStore.DailyStatsSnapshot> days = store.recentCalendar(
+                "account-a", "huaqin-bot", "ENSOUSDT", 10);
+
+        assertEquals(10, days.size());
+        assertEquals(LocalDate.now(ZoneOffset.UTC), days.get(0).date());
+        assertEquals(0, days.get(0).totalVolumeQuote().compareTo(new BigDecimal("6.00")));
+        assertEquals(0, days.get(1).totalVolumeQuote().signum());
+        assertEquals(0, days.get(9).totalVolumeQuote().signum());
+        store.close();
+    }
+
+    @Test
+    void accountVolumeSummaryAggregatesOnlyTheRequestedWindowAcrossSymbols() {
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
+        long now = System.currentTimeMillis();
+        store.recordTrade("account-a", "huaqin-bot", "ENSOUSDT", 51, 5101, "BUY",
+                new BigDecimal("10"), new BigDecimal("6.00"), BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, now);
+        store.recordTrade("account-a", "huaqin-bot", "BTCUSDT", 52, 5201, "SELL",
+                new BigDecimal("1"), new BigDecimal("8.00"), BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, now);
+        store.recordTrade("account-b", "other", "ENSOUSDT", 53, 5301, "BUY",
+                new BigDecimal("10"), new BigDecimal("100.00"), BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, now);
+
+        DailyTradeStatsStore.AccountVolumeSummary summary = store.accountVolumeSummary(
+                "account-a", "huaqin-bot", 10);
+
+        assertEquals(List.of("BTCUSDT", "ENSOUSDT"), summary.symbols());
+        assertDecimal("14.00", summary.totalVolumeQuote());
+        assertDecimal("6.00", summary.buyVolumeQuote());
+        assertDecimal("8.00", summary.sellVolumeQuote());
+        assertEquals(2, summary.tradeCount());
         store.close();
     }
 

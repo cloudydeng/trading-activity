@@ -383,6 +383,94 @@ public class DailyTradeStatsStore {
         }
     }
 
+    /**
+     * Returns a fixed UTC calendar window, including zero-volume days.  The database only stores
+     * days that contain a fill, so the dashboard must not mistake a sparse result for a shorter
+     * reporting period.
+     */
+    public synchronized List<DailyStatsSnapshot> recentCalendar(String accountId, String accountAlias,
+                                                                  String symbol, int days) {
+        int safeDays = Math.max(1, Math.min(days, 90));
+        String normalizedAccountId = normalizeAccountId(accountId);
+        String normalizedAlias = normalizeAlias(accountAlias);
+        String normalizedSymbol = symbol.toUpperCase();
+        LocalDate end = LocalDate.now(ZoneOffset.UTC);
+        LocalDate start = end.minusDays(safeDays - 1L);
+        Map<LocalDate, DailyStatsSnapshot> stored = new HashMap<>();
+        String sql = "SELECT * FROM daily_trade_stats WHERE account_id=? AND symbol=? "
+                + "AND trade_date>=? AND trade_date<=? ORDER BY trade_date DESC";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, normalizedAccountId);
+            statement.setString(2, normalizedSymbol);
+            statement.setString(3, start.toString());
+            statement.setString(4, end.toString());
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    DailyStatsSnapshot snapshot = fromRow(rows).snapshot();
+                    stored.put(snapshot.date(), snapshot);
+                }
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("读取日历交易统计失败", e);
+        }
+        List<DailyStatsSnapshot> result = new ArrayList<>(safeDays);
+        for (int i = 0; i < safeDays; i++) {
+            LocalDate date = end.minusDays(i);
+            result.add(stored.getOrDefault(date,
+                    DailyStatsSnapshot.empty(date, normalizedAccountId, normalizedAlias, normalizedSymbol)));
+        }
+        return result;
+    }
+
+    /** Aggregates every symbol traded by one account during the requested UTC-day window. */
+    public synchronized AccountVolumeSummary accountVolumeSummary(String accountId, String accountAlias,
+                                                                    int days) {
+        int safeDays = Math.max(1, Math.min(days, 90));
+        String normalizedAccountId = normalizeAccountId(accountId);
+        String normalizedAlias = normalizeAlias(accountAlias);
+        LocalDate end = LocalDate.now(ZoneOffset.UTC);
+        LocalDate start = end.minusDays(safeDays - 1L);
+        BigDecimal buy = BigDecimal.ZERO;
+        BigDecimal sell = BigDecimal.ZERO;
+        BigDecimal total = BigDecimal.ZERO;
+        BigDecimal commission = BigDecimal.ZERO;
+        BigDecimal economicFee = BigDecimal.ZERO;
+        BigDecimal grossPnl = BigDecimal.ZERO;
+        int tradeCount = 0;
+        int roundTrips = 0;
+        boolean commissionComplete = true;
+        Set<String> symbols = new LinkedHashSet<>();
+        String sql = "SELECT * FROM daily_trade_stats WHERE account_id=? AND trade_date>=? "
+                + "AND trade_date<=? ORDER BY trade_date DESC, symbol";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, normalizedAccountId);
+            statement.setString(2, start.toString());
+            statement.setString(3, end.toString());
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    MutableStats stats = fromRow(rows);
+                    symbols.add(stats.symbol);
+                    buy = buy.add(stats.buyVolume);
+                    sell = sell.add(stats.sellVolume);
+                    total = total.add(stats.totalVolume);
+                    commission = commission.add(stats.commissionQuote);
+                    economicFee = economicFee.add(stats.economicFeeQuote);
+                    grossPnl = grossPnl.add(stats.realizedGrossPnl);
+                    tradeCount += stats.tradeCount;
+                    roundTrips += stats.roundTrips;
+                    commissionComplete &= stats.commissionComplete;
+                }
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("读取账户交易量汇总失败", e);
+        }
+        BigDecimal costPerMillion = commissionComplete && total.signum() > 0
+                ? commission.multiply(ONE_MILLION).divide(total, MC) : null;
+        return new AccountVolumeSummary(normalizedAccountId, normalizedAlias, start, end,
+                List.copyOf(symbols), buy, sell, total, commission, costPerMillion,
+                grossPnl, grossPnl.subtract(economicFee), tradeCount, roundTrips, commissionComplete);
+    }
+
     public synchronized void saveActiveSymbol(String accountId, String symbol) {
         saveSetting("active_symbol:" + normalizeAccountId(accountId), symbol.toUpperCase(), "保存当前交易对失败");
     }
@@ -542,6 +630,13 @@ public class DailyTradeStatsStore {
                     BigDecimal.ZERO, BigDecimal.ZERO, 0, 0, true);
         }
     }
+
+    public record AccountVolumeSummary(String accountId, String accountAlias, LocalDate startDate,
+                                       LocalDate endDate, List<String> symbols, BigDecimal buyVolumeQuote,
+                                       BigDecimal sellVolumeQuote, BigDecimal totalVolumeQuote,
+                                       BigDecimal totalCommissionQuoteEquivalent, BigDecimal costPerMillionVolume,
+                                       BigDecimal realizedGrossPnlQuote, BigDecimal netRealizedPnlQuote,
+                                       int tradeCount, int roundTrips, boolean commissionConversionComplete) { }
 
     private final class MutableStats {
         private final LocalDate date;
