@@ -383,6 +383,45 @@ public class DailyTradeStatsStore {
         }
     }
 
+    /**
+     * Returns a fixed UTC calendar window, including zero-volume days.  The database only stores
+     * days that contain a fill, so the dashboard must not mistake a sparse result for a shorter
+     * reporting period.
+     */
+    public synchronized List<DailyStatsSnapshot> recentCalendar(String accountId, String accountAlias,
+                                                                  String symbol, int days) {
+        int safeDays = Math.max(1, Math.min(days, 90));
+        String normalizedAccountId = normalizeAccountId(accountId);
+        String normalizedAlias = normalizeAlias(accountAlias);
+        String normalizedSymbol = symbol.toUpperCase();
+        LocalDate end = LocalDate.now(ZoneOffset.UTC);
+        LocalDate start = end.minusDays(safeDays - 1L);
+        Map<LocalDate, DailyStatsSnapshot> stored = new HashMap<>();
+        String sql = "SELECT * FROM daily_trade_stats WHERE account_id=? AND symbol=? "
+                + "AND trade_date>=? AND trade_date<=? ORDER BY trade_date DESC";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, normalizedAccountId);
+            statement.setString(2, normalizedSymbol);
+            statement.setString(3, start.toString());
+            statement.setString(4, end.toString());
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    DailyStatsSnapshot snapshot = fromRow(rows).snapshot();
+                    stored.put(snapshot.date(), snapshot);
+                }
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("读取日历交易统计失败", e);
+        }
+        List<DailyStatsSnapshot> result = new ArrayList<>(safeDays);
+        for (int i = 0; i < safeDays; i++) {
+            LocalDate date = end.minusDays(i);
+            result.add(stored.getOrDefault(date,
+                    DailyStatsSnapshot.empty(date, normalizedAccountId, normalizedAlias, normalizedSymbol)));
+        }
+        return result;
+    }
+
     public synchronized void saveActiveSymbol(String accountId, String symbol) {
         saveSetting("active_symbol:" + normalizeAccountId(accountId), symbol.toUpperCase(), "保存当前交易对失败");
     }
