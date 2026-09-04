@@ -10,6 +10,7 @@ import java.sql.DriverManager;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -165,6 +166,26 @@ class DailyTradeStatsStoreTest {
                 .map(DailyTradeStatsStore.AccountSymbolVolumeSummary::symbol).toList());
         assertDecimal("8.00", rows.get(0).totalVolumeQuote());
         assertDecimal("6.00", rows.get(1).totalVolumeQuote());
+        store.close();
+    }
+
+    @Test
+    void persistsAndLoadsRuntimeStrategyOverridesWithoutSecrets() {
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
+        BinanceProperties.SymbolStrategyProfile profile = new BinanceProperties.SymbolStrategyProfile();
+        profile.setMode("BID_ASK_MAKER");
+        profile.setOrderAmountUsdt(new BigDecimal("6"));
+        profile.setEntryTimeoutMs(20_000L);
+        profile.setExitTimeoutMs(120_000L);
+
+        store.saveStrategyOverride("account-a", "ensousdt", profile);
+
+        Map<String, BinanceProperties.SymbolStrategyProfile> loaded =
+                store.loadStrategyOverrides("account-a");
+        assertEquals("BID_ASK_MAKER", loaded.get("ENSOUSDT").getMode());
+        assertDecimal("6", loaded.get("ENSOUSDT").getOrderAmountUsdt());
+        assertEquals(20_000L, loaded.get("ENSOUSDT").getEntryTimeoutMs());
+        assertEquals(120_000L, loaded.get("ENSOUSDT").getExitTimeoutMs());
         store.close();
     }
 

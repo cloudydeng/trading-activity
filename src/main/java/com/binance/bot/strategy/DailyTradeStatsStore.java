@@ -38,6 +38,7 @@ public class DailyTradeStatsStore {
     private static final MathContext MC = MathContext.DECIMAL64;
     private static final BigDecimal ONE_MILLION = new BigDecimal("1000000");
     private static final TypeReference<LinkedHashSet<String>> STRING_SET = new TypeReference<>() { };
+    private static final String STRATEGY_OVERRIDE_PREFIX = "strategy_override:";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Connection connection;
@@ -514,6 +515,58 @@ public class DailyTradeStatsStore {
         } catch (SQLException e) {
             throw new IllegalStateException("读取当前交易对失败", e);
         }
+    }
+
+    /** Persists only the non-secret strategy profile for one account and symbol. */
+    public synchronized void saveStrategyOverride(String accountId, String symbol,
+                                                   BinanceProperties.SymbolStrategyProfile profile) {
+        if (profile == null) throw new IllegalArgumentException("策略配置不能为空");
+        String normalizedSymbol = normalizeSymbol(symbol);
+        try {
+            saveSetting(STRATEGY_OVERRIDE_PREFIX + normalizeAccountId(accountId) + ":" + normalizedSymbol,
+                    objectMapper.writeValueAsString(profile), "保存策略配置失败");
+        } catch (Exception e) {
+            if (e instanceof IllegalStateException state) throw state;
+            throw new IllegalStateException("保存策略配置失败", e);
+        }
+    }
+
+    /** Loads persisted strategy overrides without ever logging their JSON contents. */
+    public synchronized Map<String, BinanceProperties.SymbolStrategyProfile> loadStrategyOverrides(
+            String accountId) {
+        String prefix = STRATEGY_OVERRIDE_PREFIX + normalizeAccountId(accountId) + ":";
+        Map<String, BinanceProperties.SymbolStrategyProfile> result = new LinkedHashMap<>();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT setting_key, setting_value FROM runtime_setting WHERE setting_key LIKE ? ESCAPE '\\'")) {
+            String escapedPrefix = prefix.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%");
+            statement.setString(1, escapedPrefix + "%");
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    String key = rows.getString("setting_key");
+                    String symbol = key.substring(prefix.length()).toUpperCase();
+                    if (!symbol.matches("[A-Z0-9]{5,20}") || !symbol.endsWith("USDT")) continue;
+                    try {
+                        BinanceProperties.SymbolStrategyProfile profile = objectMapper.readValue(
+                                rows.getString("setting_value"), BinanceProperties.SymbolStrategyProfile.class);
+                        if (profile != null) result.put(symbol, profile);
+                    } catch (Exception invalid) {
+                        log.warn("忽略无效的持久化策略配置: accountId={} symbol={}",
+                                normalizeAccountId(accountId), symbol);
+                    }
+                }
+            }
+            return Map.copyOf(result);
+        } catch (SQLException e) {
+            throw new IllegalStateException("读取持久化策略配置失败", e);
+        }
+    }
+
+    private String normalizeSymbol(String symbol) {
+        String normalized = symbol == null ? "" : symbol.trim().toUpperCase();
+        if (!normalized.matches("[A-Z0-9]{5,20}") || !normalized.endsWith("USDT")) {
+            throw new IllegalArgumentException("当前策略仅支持 USDT 现货交易对");
+        }
+        return normalized;
     }
 
     private void saveSetting(String key, String value, String errorMessage) {

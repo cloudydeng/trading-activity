@@ -36,6 +36,14 @@ BOT_ACCOUNT_PROFILES_JSON='{
 `BID_ASK_MAKER` 在买一挂买单、成交后按卖一挂限价卖单。买单或卖单达到各自超时时，先对账撤单，
 再按最新盘口价继续挂单；买单若超时但仍是当前买一，则不撤单继续等待。未配置的交易对回退到 `CURRENT`。
 
+控制台的“运行时策略切换”可在不重启的情况下修改当前账户/交易对的策略。切换请求会写入 SQLite
+`runtime_setting`，重启后优先于环境变量配置恢复；如果当前处于 BUYING 或 SELLING，修改会排队到订单完成并回到
+`IDLE` 后应用，绝不会中途改变正在执行的订单。
+
+对应接口为 `POST /api/accounts/{accountId}/strategy`（旧版默认账户也支持
+`POST /api/bot/strategy`），请求体字段为 `symbol`、`mode`、`orderAmountUsdt`、`entryTimeoutMs` 和
+`exitTimeoutMs`。金额不能超过生产上限，超时时间限制为 1 秒至 30 分钟。
+
 单账户旧配置仍作为兼容回退，仅在未配置 `BOT_ACCOUNT_PROFILES_JSON` 时生效：
 
 ```bash

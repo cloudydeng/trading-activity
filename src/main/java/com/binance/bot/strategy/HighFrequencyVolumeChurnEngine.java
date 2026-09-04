@@ -81,6 +81,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final ConcurrentHashMap<String, CommissionPrice> commissionPriceCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, Integer> orderReconcileFailures = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, Integer> tradeReconcileFailures = new ConcurrentHashMap<>();
+    /** Active profiles are replaced atomically so a runtime switch never mutates a profile in use. */
+    private final ConcurrentHashMap<String, BinanceProperties.SymbolStrategyProfile> strategyProfiles =
+            new ConcurrentHashMap<>();
+    /** A profile for the current symbol is queued here until the current order reaches a safe boundary. */
+    private final ConcurrentHashMap<String, BinanceProperties.SymbolStrategyProfile> pendingStrategyProfiles =
+            new ConcurrentHashMap<>();
     private final AtomicLong orderPlacedTimestamp = new AtomicLong(0);
     private final AtomicLong nextOrderAttemptAt = new AtomicLong(0);
     private final AtomicLong clientOrderSequence = new AtomicLong(0);
@@ -119,6 +125,14 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         this.riskGuard = riskGuard;
         this.dailyStatsStore = dailyStatsStore;
         this.notificationService = notificationService;
+        if (properties.getStrategy().getSymbolStrategies() != null) {
+            properties.getStrategy().getSymbolStrategies().forEach((symbol, profile) -> {
+                String normalized = normalizeStrategySymbol(symbol);
+                if (profile != null && !normalized.isBlank() && normalized.endsWith("USDT")) {
+                    strategyProfiles.put(normalized, copyStrategyProfile(profile));
+                }
+            });
+        }
         this.marketWatchdog = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread thread = new Thread(r, "binance-market-stream-watchdog-" + accountId);
             thread.setDaemon(true);
@@ -516,6 +530,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private synchronized void driveChurnStateMachine(BigDecimal bestBid, BigDecimal bestAsk) {
         if (bestBid != null && bestBid.signum() > 0) lastBestBid.set(bestBid);
         if (bestAsk != null && bestAsk.signum() > 0) lastBestAsk.set(bestAsk);
+        applyPendingStrategyIfSafe();
         var rule = ruleManager.getRule(properties.getStrategy().getSymbol());
         if (rule == null || !isRunning.get()) return;
         long now = System.currentTimeMillis();
@@ -1727,10 +1742,117 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 ? "CURRENT" : profile.getMode().trim().toUpperCase();
     }
 
+    public BinanceProperties.SymbolStrategyProfile getStrategyProfile() {
+        BinanceProperties.SymbolStrategyProfile profile = symbolStrategy(properties.getStrategy().getSymbol());
+        return profile == null ? copyStrategyProfile(new BinanceProperties.SymbolStrategyProfile())
+                : copyStrategyProfile(profile);
+    }
+
+    public boolean hasPendingStrategyChange() {
+        return pendingStrategyProfiles.containsKey(normalizeStrategySymbol(properties.getStrategy().getSymbol()));
+    }
+
+    /**
+     * Applies a strategy profile without restarting the account runtime.  If the current symbol has an
+     * active order, the replacement is queued and applied only after the state machine returns to IDLE.
+     */
+    public synchronized StrategySwitchResult switchStrategy(String requestedSymbol, String requestedMode,
+                                                              BigDecimal requestedAmount, Long requestedEntryTimeoutMs,
+                                                              Long requestedExitTimeoutMs) {
+        String symbol = normalizeStrategySymbol(requestedSymbol);
+        if (symbol.isBlank() || !symbol.endsWith("USDT")) {
+            return StrategySwitchResult.rejected(properties.getStrategy().getSymbol(),
+                    "交易对格式无效；当前策略仅支持 USDT 现货交易对");
+        }
+        BinanceProperties.SymbolStrategyProfile existing = strategyProfiles.get(symbol);
+        String mode = requestedMode == null || requestedMode.isBlank()
+                ? existing == null ? "CURRENT" : existing.getMode() : requestedMode.trim().toUpperCase();
+        if (!"CURRENT".equals(mode) && !"BID_ASK_MAKER".equals(mode)) {
+            return StrategySwitchResult.rejected(symbol, "不支持的策略类型: " + mode);
+        }
+        BigDecimal amount = requestedAmount == null && existing != null
+                ? existing.getOrderAmountUsdt() : requestedAmount;
+        if (amount != null && (amount.signum() <= 0
+                || amount.compareTo(properties.getStrategy().getMaxLiveOrderNotionalUsdt()) > 0)) {
+            return StrategySwitchResult.rejected(symbol, "单笔金额必须大于 0 且不超过生产上限 "
+                    + properties.getStrategy().getMaxLiveOrderNotionalUsdt().toPlainString() + " USDT");
+        }
+        Long entryTimeout = requestedEntryTimeoutMs == null && existing != null
+                ? existing.getEntryTimeoutMs() : requestedEntryTimeoutMs;
+        Long exitTimeout = requestedExitTimeoutMs == null && existing != null
+                ? existing.getExitTimeoutMs() : requestedExitTimeoutMs;
+        if (!validStrategyTimeout(entryTimeout) || !validStrategyTimeout(exitTimeout)) {
+            return StrategySwitchResult.rejected(symbol, "超时时间必须在 1 秒到 30 分钟之间");
+        }
+        BinanceProperties.SymbolStrategyProfile profile = new BinanceProperties.SymbolStrategyProfile();
+        profile.setMode(mode);
+        profile.setOrderAmountUsdt(amount);
+        profile.setEntryTimeoutMs(entryTimeout);
+        profile.setExitTimeoutMs(exitTimeout);
+
+        String currentSymbol = normalizeStrategySymbol(properties.getStrategy().getSymbol());
+        if (symbol.equals(currentSymbol) && (activeOrderId.get() != null
+                || currentStatus.get() == ChurnStatus.BUYING || currentStatus.get() == ChurnStatus.SELLING)) {
+            pendingStrategyProfiles.put(symbol, profile);
+            statusReason.set("策略切换已排队：当前 " + currentStatus.get() + " 完成后应用 " + mode);
+            return new StrategySwitchResult(true, false, true, symbol, mode, statusReason.get());
+        }
+        if (!persistStrategyProfile(symbol, profile)) {
+            return StrategySwitchResult.rejected(symbol, "策略配置持久化失败，未切换");
+        }
+        strategyProfiles.put(symbol, profile);
+        statusReason.set("策略已切换为 " + mode + (symbol.equals(currentSymbol) ? "，等待下一次状态机周期" : ""));
+        log.info("[accountId={} alias={}] 运行时策略已切换: symbol={} mode={}", accountId, accountAlias, symbol, mode);
+        return new StrategySwitchResult(true, true, false, symbol, mode, statusReason.get());
+    }
+
+    private boolean persistStrategyProfile(String symbol, BinanceProperties.SymbolStrategyProfile profile) {
+        try {
+            dailyStatsStore.saveStrategyOverride(accountId, symbol, profile);
+            return true;
+        } catch (RuntimeException e) {
+            log.error("[accountId={} alias={}] 持久化运行时策略失败: symbol={}", accountId, accountAlias, symbol, e);
+            return false;
+        }
+    }
+
+    private void applyPendingStrategyIfSafe() {
+        if (currentStatus.get() != ChurnStatus.IDLE || activeOrderId.get() != null) return;
+        String symbol = normalizeStrategySymbol(properties.getStrategy().getSymbol());
+        BinanceProperties.SymbolStrategyProfile pending = pendingStrategyProfiles.remove(symbol);
+        if (pending == null) return;
+        if (!persistStrategyProfile(symbol, pending)) {
+            pendingStrategyProfiles.put(symbol, pending);
+            statusReason.set("策略切换等待持久化成功后应用");
+            return;
+        }
+        strategyProfiles.put(symbol, pending);
+        statusReason.set("策略切换已应用为 " + getStrategyMode());
+        log.info("[accountId={} alias={}] 已在 IDLE 安全边界应用排队策略: symbol={} mode={}",
+                accountId, accountAlias, symbol, getStrategyMode());
+    }
+
+    private boolean validStrategyTimeout(Long timeoutMs) {
+        return timeoutMs == null || (timeoutMs >= 1_000 && timeoutMs <= 1_800_000);
+    }
+
+    private String normalizeStrategySymbol(String symbol) {
+        String normalized = symbol == null ? "" : symbol.trim().toUpperCase();
+        return normalized.matches("[A-Z0-9]{5,20}") ? normalized : "";
+    }
+
+    private BinanceProperties.SymbolStrategyProfile copyStrategyProfile(
+            BinanceProperties.SymbolStrategyProfile source) {
+        BinanceProperties.SymbolStrategyProfile copy = new BinanceProperties.SymbolStrategyProfile();
+        copy.setMode(source.getMode());
+        copy.setOrderAmountUsdt(source.getOrderAmountUsdt());
+        copy.setEntryTimeoutMs(source.getEntryTimeoutMs());
+        copy.setExitTimeoutMs(source.getExitTimeoutMs());
+        return copy;
+    }
+
     private BinanceProperties.SymbolStrategyProfile symbolStrategy(String symbol) {
-        if (properties.getStrategy().getSymbolStrategies() == null) return null;
-        return properties.getStrategy().getSymbolStrategies().get(symbol == null ? ""
-                : symbol.trim().toUpperCase());
+        return strategyProfiles.get(normalizeStrategySymbol(symbol));
     }
 
     private boolean usesBidAskMakerStrategy() {
@@ -1833,6 +1955,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public record SymbolSwitchResult(boolean accepted, String symbol, String message) {
         private static SymbolSwitchResult rejected(String current, String message) {
             return new SymbolSwitchResult(false, current, message);
+        }
+    }
+    public record StrategySwitchResult(boolean accepted, boolean applied, boolean pending, String symbol,
+                                       String mode, String message) {
+        private static StrategySwitchResult rejected(String symbol, String message) {
+            return new StrategySwitchResult(false, false, false, symbol, "", message);
         }
     }
     private record CommissionPrice(BigDecimal price, long updatedAtMs) { }

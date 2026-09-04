@@ -262,6 +262,42 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void runtimeStrategySwitchAppliesImmediatelyWhenIdleAndPersists() {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
+                "ensousdt", "BID_ASK_MAKER", new BigDecimal("6"), 20_000L, 120_000L);
+
+        assertTrue(result.accepted());
+        assertTrue(result.applied());
+        assertFalse(result.pending());
+        assertEquals("BID_ASK_MAKER", engine.getStrategyMode());
+        assertEquals(0, new BigDecimal("6").compareTo(engine.getOrderAmountUsdt()));
+        verify(dailyStatsStore).saveStrategyOverride(eq("test-account"), eq("ENSOUSDT"), any());
+    }
+
+    @Test
+    void runtimeStrategySwitchQueuesBehindActiveOrderAndAppliesAtIdleBoundary() {
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("activeOrderId", Long.class).set(42L);
+
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult queued = engine.switchStrategy(
+                "ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"), null, null);
+
+        assertTrue(queued.accepted());
+        assertFalse(queued.applied());
+        assertTrue(queued.pending());
+        assertEquals("CURRENT", engine.getStrategyMode());
+        verify(dailyStatsStore, never()).saveStrategyOverride(anyString(), anyString(), any());
+
+        atomic("activeOrderId", Long.class).set(null);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE);
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.60"), new BigDecimal("0.61"));
+
+        assertEquals("BID_ASK_MAKER", engine.getStrategyMode());
+        verify(dailyStatsStore).saveStrategyOverride(eq("test-account"), eq("ENSOUSDT"), any());
+    }
+
+    @Test
     void unknownTradeEventFailsClosed() {
         engine.getIsRunning().set(true);
         engine.getLiveArmed().set(true);
