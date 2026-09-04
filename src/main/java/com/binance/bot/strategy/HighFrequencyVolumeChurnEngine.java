@@ -35,6 +35,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
+    private static final long COMMISSION_RATE_CACHE_MS = TimeUnit.MINUTES.toMillis(15);
     private final String accountId;
     private final String accountAlias;
     private final String accountTag;
@@ -79,6 +80,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final Set<String> pendingClientOrderIds = ConcurrentHashMap.newKeySet();
     private final TradeAccountingLedger accountingLedger = new TradeAccountingLedger();
     private final ConcurrentHashMap<String, CommissionPrice> commissionPriceCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CachedCommissionRate> makerSellFeeRateCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, Integer> orderReconcileFailures = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, Integer> tradeReconcileFailures = new ConcurrentHashMap<>();
     /** Active profiles are replaced atomically so a runtime switch never mutates a profile in use. */
@@ -594,6 +596,16 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 Long activeId = activeOrderId.get();
                 if (activeId != null) {
                     if (now - orderPlacedTimestamp.get() >= exitOrderTimeoutMs()) {
+                        if (usesFeeAwareMakerStrategy()) {
+                            BigDecimal safePrice = feeProtectedExitPrice(rule, bestAsk);
+                            BigDecimal workingPrice = activeOrderPrice.get();
+                            if (workingPrice != null && workingPrice.compareTo(safePrice) == 0) {
+                                orderPlacedTimestamp.set(now);
+                                statusReason.set("手续费保护卖单价格仍有效，继续排队等待成交 @ "
+                                        + workingPrice.toPlainString());
+                                return;
+                            }
+                        }
                         rollTimedOutExitToBestAsk(symbol, bestAsk, rule, activeId);
                     }
                     return;
@@ -888,6 +900,16 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return;
         }
         BigDecimal quantity = sellability.normalizedQty();
+        if (usesFeeAwareMakerStrategy()) {
+            reserveActiveSellQuantity(quantity);
+            submitMakerOrder(properties.getStrategy().getSymbol(), "SELL", floorPrice, quantity, null,
+                    ChurnStatus.SELLING);
+            if (activeOrderId.get() != null) {
+                statusReason.set("手续费保护卖单已挂出 @ " + floorPrice.toPlainString()
+                        + "（不低于保本及目标利润价）");
+            }
+            return;
+        }
         String clientOrderId = nextClientOrderId("SELLG");
         pendingClientOrderIds.add(clientOrderId);
         activeClientOrderId.set(clientOrderId);
@@ -944,7 +966,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             }
             if (currentStatus.get() != ChurnStatus.SELLING) currentStatus.set(ChurnStatus.SELLING);
 
-            BigDecimal price = PrecisionUtil.roundDownToStep(bestAsk, rule.tickSize());
+            BigDecimal price = usesFeeAwareMakerStrategy()
+                    ? feeProtectedExitPrice(rule, bestAsk)
+                    : PrecisionUtil.roundDownToStep(bestAsk, rule.tickSize());
             SellabilityResult sellability = currentSellability(rule, price);
             if (!sellability.sellable()) {
                 if (!verifyDustWithinLimit(sellability)) return;
@@ -953,6 +977,14 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 return;
             }
             BigDecimal quantity = sellability.normalizedQty();
+            if (usesFeeAwareMakerStrategy()) {
+                reserveActiveSellQuantity(quantity);
+                submitMakerOrder(symbol, "SELL", price, quantity, null, ChurnStatus.SELLING);
+                if (activeOrderId.get() != null) {
+                    statusReason.set("卖单检查后按手续费保护价继续排队 @ " + price.toPlainString());
+                }
+                return;
+            }
             String clientOrderId = nextClientOrderId("SELLA");
             pendingClientOrderIds.add(clientOrderId);
             activeClientOrderId.set(clientOrderId);
@@ -1185,14 +1217,73 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         BigDecimal unitCost = risk.positionCostUsdt().divide(
                 risk.positionQty(), java.math.MathContext.DECIMAL64);
-        BigDecimal desiredNetRate = BigDecimal.valueOf(properties.getStrategy().getTakeProfitBps())
-                .movePointLeft(4);
-        BigDecimal estimatedExitFeeRate = properties.getStrategy().getAssumedMakerFeeBps().movePointLeft(4);
+        BigDecimal desiredNetRate = targetNetProfitBps().movePointLeft(4);
+        BigDecimal estimatedExitFeeRate = makerSellFeeRate();
         BigDecimal feeDenominator = BigDecimal.ONE.subtract(estimatedExitFeeRate);
         if (feeDenominator.signum() <= 0) throw new IllegalStateException("预计卖出费率配置无效");
         BigDecimal target = unitCost.multiply(BigDecimal.ONE.add(desiredNetRate))
                 .divide(feeDenominator, java.math.MathContext.DECIMAL64);
         return PrecisionUtil.roundUpToStep(target, rule.tickSize());
+    }
+
+    private BigDecimal feeProtectedExitPrice(SymbolRuleManager.SymbolRule rule, BigDecimal bestAsk) {
+        BigDecimal target = feeAwareTargetPrice(rule);
+        BigDecimal ask = positiveOrZero(bestAsk);
+        return PrecisionUtil.roundUpToStep(target.max(ask), rule.tickSize());
+    }
+
+    private BigDecimal targetNetProfitBps() {
+        var profile = symbolStrategy(properties.getStrategy().getSymbol());
+        return profile != null && profile.getTargetNetProfitBps() != null
+                ? profile.getTargetNetProfitBps()
+                : BigDecimal.valueOf(properties.getStrategy().getTakeProfitBps());
+    }
+
+    private BigDecimal makerSellFeeRate() {
+        var profile = symbolStrategy(properties.getStrategy().getSymbol());
+        if (profile != null && profile.getMakerFeeBps() != null) {
+            return profile.getMakerFeeBps().movePointLeft(4);
+        }
+        String symbol = properties.getStrategy().getSymbol().toUpperCase();
+        long now = System.currentTimeMillis();
+        CachedCommissionRate cached = makerSellFeeRateCache.get(symbol);
+        if (cached != null && now - cached.loadedAtMs() < COMMISSION_RATE_CACHE_MS) return cached.rate();
+
+        BigDecimal exchangeRate = parseMakerSellFeeRate(tradeService.getAccountCommissionRates(symbol));
+        if (exchangeRate != null) {
+            makerSellFeeRateCache.put(symbol, new CachedCommissionRate(exchangeRate, now));
+            return exchangeRate;
+        }
+        BigDecimal fallback = properties.getStrategy().getAssumedMakerFeeBps().movePointLeft(4);
+        log.warn("[accountId={} alias={}] 无法读取 {} 实际 Maker 卖出费率，使用保守配置 {} bps",
+                accountId, accountAlias, symbol, properties.getStrategy().getAssumedMakerFeeBps());
+        return fallback;
+    }
+
+    private BigDecimal parseMakerSellFeeRate(JsonNode response) {
+        if (response == null || response.has("code") || !response.path("standardCommission").isObject()) return null;
+        BigDecimal standard = commissionSideRate(response.path("standardCommission"));
+        // Do not reduce the estimate for the advertised BNB discount. The exchange can charge
+        // the full standard rate when the BNB balance is insufficient at fill time; keeping the
+        // undiscounted rate makes the exit floor safe in both cases.
+        return standard.add(commissionSideRate(response.path("specialCommission")))
+                .add(commissionSideRate(response.path("taxCommission")));
+    }
+
+    private BigDecimal commissionSideRate(JsonNode section) {
+        if (section == null || !section.isObject()) return BigDecimal.ZERO;
+        BigDecimal maker = decimalOrNull(section.path("maker"));
+        BigDecimal seller = decimalOrNull(section.path("seller"));
+        return positiveOrZero(maker).add(positiveOrZero(seller));
+    }
+
+    private BigDecimal decimalOrNull(JsonNode value) {
+        if (value == null || value.isMissingNode() || value.isNull()) return null;
+        try {
+            return new BigDecimal(value.asText());
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     private BigDecimal buyQuantity(BigDecimal bid, SymbolRuleManager.SymbolRule rule) {
@@ -1677,6 +1768,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         lastKnownFreeBaseBalance.set(null);
         lastDustStateSignature.set("");
         commissionPriceCache.clear();
+        makerSellFeeRateCache.clear();
         lastBestBid.set(null);
         lastBestAsk.set(null);
         lastMidPrice.set(null);
@@ -1759,6 +1851,15 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public synchronized StrategySwitchResult switchStrategy(String requestedSymbol, String requestedMode,
                                                               BigDecimal requestedAmount, Long requestedEntryTimeoutMs,
                                                               Long requestedExitTimeoutMs) {
+        return switchStrategy(requestedSymbol, requestedMode, requestedAmount, requestedEntryTimeoutMs,
+                requestedExitTimeoutMs, null, null);
+    }
+
+    public synchronized StrategySwitchResult switchStrategy(String requestedSymbol, String requestedMode,
+                                                              BigDecimal requestedAmount, Long requestedEntryTimeoutMs,
+                                                              Long requestedExitTimeoutMs,
+                                                              BigDecimal requestedMakerFeeBps,
+                                                              BigDecimal requestedTargetNetProfitBps) {
         String symbol = normalizeStrategySymbol(requestedSymbol);
         if (symbol.isBlank() || !symbol.endsWith("USDT")) {
             return StrategySwitchResult.rejected(properties.getStrategy().getSymbol(),
@@ -1767,7 +1868,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         BinanceProperties.SymbolStrategyProfile existing = strategyProfiles.get(symbol);
         String mode = requestedMode == null || requestedMode.isBlank()
                 ? existing == null ? "CURRENT" : existing.getMode() : requestedMode.trim().toUpperCase();
-        if (!"CURRENT".equals(mode) && !"BID_ASK_MAKER".equals(mode)) {
+        if (!"CURRENT".equals(mode) && !"BID_ASK_MAKER".equals(mode)
+                && !"FEE_AWARE_MAKER".equals(mode)) {
             return StrategySwitchResult.rejected(symbol, "不支持的策略类型: " + mode);
         }
         BigDecimal amount = requestedAmount == null && existing != null
@@ -1784,11 +1886,23 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (!validStrategyTimeout(entryTimeout) || !validStrategyTimeout(exitTimeout)) {
             return StrategySwitchResult.rejected(symbol, "超时时间必须在 1 秒到 30 分钟之间");
         }
+        // Null deliberately clears a manual fee/profit override: the fee returns to automatic
+        // account lookup and the profit target returns to the global default.
+        BigDecimal makerFeeBps = requestedMakerFeeBps;
+        BigDecimal targetNetProfitBps = requestedTargetNetProfitBps;
+        if (!validBps(makerFeeBps, new BigDecimal("100"))) {
+            return StrategySwitchResult.rejected(symbol, "Maker 费率必须在 0 到 100 bps 之间");
+        }
+        if (!validBps(targetNetProfitBps, new BigDecimal("1000"))) {
+            return StrategySwitchResult.rejected(symbol, "目标净利润必须在 0 到 1000 bps 之间");
+        }
         BinanceProperties.SymbolStrategyProfile profile = new BinanceProperties.SymbolStrategyProfile();
         profile.setMode(mode);
         profile.setOrderAmountUsdt(amount);
         profile.setEntryTimeoutMs(entryTimeout);
         profile.setExitTimeoutMs(exitTimeout);
+        profile.setMakerFeeBps(makerFeeBps);
+        profile.setTargetNetProfitBps(targetNetProfitBps);
 
         String currentSymbol = normalizeStrategySymbol(properties.getStrategy().getSymbol());
         if (symbol.equals(currentSymbol) && (activeOrderId.get() != null
@@ -1836,6 +1950,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return timeoutMs == null || (timeoutMs >= 1_000 && timeoutMs <= 1_800_000);
     }
 
+    private boolean validBps(BigDecimal value, BigDecimal maximum) {
+        return value == null || (value.signum() >= 0 && value.compareTo(maximum) <= 0);
+    }
+
     private String normalizeStrategySymbol(String symbol) {
         String normalized = symbol == null ? "" : symbol.trim().toUpperCase();
         return normalized.matches("[A-Z0-9]{5,20}") ? normalized : "";
@@ -1848,6 +1966,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         copy.setOrderAmountUsdt(source.getOrderAmountUsdt());
         copy.setEntryTimeoutMs(source.getEntryTimeoutMs());
         copy.setExitTimeoutMs(source.getExitTimeoutMs());
+        copy.setMakerFeeBps(source.getMakerFeeBps());
+        copy.setTargetNetProfitBps(source.getTargetNetProfitBps());
         return copy;
     }
 
@@ -1858,6 +1978,15 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private boolean usesBidAskMakerStrategy() {
         var profile = symbolStrategy(properties.getStrategy().getSymbol());
         return profile != null && "BID_ASK_MAKER".equalsIgnoreCase(profile.getMode());
+    }
+
+    private boolean usesFeeAwareMakerStrategy() {
+        var profile = symbolStrategy(properties.getStrategy().getSymbol());
+        return profile != null && "FEE_AWARE_MAKER".equalsIgnoreCase(profile.getMode());
+    }
+
+    private boolean usesBestBidEntryStrategy() {
+        return usesBidAskMakerStrategy() || usesFeeAwareMakerStrategy();
     }
 
     private long entryOrderTimeoutMs() {
@@ -1878,6 +2007,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     private BigDecimal initialStrategyExitPrice(SymbolRuleManager.SymbolRule rule) {
+        if (usesFeeAwareMakerStrategy()) return feeProtectedExitPrice(rule, lastBestAskOrZero());
         if (usesBidAskMakerStrategy()) {
             BigDecimal ask = lastBestAskOrZero();
             if (ask.signum() > 0) return PrecisionUtil.roundDownToStep(ask, rule.tickSize());
@@ -1886,7 +2016,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     private BigDecimal entryPriceForStrategy(BigDecimal bestBid, SymbolRuleManager.SymbolRule rule) {
-        if (usesBidAskMakerStrategy()) return PrecisionUtil.roundDownToStep(bestBid, rule.tickSize());
+        if (usesBestBidEntryStrategy()) return PrecisionUtil.roundDownToStep(bestBid, rule.tickSize());
         return PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(BigDecimal.valueOf(
                 properties.getStrategy().getBidDepthOffsetTicks()))), rule.tickSize());
     }
@@ -1964,4 +2094,5 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
     }
     private record CommissionPrice(BigDecimal price, long updatedAtMs) { }
+    private record CachedCommissionRate(BigDecimal rate, long loadedAtMs) { }
 }

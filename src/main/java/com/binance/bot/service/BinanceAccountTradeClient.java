@@ -304,6 +304,14 @@ public class BinanceAccountTradeClient {
         return getSignedJson("/api/v3/account", params, "查询账户信息失败");
     }
 
+    /** Account- and symbol-specific commission components used to price a fee-protected exit. */
+    public JsonNode getAccountCommissionRates(String symbol) {
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("symbol", symbol.toUpperCase());
+        params.put("timestamp", String.valueOf(System.currentTimeMillis()));
+        return getSignedJson("/api/v3/account/commission", params, "查询账户交易手续费率失败");
+    }
+
     /** Read recent orders for one symbol; callers filter for executed orders for display. */
     public JsonNode getAllOrders(String symbol, int limit) {
         Map<String, String> params = new LinkedHashMap<>();

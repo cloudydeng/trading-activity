@@ -275,6 +275,56 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void feeAwareMakerUsesFeeProtectedPostOnlyExitAndKeepsValidOrder() throws Exception {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
+                new BigDecimal("10"), new BigDecimal("10"));
+        assertTrue(result.accepted());
+        assertEquals("FEE_AWARE_MAKER", engine.getStrategyMode());
+
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
+        TradingRiskGuard guard = (TradingRiskGuard) ReflectionTestUtils.getField(engine, "riskGuard");
+        guard.recordActualFill("BUY", new BigDecimal("10"), new BigDecimal("6"),
+                new BigDecimal("0.006"), System.currentTimeMillis(), properties.getStrategy());
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), decimalEquals("0.6019"),
+                decimalEquals("10"), isNull(), anyString()))
+                .thenReturn(new ObjectMapper().readTree("{\"orderId\":77}"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+
+        assertEquals(77L, atomic("activeOrderId", Long.class).get());
+        assertEquals(0, new BigDecimal("0.6019").compareTo(atomic("activeOrderPrice", BigDecimal.class).get()));
+        verify(tradeService, never()).placeLimitGtcSell(anyString(), any(), any(), anyString());
+
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis() - 121_000);
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+
+        verify(tradeService, never()).cancelOrder("ENSOUSDT", 77L);
+        verify(tradeService, times(1)).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
+                decimalEquals("0.6019"), decimalEquals("10"), isNull(), anyString());
+        assertTrue(engine.getStatusReason().get().contains("继续排队等待成交"));
+    }
+
+    @Test
+    void parsesConservativeMakerSellCommissionWithoutAssumingBnbBalance() throws Exception {
+        JsonNode response = new ObjectMapper().readTree("""
+                {"standardCommission":{"maker":"0.001","seller":"0.0001"},
+                 "specialCommission":{"maker":"0.0002","seller":"0.0001"},
+                 "taxCommission":{"maker":"0.00001","seller":"0.00002"},
+                 "discount":{"enabledForAccount":true,"enabledForSymbol":true,"discount":"0.75"}}
+                """);
+
+        BigDecimal rate = ReflectionTestUtils.invokeMethod(engine, "parseMakerSellFeeRate", response);
+
+        assertEquals(0, new BigDecimal("0.00143").compareTo(rate));
+    }
+
+    @Test
     void runtimeStrategySwitchQueuesBehindActiveOrderAndAppliesAtIdleBoundary() {
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
         atomic("activeOrderId", Long.class).set(42L);

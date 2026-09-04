@@ -24,25 +24,29 @@ BOT_ACCOUNT_PROFILES_JSON='{
   "account-b":{"alias":"bot-b","apiKey":"...","secretKey":"...","enabled":true,
                 "orderAmountsUsdt":{"ENSOUSDT":6,"BTCUSDT":12},
                 "symbolStrategies":{"ENSOUSDT":{"mode":"CURRENT"},
-                                     "BTCUSDT":{"mode":"BID_ASK_MAKER","orderAmountUsdt":6,
-                                                 "entryTimeoutMs":180000,"exitTimeoutMs":180000}}}
+                                     "BTCUSDT":{"mode":"FEE_AWARE_MAKER","orderAmountUsdt":6,
+                                                 "entryTimeoutMs":180000,"exitTimeoutMs":600000,
+                                                 "targetNetProfitBps":10}}}
 }'
 ```
 
 `orderAmountsUsdt` 可为每个账户按交易对设置单笔 USDT 名义金额；未配置的交易对回退到全局
 `binance.strategy.order-amount-usdt`。单笔金额仍不能超过 `max-live-order-notional-usdt`，并会在控制台显示当前生效值。
 
-`symbolStrategies` 可为每个账户的每个交易对选择策略：`CURRENT` 保留现有按成本/手续费保护的卖出逻辑；
-`BID_ASK_MAKER` 在买一挂买单、成交后按卖一挂限价卖单。买单或卖单达到各自超时时，先对账撤单，
-再按最新盘口价继续挂单；买单若超时但仍是当前买一，则不撤单继续等待。未配置的交易对回退到 `CURRENT`。
+`symbolStrategies` 可为每个账户的每个交易对选择策略：`CURRENT` 保留旧版成本价退出；
+`BID_ASK_MAKER` 在买一挂买单、成交后按卖一挂普通限价卖单；`FEE_AWARE_MAKER` 在买一挂买单，
+卖出只使用 `LIMIT_MAKER`，并以“已记录买入成本 + 预计卖出手续费 + 目标净利润”为永久价格下限。
+手续费保护策略到达卖单检查时间后，若当前挂价仍正确则保留订单和队列位置；仅在安全目标价变化时撤换，
+且不会降到保本线以下。未配置的交易对回退到 `CURRENT`。
 
 控制台的“运行时策略切换”可在不重启的情况下修改当前账户/交易对的策略。切换请求会写入 SQLite
 `runtime_setting`，重启后优先于环境变量配置恢复；如果当前处于 BUYING 或 SELLING，修改会排队到订单完成并回到
 `IDLE` 后应用，绝不会中途改变正在执行的订单。
 
 对应接口为 `POST /api/accounts/{accountId}/strategy`（旧版默认账户也支持
-`POST /api/bot/strategy`），请求体字段为 `symbol`、`mode`、`orderAmountUsdt`、`entryTimeoutMs` 和
-`exitTimeoutMs`。金额不能超过生产上限，超时时间限制为 1 秒至 30 分钟。
+`POST /api/bot/strategy`），请求体字段为 `symbol`、`mode`、`orderAmountUsdt`、`entryTimeoutMs`、
+`exitTimeoutMs`、`makerFeeBps` 和 `targetNetProfitBps`。`makerFeeBps` 留空时按账户和交易对从币安读取
+实际 Maker 卖出费率，读取失败才回退到全局保守估值；金额不能超过生产上限，超时时间限制为 1 秒至 30 分钟。
 
 单账户旧配置仍作为兼容回退，仅在未配置 `BOT_ACCOUNT_PROFILES_JSON` 时生效：
 

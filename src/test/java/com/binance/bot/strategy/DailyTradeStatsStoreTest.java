@@ -173,19 +173,23 @@ class DailyTradeStatsStoreTest {
     void persistsAndLoadsRuntimeStrategyOverridesWithoutSecrets() {
         DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
         BinanceProperties.SymbolStrategyProfile profile = new BinanceProperties.SymbolStrategyProfile();
-        profile.setMode("BID_ASK_MAKER");
+        profile.setMode("FEE_AWARE_MAKER");
         profile.setOrderAmountUsdt(new BigDecimal("6"));
         profile.setEntryTimeoutMs(20_000L);
         profile.setExitTimeoutMs(120_000L);
+        profile.setMakerFeeBps(new BigDecimal("7.5"));
+        profile.setTargetNetProfitBps(new BigDecimal("10"));
 
         store.saveStrategyOverride("account-a", "ensousdt", profile);
 
         Map<String, BinanceProperties.SymbolStrategyProfile> loaded =
                 store.loadStrategyOverrides("account-a");
-        assertEquals("BID_ASK_MAKER", loaded.get("ENSOUSDT").getMode());
+        assertEquals("FEE_AWARE_MAKER", loaded.get("ENSOUSDT").getMode());
         assertDecimal("6", loaded.get("ENSOUSDT").getOrderAmountUsdt());
         assertEquals(20_000L, loaded.get("ENSOUSDT").getEntryTimeoutMs());
         assertEquals(120_000L, loaded.get("ENSOUSDT").getExitTimeoutMs());
+        assertDecimal("7.5", loaded.get("ENSOUSDT").getMakerFeeBps());
+        assertDecimal("10", loaded.get("ENSOUSDT").getTargetNetProfitBps());
         store.close();
     }
 
