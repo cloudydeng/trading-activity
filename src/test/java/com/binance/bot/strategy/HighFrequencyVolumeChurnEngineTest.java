@@ -111,6 +111,18 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void perSymbolOrderAmountOverridesGlobalAmount() {
+        properties.getStrategy().setOrderAmountsUsdt(Map.of(
+                "ENSOUSDT", new BigDecimal("6"), "BTCUSDT", new BigDecimal("9")));
+
+        assertEquals(0, new BigDecimal("6").compareTo(engine.getOrderAmountUsdt()));
+        properties.getStrategy().setSymbol("BTCUSDT");
+        assertEquals(0, new BigDecimal("9").compareTo(engine.getOrderAmountUsdt()));
+        properties.getStrategy().setSymbol("PROMUSDT");
+        assertEquals(0, new BigDecimal("6").compareTo(engine.getOrderAmountUsdt()));
+    }
+
+    @Test
     void streamLossStopsAndDisarmsWithoutAutomaticResume() {
         engine.getIsRunning().set(true);
         engine.getLiveArmed().set(true);

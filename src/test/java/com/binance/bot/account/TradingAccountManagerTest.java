@@ -255,6 +255,31 @@ class TradingAccountManagerTest {
         verifyNoInteractions(factory);
     }
 
+    @Test
+    void passesPerSymbolStrategyToTheAccountRuntime() {
+        BinanceProperties properties = new BinanceProperties();
+        BinanceProperties.CredentialProfile profile = profile("A", "key-a", "secret-a");
+        BinanceProperties.SymbolStrategyProfile strategy = new BinanceProperties.SymbolStrategyProfile();
+        strategy.setMode("BID_ASK_MAKER");
+        strategy.setEntryTimeoutMs(180_000L);
+        strategy.setExitTimeoutMs(180_000L);
+        strategy.setOrderAmountUsdt(new java.math.BigDecimal("6"));
+        profile.getSymbolStrategies().put("btcusdt", strategy);
+        properties.getApi().getProfiles().put("account-a", profile);
+        AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
+        AccountTradingRuntime runtime = mock(AccountTradingRuntime.class);
+        when(factory.create(any())).thenReturn(runtime);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+
+        manager.initialize();
+
+        ArgumentCaptor<AccountCredentials> captor = ArgumentCaptor.forClass(AccountCredentials.class);
+        verify(factory).create(captor.capture());
+        assertEquals("BID_ASK_MAKER", captor.getValue().symbolStrategies().get("BTCUSDT").getMode());
+        assertEquals(new java.math.BigDecimal("6"),
+                captor.getValue().symbolStrategies().get("BTCUSDT").getOrderAmountUsdt());
+    }
+
     private BinanceProperties propertiesWith(String idA, String aliasA, String keyA, String secretA,
                                                String idB, String aliasB, String keyB, String secretB) {
         BinanceProperties properties = new BinanceProperties();

@@ -40,8 +40,23 @@ public class BinanceProperties {
         private String alias;
         private String apiKey;
         private String secretKey;
+        /** Optional per-symbol quote notional overrides; falls back to strategy.orderAmountUsdt. */
+        private Map<String, BigDecimal> orderAmountsUsdt = new LinkedHashMap<>();
+        /** Optional per-symbol strategy overrides; unspecified symbols use the global strategy. */
+        private Map<String, SymbolStrategyProfile> symbolStrategies = new LinkedHashMap<>();
         /** Disabled profiles are visible to configuration binding but do not create a runtime. */
         private boolean enabled = true;
+    }
+
+    @Data
+    public static class SymbolStrategyProfile {
+        /** CURRENT keeps the existing fee-aware exit logic; BID_ASK_MAKER uses current bid/ask. */
+        private String mode = "CURRENT";
+        private BigDecimal orderAmountUsdt;
+        /** Entry timeout after which a stale bid is canceled; same bid remains working. */
+        private Long entryTimeoutMs;
+        /** Exit timeout before canceling and re-placing at the latest ask. */
+        private Long exitTimeoutMs;
     }
 
     @Data
@@ -52,6 +67,10 @@ public class BinanceProperties {
         private boolean liveTradingEnabled = false;
         private String symbol;
         private BigDecimal orderAmountUsdt;
+        /** Account-specific overrides copied into each runtime. */
+        private Map<String, BigDecimal> orderAmountsUsdt = new LinkedHashMap<>();
+        /** Account-specific strategy overrides copied into each runtime. */
+        private Map<String, SymbolStrategyProfile> symbolStrategies = new LinkedHashMap<>();
         private BigDecimal maxLiveOrderNotionalUsdt = new BigDecimal("11");
         private int bidDepthOffsetTicks;
         private int askDepthOffsetTicks;

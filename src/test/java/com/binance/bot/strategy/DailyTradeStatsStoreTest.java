@@ -122,6 +122,31 @@ class DailyTradeStatsStoreTest {
     }
 
     @Test
+    void accountVolumeSummaryAggregatesOnlyTheRequestedWindowAcrossSymbols() {
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
+        long now = System.currentTimeMillis();
+        store.recordTrade("account-a", "huaqin-bot", "ENSOUSDT", 51, 5101, "BUY",
+                new BigDecimal("10"), new BigDecimal("6.00"), BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, now);
+        store.recordTrade("account-a", "huaqin-bot", "BTCUSDT", 52, 5201, "SELL",
+                new BigDecimal("1"), new BigDecimal("8.00"), BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, now);
+        store.recordTrade("account-b", "other", "ENSOUSDT", 53, 5301, "BUY",
+                new BigDecimal("10"), new BigDecimal("100.00"), BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, now);
+
+        DailyTradeStatsStore.AccountVolumeSummary summary = store.accountVolumeSummary(
+                "account-a", "huaqin-bot", 10);
+
+        assertEquals(List.of("BTCUSDT", "ENSOUSDT"), summary.symbols());
+        assertDecimal("14.00", summary.totalVolumeQuote());
+        assertDecimal("6.00", summary.buyVolumeQuote());
+        assertDecimal("8.00", summary.sellVolumeQuote());
+        assertEquals(2, summary.tradeCount());
+        store.close();
+    }
+
+    @Test
     void migratesLegacyAliasSchemaWithoutDeletingHistoricalData() throws Exception {
         Path database = tempDir.resolve("legacy.db");
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + database);

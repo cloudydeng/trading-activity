@@ -138,7 +138,8 @@ public class TradingAccountManager {
             try {
                 if (profile == null || !profile.isEnabled()) return;
                 AccountCredentials credentials = new AccountCredentials(accountId,
-                        displayAlias(profile.getAlias(), accountId), profile.getApiKey(), profile.getSecretKey());
+                        displayAlias(profile.getAlias(), accountId), profile.getApiKey(), profile.getSecretKey(),
+                        profile.getOrderAmountsUsdt(), profile.getSymbolStrategies());
                 if (credentials.complete()) result.put(accountId, credentials);
             } catch (Exception ignored) {
                 // Caller returns a redacted validation error for this profile.
@@ -237,7 +238,8 @@ public class TradingAccountManager {
                 if (profile == null) throw new IllegalArgumentException("credential profile is missing");
                 if (!profile.isEnabled()) return;
                 AccountCredentials credentials = new AccountCredentials(accountId,
-                        displayAlias(profile.getAlias(), accountId), profile.getApiKey(), profile.getSecretKey());
+                        displayAlias(profile.getAlias(), accountId), profile.getApiKey(), profile.getSecretKey(),
+                        profile.getOrderAmountsUsdt(), profile.getSymbolStrategies());
                 if (credentials.complete()) result.put(accountId, credentials);
                 else if (hasAnyCredentialValue(profile)) {
                     initializationErrors.put(errorId, "API credentials are incomplete");
