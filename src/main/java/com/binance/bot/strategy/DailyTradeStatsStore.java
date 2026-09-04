@@ -471,6 +471,38 @@ public class DailyTradeStatsStore {
                 grossPnl, grossPnl.subtract(economicFee), tradeCount, roundTrips, commissionComplete);
     }
 
+    /** Returns one ten-day volume row per account and symbol, excluding symbols with no fills. */
+    public synchronized List<AccountSymbolVolumeSummary> accountSymbolVolumeSummaries(String accountId,
+                                                                                        String accountAlias,
+                                                                                        int days) {
+        int safeDays = Math.max(1, Math.min(days, 90));
+        String normalizedAccountId = normalizeAccountId(accountId);
+        String normalizedAlias = normalizeAlias(accountAlias);
+        LocalDate end = LocalDate.now(ZoneOffset.UTC);
+        LocalDate start = end.minusDays(safeDays - 1L);
+        Map<String, MutableSymbolSummary> grouped = new LinkedHashMap<>();
+        String sql = "SELECT * FROM daily_trade_stats WHERE account_id=? AND trade_date>=? "
+                + "AND trade_date<=? ORDER BY symbol, trade_date DESC";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, normalizedAccountId);
+            statement.setString(2, start.toString());
+            statement.setString(3, end.toString());
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    MutableStats stats = fromRow(rows);
+                    MutableSymbolSummary summary = grouped.computeIfAbsent(stats.symbol,
+                            symbol -> new MutableSymbolSummary(normalizedAccountId, normalizedAlias,
+                                    start, end, symbol));
+                    summary.add(stats);
+                }
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("读取账户交易对成交量汇总失败", e);
+        }
+        return grouped.values().stream().filter(summary -> summary.total.signum() > 0)
+                .map(MutableSymbolSummary::snapshot).toList();
+    }
+
     public synchronized void saveActiveSymbol(String accountId, String symbol) {
         saveSetting("active_symbol:" + normalizeAccountId(accountId), symbol.toUpperCase(), "保存当前交易对失败");
     }
@@ -637,6 +669,62 @@ public class DailyTradeStatsStore {
                                        BigDecimal totalCommissionQuoteEquivalent, BigDecimal costPerMillionVolume,
                                        BigDecimal realizedGrossPnlQuote, BigDecimal netRealizedPnlQuote,
                                        int tradeCount, int roundTrips, boolean commissionConversionComplete) { }
+
+    public record AccountSymbolVolumeSummary(String accountId, String accountAlias, String symbol,
+                                             LocalDate startDate, LocalDate endDate,
+                                             BigDecimal buyVolumeQuote, BigDecimal sellVolumeQuote,
+                                             BigDecimal totalVolumeQuote,
+                                             BigDecimal totalCommissionQuoteEquivalent,
+                                             BigDecimal costPerMillionVolume,
+                                             BigDecimal realizedGrossPnlQuote, BigDecimal netRealizedPnlQuote,
+                                             int tradeCount, int roundTrips,
+                                             boolean commissionConversionComplete) { }
+
+    private static final class MutableSymbolSummary {
+        private final String accountId;
+        private final String accountAlias;
+        private final LocalDate startDate;
+        private final LocalDate endDate;
+        private final String symbol;
+        private BigDecimal buy = BigDecimal.ZERO;
+        private BigDecimal sell = BigDecimal.ZERO;
+        private BigDecimal total = BigDecimal.ZERO;
+        private BigDecimal commission = BigDecimal.ZERO;
+        private BigDecimal economicFee = BigDecimal.ZERO;
+        private BigDecimal grossPnl = BigDecimal.ZERO;
+        private int tradeCount;
+        private int roundTrips;
+        private boolean commissionComplete = true;
+
+        private MutableSymbolSummary(String accountId, String accountAlias, LocalDate startDate,
+                                     LocalDate endDate, String symbol) {
+            this.accountId = accountId;
+            this.accountAlias = accountAlias;
+            this.startDate = startDate;
+            this.endDate = endDate;
+            this.symbol = symbol;
+        }
+
+        private void add(MutableStats stats) {
+            buy = buy.add(stats.buyVolume);
+            sell = sell.add(stats.sellVolume);
+            total = total.add(stats.totalVolume);
+            commission = commission.add(stats.commissionQuote);
+            economicFee = economicFee.add(stats.economicFeeQuote);
+            grossPnl = grossPnl.add(stats.realizedGrossPnl);
+            tradeCount += stats.tradeCount;
+            roundTrips += stats.roundTrips;
+            commissionComplete &= stats.commissionComplete;
+        }
+
+        private AccountSymbolVolumeSummary snapshot() {
+            BigDecimal cost = commissionComplete && total.signum() > 0
+                    ? commission.multiply(ONE_MILLION).divide(total, MC) : null;
+            return new AccountSymbolVolumeSummary(accountId, accountAlias, symbol, startDate, endDate,
+                    buy, sell, total, commission, cost, grossPnl, grossPnl.subtract(economicFee),
+                    tradeCount, roundTrips, commissionComplete);
+        }
+    }
 
     private final class MutableStats {
         private final LocalDate date;

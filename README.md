@@ -56,7 +56,7 @@ java -jar target/binance-spot-competition-bot-3.0.0.jar
 控制接口均受浏览器登录会话或 `X-Bot-Admin-Token` 保护：
 
 - `GET /api/accounts`
-- `GET /api/accounts/stats/summary?days=10`（按账户汇总近 N 天所有已成交交易对）
+- `GET /api/accounts/stats/summary?days=10`（按账户 + 交易对分别汇总近 N 天成交）
 - `GET /api/accounts/{accountId}/status`
 - `POST /api/accounts/{accountId}/live/arm`
 - `POST /api/accounts/{accountId}/start`
@@ -67,7 +67,7 @@ java -jar target/binance-spot-competition-bot-3.0.0.jar
 - `POST /api/accounts/stop-all`
 - `POST /api/accounts/reload`（从服务器受保护环境文件热加载新增账户；不会替换或停止已有账户）
 
-控制台的“API 账户10天汇总”页面展示上述汇总，只保留窗口内有真实成交的账户。
+控制台的“API 账户10天汇总”页面展示上述汇总，只保留窗口内有真实成交的账户/交易对组合。
 
 账户热加载只读取 `BOT_ACCOUNT_PROFILES_ENV_FILE` 指向的服务器环境文件（默认 `/etc/trading-activity.env`）。
 它仅为清单中尚未运行的启用账户创建 User Data Stream；新账户始终以 `running=false`、`liveArmed=false` 加入，

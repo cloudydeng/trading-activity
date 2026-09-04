@@ -1797,6 +1797,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public DailyTradeStatsStore.AccountVolumeSummary getAccountVolumeSummary(int days) {
         return dailyStatsStore.accountVolumeSummary(accountId, accountAlias, days);
     }
+    public java.util.List<DailyTradeStatsStore.AccountSymbolVolumeSummary> getAccountSymbolVolumeSummaries(int days) {
+        return dailyStatsStore.accountSymbolVolumeSummaries(accountId, accountAlias, days);
+    }
     public java.util.List<DailyTradeStatsStore.DailyStatsSnapshot> getRecentDailyStats(int limit) {
         return dailyStatsStore.recentCalendar(accountId, accountAlias, properties.getStrategy().getSymbol(), limit);
     }

@@ -147,6 +147,28 @@ class DailyTradeStatsStoreTest {
     }
 
     @Test
+    void accountSymbolVolumeSummariesReturnOneRowPerSymbol() {
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
+        long now = System.currentTimeMillis();
+        store.recordTrade("account-a", "huaqin-bot", "ENSOUSDT", 61, 6101, "BUY",
+                new BigDecimal("10"), new BigDecimal("6.00"), BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, now);
+        store.recordTrade("account-a", "huaqin-bot", "BTCUSDT", 62, 6201, "BUY",
+                new BigDecimal("1"), new BigDecimal("8.00"), BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, now);
+
+        List<DailyTradeStatsStore.AccountSymbolVolumeSummary> rows = store.accountSymbolVolumeSummaries(
+                "account-a", "huaqin-bot", 10);
+
+        assertEquals(2, rows.size());
+        assertEquals(List.of("BTCUSDT", "ENSOUSDT"), rows.stream()
+                .map(DailyTradeStatsStore.AccountSymbolVolumeSummary::symbol).toList());
+        assertDecimal("8.00", rows.get(0).totalVolumeQuote());
+        assertDecimal("6.00", rows.get(1).totalVolumeQuote());
+        store.close();
+    }
+
+    @Test
     void migratesLegacyAliasSchemaWithoutDeletingHistoricalData() throws Exception {
         Path database = tempDir.resolve("legacy.db");
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + database);

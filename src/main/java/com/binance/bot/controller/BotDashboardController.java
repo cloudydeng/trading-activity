@@ -34,12 +34,11 @@ public class BotDashboardController {
     public List<TradingAccountManager.AccountSummary> accounts() { return accountManager.summaries(); }
 
     @GetMapping("/api/accounts/stats/summary")
-    public List<DailyTradeStatsStore.AccountVolumeSummary> accountVolumeSummary(
+    public List<DailyTradeStatsStore.AccountSymbolVolumeSummary> accountVolumeSummary(
             @RequestParam(defaultValue = "10") int days) {
         int safeDays = Math.max(1, Math.min(90, days));
         return accountManager.runtimes().stream()
-                .map(runtime -> runtime.engine().getAccountVolumeSummary(safeDays))
-                .filter(summary -> summary.totalVolumeQuote().signum() > 0)
+                .flatMap(runtime -> runtime.engine().getAccountSymbolVolumeSummaries(safeDays).stream())
                 .toList();
     }
 
