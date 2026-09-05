@@ -17,6 +17,7 @@ import java.math.BigDecimal;
 import java.net.http.WebSocket;
 import java.time.LocalDate;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
@@ -279,6 +280,7 @@ class HighFrequencyVolumeChurnEngineTest {
         verify(dailyStatsStore).saveStrategyOverride(eq("test-account"), eq("ENSOUSDT"), profile.capture());
         assertEquals(1_800_000L, profile.getValue().getEntryAnchorWaitMs());
         assertEquals(0, new BigDecimal("8").compareTo(profile.getValue().getMaxEntryAnchorDriftBps()));
+        assertEquals(0, new BigDecimal("8").compareTo(profile.getValue().getMaxCumulativeEntryAnchorDriftBps()));
     }
 
     @Test
@@ -297,6 +299,7 @@ class HighFrequencyVolumeChurnEngineTest {
                 new BigDecimal("0.006"), System.currentTimeMillis(), properties.getStrategy());
         atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
         atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6.0000"));
+        atomic("filledEntryMaxPrice", BigDecimal.class).set(new BigDecimal("0.6000"));
         when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), decimalEquals("0.6013"),
                 decimalEquals("10"), isNull(), anyString()))
                 .thenReturn(new ObjectMapper().readTree("{\"orderId\":77}"));
@@ -325,11 +328,12 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void feeAwareMakerWaitsWhenNextEntryWouldExceedPreviousBuyAverage() throws Exception {
+    void feeAwareMakerWaitsWhenNextEntryWouldExceedFirstBuyAnchor() throws Exception {
         engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO);
         atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
         atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6.0000"));
+        atomic("filledEntryMaxPrice", BigDecimal.class).set(new BigDecimal("0.6000"));
         ReflectionTestUtils.invokeMethod(engine, "completeFlatExit", false);
         engine.getIsRunning().set(true);
         when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString()))
@@ -358,6 +362,7 @@ class HighFrequencyVolumeChurnEngineTest {
                 1_800_000L, new BigDecimal("10"));
         atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
         atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6.0000"));
+        atomic("filledEntryMaxPrice", BigDecimal.class).set(new BigDecimal("0.6000"));
         ReflectionTestUtils.invokeMethod(engine, "completeFlatExit", false);
         engine.getIsRunning().set(true);
         when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString()))
@@ -382,11 +387,73 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void feeAwareMakerKeepsLowerRestingBuyWhenBestBidRisesAbovePreviousBuyAverage() throws Exception {
+    void feeAwareMakerCapsChaseByRecentFiveBuyAverageAnchor() throws Exception {
+        engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO,
+                0L, new BigDecimal("100"), new BigDecimal("10"));
+        atomic("feeAwareEntryPriceCeiling", BigDecimal.class).set(new BigDecimal("0.6200"));
+        atomic("feeAwareInitialEntryAnchorPrice", BigDecimal.class).set(new BigDecimal("0.6000"));
+        engine.getIsRunning().set(true);
+        BigDecimal allowed = ReflectionTestUtils.invokeMethod(engine, "feeAwareAllowedEntryPrice",
+                ruleManager.getRule("ENSOUSDT"));
+        assertEquals(0, new BigDecimal("0.60060000").compareTo(allowed));
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString()))
+                .thenReturn(new ObjectMapper().readTree("{\"orderId\":103}"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6010"), new BigDecimal("0.6011"));
+
+        verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                any(), any(), isNull(), anyString());
+        assertTrue(engine.getStatusReason().get().contains("最终允许最高"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6006"), new BigDecimal("0.6007"));
+
+        verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                decimalEquals("0.6006"), any(), isNull(), anyString());
+    }
+
+    @Test
+    void feeAwareMakerInitialAnchorUsesRecentFiveBuyAverageAndStaysFixed() {
+        engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO,
+                0L, new BigDecimal("100"), new BigDecimal("10"));
+        atomic("feeAwareEntryPriceCeiling", BigDecimal.class).set(new BigDecimal("0.6200"));
+        ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.5900"));
+        ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.6000"));
+        ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.6100"));
+        ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.6200"));
+        ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.6300"));
+
+        BigDecimal allowed = ReflectionTestUtils.invokeMethod(engine, "feeAwareAllowedEntryPrice",
+                ruleManager.getRule("ENSOUSDT"));
+
+        assertEquals(0, new BigDecimal("0.6106100").compareTo(allowed));
+        assertEquals(0, new BigDecimal("0.6100").compareTo(
+                atomic("feeAwareInitialEntryAnchorPrice", BigDecimal.class).get()));
+
+        ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.9000"));
+        ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.9100"));
+        ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.9200"));
+        ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.9300"));
+        ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.9400"));
+
+        BigDecimal stillAllowed = ReflectionTestUtils.invokeMethod(engine, "feeAwareAllowedEntryPrice",
+                ruleManager.getRule("ENSOUSDT"));
+
+        assertEquals(0, new BigDecimal("0.6106100").compareTo(stillAllowed));
+        assertEquals(0, new BigDecimal("0.6100").compareTo(
+                atomic("feeAwareInitialEntryAnchorPrice", BigDecimal.class).get()));
+    }
+
+    @Test
+    void feeAwareMakerKeepsLowerRestingBuyWhenBestBidExceedsAllowedAnchorPrice() throws Exception {
         engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
                 1_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO);
         atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
         atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6.0000"));
+        atomic("filledEntryMaxPrice", BigDecimal.class).set(new BigDecimal("0.6000"));
         ReflectionTestUtils.invokeMethod(engine, "completeFlatExit", false);
         engine.getIsRunning().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
@@ -405,11 +472,12 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void feeAwareMakerPersistsNextEntryCeilingAfterFlatExit() {
+    void feeAwareMakerPersistsHighestBuyPriceAfterFlatExit() {
         engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO);
-        atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
-        atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6.0000"));
+        atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("12"));
+        atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("7.2100"));
+        atomic("filledEntryMaxPrice", BigDecimal.class).set(new BigDecimal("0.6010"));
 
         ReflectionTestUtils.invokeMethod(engine, "completeFlatExit", false);
 
@@ -417,7 +485,7 @@ class HighFrequencyVolumeChurnEngineTest {
                 ArgumentCaptor.forClass(DailyTradeStatsStore.RuntimeState.class);
         verify(dailyStatsStore).saveRuntimeState(eq("test-account"), eq("ENSOUSDT"), state.capture());
         assertNull(state.getValue().orderId());
-        assertEquals(0, new BigDecimal("0.6000").compareTo(state.getValue().feeAwareEntryPriceCeiling()));
+        assertEquals(0, new BigDecimal("0.6010").compareTo(state.getValue().feeAwareEntryPriceCeiling()));
     }
 
     @Test
@@ -443,7 +511,8 @@ class HighFrequencyVolumeChurnEngineTest {
         when(dailyStatsStore.loadRuntimeState("test-account", "ENSOUSDT")).thenReturn(Optional.of(
                 new DailyTradeStatsStore.RuntimeState("test-account", "ENSOUSDT", "SELLING", 77L,
                         "ta-restore-S-1", "SELL", new BigDecimal("0.6013"), new BigDecimal("10"),
-                        new BigDecimal("0.6000"), now - 10_000, now - 10_000)));
+                        new BigDecimal("0.6000"), now - 10_000, now - 10_000,
+                        new BigDecimal("0.6000"), List.of(new BigDecimal("0.6000")))));
 
         assertTrue(engine.startTrading());
 

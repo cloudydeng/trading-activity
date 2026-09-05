@@ -65,6 +65,8 @@ public class BinanceProperties {
         private Long entryAnchorWaitMs = 1_800_000L;
         /** Maximum allowed fee-aware entry drift above the previous buy anchor after waiting. */
         private BigDecimal maxEntryAnchorDriftBps = BigDecimal.ZERO;
+        /** Total drift cap from the recent-five-buy average anchor. Null follows maxEntryAnchorDriftBps. */
+        private BigDecimal maxCumulativeEntryAnchorDriftBps;
     }
 
     @Data

@@ -181,6 +181,7 @@ class DailyTradeStatsStoreTest {
         profile.setTargetNetProfitBps(new BigDecimal("10"));
         profile.setEntryAnchorWaitMs(1_800_000L);
         profile.setMaxEntryAnchorDriftBps(new BigDecimal("8"));
+        profile.setMaxCumulativeEntryAnchorDriftBps(new BigDecimal("5"));
 
         store.saveStrategyOverride("account-a", "ensousdt", profile);
 
@@ -194,6 +195,7 @@ class DailyTradeStatsStoreTest {
         assertDecimal("10", loaded.get("ENSOUSDT").getTargetNetProfitBps());
         assertEquals(1_800_000L, loaded.get("ENSOUSDT").getEntryAnchorWaitMs());
         assertDecimal("8", loaded.get("ENSOUSDT").getMaxEntryAnchorDriftBps());
+        assertDecimal("5", loaded.get("ENSOUSDT").getMaxCumulativeEntryAnchorDriftBps());
         store.close();
     }
 
@@ -204,7 +206,8 @@ class DailyTradeStatsStoreTest {
         first.saveRuntimeState("account-a", "ENSOUSDT", new DailyTradeStatsStore.RuntimeState(
                 "account-a", "ENSOUSDT", "SELLING", 77L, "ta-a-S-1", "SELL",
                 new BigDecimal("0.6013"), new BigDecimal("10"), new BigDecimal("0.6000"),
-                1234L, 5678L));
+                1234L, 5678L, new BigDecimal("0.5990"),
+                List.of(new BigDecimal("0.5980"), new BigDecimal("0.6000"))));
         first.close();
 
         DailyTradeStatsStore restarted = new DailyTradeStatsStore(properties);
@@ -213,6 +216,8 @@ class DailyTradeStatsStoreTest {
         assertEquals("ta-a-S-1", state.clientOrderId());
         assertDecimal("0.6013", state.orderPrice());
         assertDecimal("0.6000", state.feeAwareEntryPriceCeiling());
+        assertDecimal("0.5990", state.feeAwareInitialEntryAnchorPrice());
+        assertEquals(2, state.feeAwareRecentBuyPrices().size());
 
         restarted.clearRuntimeState("account-a", "ENSOUSDT");
         assertEquals(true, restarted.loadRuntimeState("account-a", "ENSOUSDT").isEmpty());

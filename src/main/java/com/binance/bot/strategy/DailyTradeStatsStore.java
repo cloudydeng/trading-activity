@@ -789,7 +789,9 @@ public class DailyTradeStatsStore {
     public record RuntimeState(String accountId, String symbol, String status, Long orderId,
                                String clientOrderId, String side, BigDecimal orderPrice,
                                BigDecimal activeSellCoveredQty, BigDecimal feeAwareEntryPriceCeiling,
-                               long orderPlacedAtMs, long updatedAtMs) { }
+                               long orderPlacedAtMs, long updatedAtMs,
+                               BigDecimal feeAwareInitialEntryAnchorPrice,
+                               List<BigDecimal> feeAwareRecentBuyPrices) { }
 
     private static final class MutableSymbolSummary {
         private final String accountId;
