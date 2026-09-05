@@ -95,6 +95,9 @@ class HighFrequencyVolumeChurnEngineTest {
         when(marketSignalEvaluator.markBestBidMakerReady()).thenReturn(
                 new MarketSignalEvaluator.EntryDecision(true, "BEST_BID_MAKER", BigDecimal.ZERO,
                         BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
+        when(marketSignalEvaluator.evaluate(anyLong(), eq(properties.getStrategy()))).thenReturn(
+                MarketSignalEvaluator.EntryDecision.allow(new BigDecimal("0.2"), new BigDecimal("0.2"),
+                        new BigDecimal("0.2"), BigDecimal.ZERO, BigDecimal.ZERO));
         AccountCredentials credentials = new AccountCredentials("test-account", "test-bot", "test-api-key", "test-secret-key");
         engine = new HighFrequencyVolumeChurnEngine("test-account", "test-bot", credentials,
                 properties, tradeService, ruleManager, userDataStreamReady::get, marketSignalEvaluator,
@@ -281,6 +284,37 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(1_800_000L, profile.getValue().getEntryAnchorWaitMs());
         assertEquals(0, new BigDecimal("8").compareTo(profile.getValue().getMaxEntryAnchorDriftBps()));
         assertEquals(0, new BigDecimal("8").compareTo(profile.getValue().getMaxCumulativeEntryAnchorDriftBps()));
+    }
+
+    @Test
+    void defaultsToFeeAwareMakerAndRejectsRemovedCurrentMode() {
+        assertEquals("FEE_AWARE_MAKER", engine.getStrategyMode());
+        assertEquals("FEE_AWARE_MAKER", engine.getStrategyProfile().getMode());
+
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
+                "ENSOUSDT", "CURRENT", new BigDecimal("6"), null, null);
+
+        assertFalse(result.accepted());
+        assertEquals("FEE_AWARE_MAKER", engine.getStrategyMode());
+    }
+
+    @Test
+    void feeAwareMakerBlocksEntryWhenSignalGateRejectsMarket() throws Exception {
+        engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO);
+        when(marketSignalEvaluator.evaluate(anyLong(), eq(properties.getStrategy()))).thenReturn(
+                MarketSignalEvaluator.EntryDecision.block("SELL_TAKER_PRESSURE",
+                        new BigDecimal("-0.1"), BigDecimal.ZERO, new BigDecimal("-0.8"),
+                        BigDecimal.ZERO, BigDecimal.ZERO));
+        engine.getIsRunning().set(true);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+
+        verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                any(), any(), isNull(), anyString());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+        assertTrue(engine.getStatusReason().get().contains("SELL_TAKER_PRESSURE"));
     }
 
     @Test
@@ -550,7 +584,7 @@ class HighFrequencyVolumeChurnEngineTest {
         assertTrue(queued.accepted());
         assertFalse(queued.applied());
         assertTrue(queued.pending());
-        assertEquals("CURRENT", engine.getStrategyMode());
+        assertEquals("FEE_AWARE_MAKER", engine.getStrategyMode());
         verify(dailyStatsStore, never()).saveStrategyOverride(anyString(), anyString(), any());
 
         atomic("activeOrderId", Long.class).set(null);
@@ -1057,6 +1091,7 @@ class HighFrequencyVolumeChurnEngineTest {
         assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("SELL_TAKER_PRESSURE"));
         assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("SHORT_TERM_DOWNMOVE"));
         assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("STALE_MARKET_DATA"));
+        assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("THIN_DEPTH_BOOK"));
         assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("WEAK_TOP_OF_BOOK"));
         assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("WEAK_MULTI_LEVEL_BIDS"));
         assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("MICROPRICE_NOT_SUPPORTIVE"));
@@ -1065,7 +1100,7 @@ class HighFrequencyVolumeChurnEngineTest {
     @Test
     void initialMakerBuyIsPlacedAtBestBid() throws Exception {
         engine.getIsRunning().set(true);
-        when(marketSignalEvaluator.evaluate(any(Long.class), eq(properties.getStrategy())))
+        when(marketSignalEvaluator.evaluate(anyLong(), eq(properties.getStrategy())))
                 .thenReturn(MarketSignalEvaluator.EntryDecision.allow(
                         new BigDecimal("0.2"), new BigDecimal("0.1"), new BigDecimal("0.1"),
                         BigDecimal.ZERO, BigDecimal.ZERO));
@@ -1106,7 +1141,7 @@ class HighFrequencyVolumeChurnEngineTest {
         atomic("activeClientOrderId", String.class).set("churn-BUY-soft");
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
                 .set(System.currentTimeMillis());
-        when(marketSignalEvaluator.evaluate(any(Long.class), eq(properties.getStrategy())))
+        when(marketSignalEvaluator.evaluate(anyLong(), eq(properties.getStrategy())))
                 .thenReturn(MarketSignalEvaluator.EntryDecision.block("WEAK_TOP_OF_BOOK",
                         new BigDecimal("-0.01"), BigDecimal.ZERO, BigDecimal.ZERO,
                         BigDecimal.ZERO, BigDecimal.ZERO));
@@ -1129,7 +1164,7 @@ class HighFrequencyVolumeChurnEngineTest {
         atomic("filledEntryQuantity", BigDecimal.class).set(BigDecimal.ZERO);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
                 .set(System.currentTimeMillis() - 5_500);
-        when(marketSignalEvaluator.evaluate(any(Long.class), eq(properties.getStrategy())))
+        when(marketSignalEvaluator.evaluate(anyLong(), eq(properties.getStrategy())))
                 .thenReturn(MarketSignalEvaluator.EntryDecision.allow(
                         new BigDecimal("0.2"), new BigDecimal("0.1"), new BigDecimal("0.1"),
                         BigDecimal.ZERO, BigDecimal.ZERO));
@@ -1265,7 +1300,7 @@ class HighFrequencyVolumeChurnEngineTest {
         atomic("filledEntryQuantity", BigDecimal.class).set(BigDecimal.ZERO);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
                 .set(System.currentTimeMillis() - 2_500);
-        when(marketSignalEvaluator.evaluate(any(Long.class), eq(properties.getStrategy())))
+        when(marketSignalEvaluator.evaluate(anyLong(), eq(properties.getStrategy())))
                 .thenReturn(MarketSignalEvaluator.EntryDecision.allow(
                         new BigDecimal("0.2"), new BigDecimal("0.1"), new BigDecimal("0.1"),
                         BigDecimal.ZERO, BigDecimal.ZERO));

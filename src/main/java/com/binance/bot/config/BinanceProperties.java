@@ -50,8 +50,8 @@ public class BinanceProperties {
 
     @Data
     public static class SymbolStrategyProfile {
-        /** CURRENT keeps legacy behavior; BID_ASK_MAKER uses bid/ask; FEE_AWARE_MAKER protects fees. */
-        private String mode = "CURRENT";
+        /** BID_ASK_MAKER uses bid/ask; FEE_AWARE_MAKER protects fees and is the default. */
+        private String mode = "FEE_AWARE_MAKER";
         private BigDecimal orderAmountUsdt;
         /** Entry timeout after which a stale bid is canceled; same bid remains working. */
         private Long entryTimeoutMs;
@@ -94,6 +94,10 @@ public class BinanceProperties {
         private long marketDataStaleMs = 1000;
         /** Partial-depth frames use an independent freshness window to avoid edge jitter. */
         private long depthDataStaleMs = 2500;
+        /** Minimum top-of-book quote notional as a multiple of the configured single order amount. */
+        private double minTopBookNotionalMultiplier = 1.0;
+        /** Minimum 5-level book quote notional as a multiple of the configured single order amount. */
+        private double minDepthNotionalMultiplier = 1.0;
         /**
          * Connection-liveness timeout. Binance sends WebSocket ping frames about every 20 seconds,
          * so this must be substantially longer than the trading-data freshness threshold.

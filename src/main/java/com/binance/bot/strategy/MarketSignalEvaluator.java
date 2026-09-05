@@ -52,6 +52,13 @@ public class MarketSignalEvaluator {
         BigDecimal mid = latest.bid().add(latest.ask()).divide(BigDecimal.valueOf(2), MC);
         BigDecimal totalQty = latest.bidQty().add(latest.askQty());
         if (totalQty.signum() == 0) return set(EntryDecision.block("EMPTY_TOP_OF_BOOK"));
+        BigDecimal minimumTopBookNotional = minimumOrderBookNotional(config.getOrderAmountUsdt(),
+                config.getMinTopBookNotionalMultiplier());
+        if (minimumTopBookNotional.signum() > 0
+                && (latest.bid().multiply(latest.bidQty()).compareTo(minimumTopBookNotional) < 0
+                || latest.ask().multiply(latest.askQty()).compareTo(minimumTopBookNotional) < 0)) {
+            return set(EntryDecision.block("THIN_TOP_OF_BOOK"));
+        }
         BigDecimal imbalance = latest.bidQty().subtract(latest.askQty()).divide(totalQty, MC);
         Quote first = quotes.peekFirst();
         BigDecimal firstMid = first.bid().add(first.ask()).divide(BigDecimal.valueOf(2), MC);
@@ -66,6 +73,13 @@ public class MarketSignalEvaluator {
         BigDecimal rangeBps = maxMid.subtract(minMid).multiply(BigDecimal.valueOf(10_000)).divide(mid, MC);
         BigDecimal depthTotal = latestDepth.bidDepth().add(latestDepth.askDepth());
         if (depthTotal.signum() == 0) return set(EntryDecision.block("EMPTY_DEPTH_BOOK"));
+        BigDecimal minimumDepthNotional = minimumOrderBookNotional(config.getOrderAmountUsdt(),
+                config.getMinDepthNotionalMultiplier());
+        if (minimumDepthNotional.signum() > 0
+                && (latestDepth.bidDepth().multiply(mid).compareTo(minimumDepthNotional) < 0
+                || latestDepth.askDepth().multiply(mid).compareTo(minimumDepthNotional) < 0)) {
+            return set(EntryDecision.block("THIN_DEPTH_BOOK"));
+        }
         BigDecimal depthImbalance = latestDepth.bidDepth().subtract(latestDepth.askDepth()).divide(depthTotal, MC);
         BigDecimal signedTradeQty = BigDecimal.ZERO;
         BigDecimal totalTradeQty = BigDecimal.ZERO;
@@ -120,6 +134,11 @@ public class MarketSignalEvaluator {
         while (!trades.isEmpty() && trades.peekFirst().timestampMs() < cutoff) trades.removeFirst();
     }
     private EntryDecision set(EntryDecision value) { lastDecision.set(value); return value; }
+
+    private BigDecimal minimumOrderBookNotional(BigDecimal orderAmount, double multiplier) {
+        if (orderAmount == null || orderAmount.signum() <= 0 || multiplier <= 0) return BigDecimal.ZERO;
+        return orderAmount.multiply(BigDecimal.valueOf(multiplier), MC);
+    }
 
     private record Quote(BigDecimal bid, BigDecimal bidQty, BigDecimal ask, BigDecimal askQty, long timestampMs) { }
     private record TradeFlow(BigDecimal signedQuantity, BigDecimal totalQuantity, long timestampMs) { }

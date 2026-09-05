@@ -695,9 +695,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     }
                     updateDustState(residual, "残余库存等待后续 BUY 合并");
                 }
-                MarketSignalEvaluator.EntryDecision decision = marketSignalEvaluator.markBestBidMakerReady();
+                MarketSignalEvaluator.EntryDecision decision = entryDecisionForStrategy(now);
                 activeEntrySignalReason.set(decision.reason());
                 activeEntryContext.set(marketSignalEvaluator.getMarketContext(now));
+                if (!decision.allowed()) {
+                    statusReason.set("等待入场信号: " + decision.reason());
+                    return;
+                }
                 BigDecimal price = entryPriceForStrategy(bestBid, rule);
                 if (price == null || price.signum() <= 0) return;
                 BigDecimal qty = capEntryQuantity(buyQuantity(bestBid, rule), price, rule);
@@ -1457,7 +1461,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     static boolean isHardEntryRisk(String reason) {
         return switch (reason) {
             case "STALE_MARKET_DATA", "STALE_DEPTH_DATA", "EMPTY_TOP_OF_BOOK", "EMPTY_DEPTH_BOOK",
-                    "SELL_TAKER_PRESSURE", "SHORT_TERM_DOWNMOVE", "EXCESS_SHORT_TERM_VOLATILITY",
+                    "THIN_TOP_OF_BOOK", "THIN_DEPTH_BOOK", "SELL_TAKER_PRESSURE", "SHORT_TERM_DOWNMOVE",
+                    "EXCESS_SHORT_TERM_VOLATILITY",
                     "POST_SELLOFF_COOLDOWN" -> true;
             default -> false;
         };
@@ -2004,7 +2009,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public String getStrategyMode() {
         var profile = symbolStrategy(properties.getStrategy().getSymbol());
         return profile == null || profile.getMode() == null || profile.getMode().isBlank()
-                ? "CURRENT" : profile.getMode().trim().toUpperCase();
+                ? "FEE_AWARE_MAKER" : normalizeStrategyMode(profile.getMode());
     }
 
     public BinanceProperties.SymbolStrategyProfile getStrategyProfile() {
@@ -2064,9 +2069,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         BinanceProperties.SymbolStrategyProfile existing = strategyProfiles.get(symbol);
         String mode = requestedMode == null || requestedMode.isBlank()
-                ? existing == null ? "CURRENT" : existing.getMode() : requestedMode.trim().toUpperCase();
-        if (!"CURRENT".equals(mode) && !"BID_ASK_MAKER".equals(mode)
-                && !"FEE_AWARE_MAKER".equals(mode)) {
+                ? existing == null ? "FEE_AWARE_MAKER" : normalizeStrategyMode(existing.getMode())
+                : requestedMode.trim().toUpperCase();
+        if (!"BID_ASK_MAKER".equals(mode) && !"FEE_AWARE_MAKER".equals(mode)) {
             return StrategySwitchResult.rejected(symbol, "不支持的策略类型: " + mode);
         }
         BigDecimal amount = requestedAmount == null && existing != null
@@ -2175,6 +2180,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return value == null || (value.signum() >= 0 && value.compareTo(maximum) <= 0);
     }
 
+    private String normalizeStrategyMode(String mode) {
+        String normalized = mode == null ? "" : mode.trim().toUpperCase();
+        return "BID_ASK_MAKER".equals(normalized) ? "BID_ASK_MAKER" : "FEE_AWARE_MAKER";
+    }
+
     private String normalizeStrategySymbol(String symbol) {
         String normalized = symbol == null ? "" : symbol.trim().toUpperCase();
         return normalized.matches("[A-Z0-9]{5,20}") ? normalized : "";
@@ -2183,7 +2193,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private BinanceProperties.SymbolStrategyProfile copyStrategyProfile(
             BinanceProperties.SymbolStrategyProfile source) {
         BinanceProperties.SymbolStrategyProfile copy = new BinanceProperties.SymbolStrategyProfile();
-        copy.setMode(source.getMode());
+        copy.setMode(normalizeStrategyMode(source.getMode()));
         copy.setOrderAmountUsdt(source.getOrderAmountUsdt());
         copy.setEntryTimeoutMs(source.getEntryTimeoutMs());
         copy.setExitTimeoutMs(source.getExitTimeoutMs());
@@ -2211,6 +2221,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     private boolean usesBestBidEntryStrategy() {
         return usesBidAskMakerStrategy() || usesFeeAwareMakerStrategy();
+    }
+
+    private MarketSignalEvaluator.EntryDecision entryDecisionForStrategy(long now) {
+        return usesFeeAwareMakerStrategy()
+                ? marketSignalEvaluator.evaluate(now, properties.getStrategy())
+                : marketSignalEvaluator.markBestBidMakerReady();
     }
 
     private long entryOrderTimeoutMs() {

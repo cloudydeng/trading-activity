@@ -25,6 +25,30 @@ class MarketSignalEvaluatorTest {
     }
 
     @Test
+    void blocksWhenTopBookNotionalIsTooThinForOrderSize() {
+        MarketSignalEvaluator evaluator = new MarketSignalEvaluator();
+        config.setOrderAmountUsdt(decimal("12"));
+        config.setMinTopBookNotionalMultiplier(1.0);
+        evaluator.recordQuote(decimal("1"), decimal("8"), decimal("1.01"), decimal("100"), 1_000, config);
+        evaluator.recordQuote(decimal("1"), decimal("8"), decimal("1.01"), decimal("100"), 1_500, config);
+        evaluator.recordDepth(decimal("1000"), decimal("1000"), 1_500);
+
+        assertEquals("THIN_TOP_OF_BOOK", evaluator.evaluate(1_500, config).reason());
+    }
+
+    @Test
+    void blocksWhenFiveLevelDepthNotionalIsTooThinForOrderSize() {
+        MarketSignalEvaluator evaluator = new MarketSignalEvaluator();
+        config.setOrderAmountUsdt(decimal("12"));
+        config.setMinDepthNotionalMultiplier(1.0);
+        evaluator.recordQuote(decimal("1"), decimal("100"), decimal("1.01"), decimal("100"), 1_000, config);
+        evaluator.recordQuote(decimal("1"), decimal("100"), decimal("1.01"), decimal("100"), 1_500, config);
+        evaluator.recordDepth(decimal("8"), decimal("1000"), 1_500);
+
+        assertEquals("THIN_DEPTH_BOOK", evaluator.evaluate(1_500, config).reason());
+    }
+
+    @Test
     void permitsMildTopBookAskImbalanceRegardlessOfDepthDirection() {
         MarketSignalEvaluator evaluator = new MarketSignalEvaluator();
         config.setMinBookImbalance(-0.35);
