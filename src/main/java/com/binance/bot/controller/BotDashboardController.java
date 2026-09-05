@@ -216,6 +216,7 @@ public class BotDashboardController {
                 Map.entry("symbol", engine.getSymbol()),
                 Map.entry("strategyMode", engine.getStrategyMode()),
                 Map.entry("strategyProfile", engine.getStrategyProfile()),
+                Map.entry("feeAwareRecommendedEntryAnchorPrice", engine.getFeeAwareRecommendedEntryAnchorPrice()),
                 Map.entry("strategyChangePending", engine.hasPendingStrategyChange()),
                 Map.entry("orderAmountUsdt", engine.getOrderAmountUsdt()),
                 Map.entry("totalVolumeUsdt", engine.getTotalVolumeUsdt().get()),

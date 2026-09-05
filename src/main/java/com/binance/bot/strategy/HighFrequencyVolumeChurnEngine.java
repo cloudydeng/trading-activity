@@ -2018,6 +2018,25 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 : copyStrategyProfile(profile);
     }
 
+    public BigDecimal getFeeAwareRecommendedEntryAnchorPrice() {
+        if (!usesFeeAwareMakerStrategy()) return null;
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule(properties.getStrategy().getSymbol());
+        BinanceProperties.SymbolStrategyProfile profile = symbolStrategy(properties.getStrategy().getSymbol());
+        BigDecimal manual = configuredManualEntryAnchorPrice(profile, rule);
+        BigDecimal existing = feeAwareInitialEntryAnchorPrice.get();
+        if ((manual == null || manual.signum() <= 0) && existing != null && existing.signum() > 0) {
+            return existing;
+        }
+        BigDecimal average = recentFeeAwareBuyAverageFloorPrice(rule);
+        if (average != null && average.signum() > 0) return average;
+        BigDecimal ceiling = feeAwareEntryPriceCeiling.get();
+        if (ceiling != null && ceiling.signum() > 0) {
+            return rule == null ? ceiling : PrecisionUtil.roundUpToStep(ceiling, rule.tickSize());
+        }
+        return existing != null && existing.signum() > 0 && manual != null && existing.compareTo(manual) != 0
+                ? existing : BigDecimal.ZERO;
+    }
+
     public boolean hasPendingStrategyChange() {
         return pendingStrategyProfiles.containsKey(normalizeStrategySymbol(properties.getStrategy().getSymbol()));
     }
