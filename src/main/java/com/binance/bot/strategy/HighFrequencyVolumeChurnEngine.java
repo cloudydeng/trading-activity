@@ -73,6 +73,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicReference<BigDecimal> filledEntryQuantity = new AtomicReference<>(BigDecimal.ZERO);
     private final AtomicReference<BigDecimal> filledEntryQuoteQuantity = new AtomicReference<>(BigDecimal.ZERO);
     private final AtomicReference<BigDecimal> feeAwareEntryPriceCeiling = new AtomicReference<>();
+    private final AtomicLong feeAwareEntryCeilingBlockedSince = new AtomicLong(0);
     private final AtomicReference<String> activeClientOrderId = new AtomicReference<>();
     private final AtomicReference<Long> replacingOrderId = new AtomicReference<>();
     @Getter private final AtomicReference<String> statusReason = new AtomicReference<>("等待启动");
@@ -698,9 +699,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     if (usesFeeAwareMakerStrategy() && exceedsFeeAwareEntryCeiling(currentBestBid)) {
                         BigDecimal ceiling = feeAwareEntryPriceCeiling.get();
                         if (orderPrice != null && ceiling != null && orderPrice.compareTo(ceiling) <= 0) {
-                            statusReason.set("当前买一高于上一轮买入均价 "
-                                    + ceiling.toPlainString() + "，保留较低 Maker 买单 @ "
-                                    + orderPrice.toPlainString());
+                            feeAwareEntryCeilingBlockedSince.compareAndSet(0, now);
+                            statusReason.set(feeAwareAnchorWaitMessage(currentBestBid, ceiling,
+                                    "保留较低 Maker 买单 @ " + orderPrice.toPlainString()));
                         } else {
                             cancelActiveEntryOrder("Maker 买单高于上一轮买入均价，撤单等待价格回落");
                         }
@@ -1779,6 +1780,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         targetEntryQuantity.set(BigDecimal.ZERO);
         filledEntryQuantity.set(BigDecimal.ZERO);
         filledEntryQuoteQuantity.set(BigDecimal.ZERO);
+        feeAwareEntryCeilingBlockedSince.set(0);
     }
 
     private String nextClientOrderId(String side) {
@@ -1899,6 +1901,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         lastKnownFreeBaseBalance.set(null);
         lastDustStateSignature.set("");
         feeAwareEntryPriceCeiling.set(null);
+        feeAwareEntryCeilingBlockedSince.set(0);
         commissionPriceCache.clear();
         makerSellFeeRateCache.clear();
         lastBestBid.set(null);
@@ -1992,6 +1995,17 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                                               Long requestedExitTimeoutMs,
                                                               BigDecimal requestedMakerFeeBps,
                                                               BigDecimal requestedTargetNetProfitBps) {
+        return switchStrategy(requestedSymbol, requestedMode, requestedAmount, requestedEntryTimeoutMs,
+                requestedExitTimeoutMs, requestedMakerFeeBps, requestedTargetNetProfitBps, null, null);
+    }
+
+    public synchronized StrategySwitchResult switchStrategy(String requestedSymbol, String requestedMode,
+                                                              BigDecimal requestedAmount, Long requestedEntryTimeoutMs,
+                                                              Long requestedExitTimeoutMs,
+                                                              BigDecimal requestedMakerFeeBps,
+                                                              BigDecimal requestedTargetNetProfitBps,
+                                                              Long requestedEntryAnchorWaitMs,
+                                                              BigDecimal requestedMaxEntryAnchorDriftBps) {
         String symbol = normalizeStrategySymbol(requestedSymbol);
         if (symbol.isBlank() || !symbol.endsWith("USDT")) {
             return StrategySwitchResult.rejected(properties.getStrategy().getSymbol(),
@@ -2028,6 +2042,18 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (!validBps(targetNetProfitBps, new BigDecimal("1000"))) {
             return StrategySwitchResult.rejected(symbol, "目标净利润必须在 0 到 1000 bps 之间");
         }
+        Long entryAnchorWaitMs = requestedEntryAnchorWaitMs == null && existing != null
+                ? existing.getEntryAnchorWaitMs() : requestedEntryAnchorWaitMs;
+        if (entryAnchorWaitMs == null) entryAnchorWaitMs = 1_800_000L;
+        if (entryAnchorWaitMs < 0 || entryAnchorWaitMs > 86_400_000L) {
+            return StrategySwitchResult.rejected(symbol, "买入锚点等待时间必须在 0 秒到 24 小时之间");
+        }
+        BigDecimal maxEntryAnchorDriftBps = requestedMaxEntryAnchorDriftBps == null && existing != null
+                ? existing.getMaxEntryAnchorDriftBps() : requestedMaxEntryAnchorDriftBps;
+        if (maxEntryAnchorDriftBps == null) maxEntryAnchorDriftBps = BigDecimal.ZERO;
+        if (!validBps(maxEntryAnchorDriftBps, new BigDecimal("100"))) {
+            return StrategySwitchResult.rejected(symbol, "最大追高必须在 0 到 100 bps 之间");
+        }
         BinanceProperties.SymbolStrategyProfile profile = new BinanceProperties.SymbolStrategyProfile();
         profile.setMode(mode);
         profile.setOrderAmountUsdt(amount);
@@ -2035,6 +2061,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         profile.setExitTimeoutMs(exitTimeout);
         profile.setMakerFeeBps(makerFeeBps);
         profile.setTargetNetProfitBps(targetNetProfitBps);
+        profile.setEntryAnchorWaitMs(entryAnchorWaitMs);
+        profile.setMaxEntryAnchorDriftBps(maxEntryAnchorDriftBps);
 
         String currentSymbol = normalizeStrategySymbol(properties.getStrategy().getSymbol());
         if (symbol.equals(currentSymbol) && (activeOrderId.get() != null
@@ -2100,6 +2128,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         copy.setExitTimeoutMs(source.getExitTimeoutMs());
         copy.setMakerFeeBps(source.getMakerFeeBps());
         copy.setTargetNetProfitBps(source.getTargetNetProfitBps());
+        copy.setEntryAnchorWaitMs(source.getEntryAnchorWaitMs());
+        copy.setMaxEntryAnchorDriftBps(source.getMaxEntryAnchorDriftBps());
         return copy;
     }
 
@@ -2152,11 +2182,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 ? PrecisionUtil.roundDownToStep(bestBid, rule.tickSize())
                 : PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(BigDecimal.valueOf(
                 properties.getStrategy().getBidDepthOffsetTicks()))), rule.tickSize());
-        if (usesFeeAwareMakerStrategy() && exceedsFeeAwareEntryCeiling(price)) {
+        if (usesFeeAwareMakerStrategy() && !feeAwareEntryAllowedByAnchor(price)) {
             BigDecimal ceiling = feeAwareEntryPriceCeiling.get();
-            statusReason.set("当前买一 " + price.toPlainString()
-                    + " 高于上一轮买入均价 " + ceiling.toPlainString()
-                    + "，等待价格回落后再挂买单");
+            statusReason.set(feeAwareAnchorWaitMessage(price, ceiling, "等待价格回落或等待时间满足后再挂买单"));
             return null;
         }
         return price;
@@ -2167,6 +2195,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         BigDecimal averageEntry = entryAverageFloorPrice(rule);
         if (averageEntry.signum() <= 0) return;
         feeAwareEntryPriceCeiling.set(averageEntry);
+        feeAwareEntryCeilingBlockedSince.set(0);
         log.info("[accountId={} alias={}] Fee-aware maker 下一轮买入价格上限更新为上一轮买入均价 {}",
                 accountId, accountAlias, averageEntry);
     }
@@ -2174,6 +2203,68 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private boolean exceedsFeeAwareEntryCeiling(BigDecimal price) {
         BigDecimal ceiling = feeAwareEntryPriceCeiling.get();
         return price != null && ceiling != null && ceiling.signum() > 0 && price.compareTo(ceiling) > 0;
+    }
+
+    private boolean feeAwareEntryAllowedByAnchor(BigDecimal price) {
+        BigDecimal ceiling = feeAwareEntryPriceCeiling.get();
+        if (price == null || ceiling == null || ceiling.signum() <= 0) {
+            feeAwareEntryCeilingBlockedSince.set(0);
+            return true;
+        }
+        if (price.compareTo(ceiling) <= 0) {
+            feeAwareEntryCeilingBlockedSince.set(0);
+            return true;
+        }
+        long now = System.currentTimeMillis();
+        feeAwareEntryCeilingBlockedSince.compareAndSet(0, now);
+        long waitMs = feeAwareAnchorWaitMs();
+        if (now - feeAwareEntryCeilingBlockedSince.get() < waitMs) return false;
+        BigDecimal maxDriftBps = feeAwareMaxEntryAnchorDriftBps();
+        if (maxDriftBps.signum() <= 0) return false;
+        return price.compareTo(maxFeeAwareEntryPrice(ceiling, maxDriftBps)) <= 0;
+    }
+
+    private String feeAwareAnchorWaitMessage(BigDecimal price, BigDecimal ceiling, String action) {
+        if (price == null || ceiling == null || ceiling.signum() <= 0) return action;
+        long blockedSince = feeAwareEntryCeilingBlockedSince.get();
+        long waitedMs = blockedSince <= 0 ? 0 : Math.max(0, System.currentTimeMillis() - blockedSince);
+        long waitMs = feeAwareAnchorWaitMs();
+        BigDecimal driftBps = price.subtract(ceiling).multiply(BigDecimal.valueOf(10_000))
+                .divide(ceiling, 2, RoundingMode.HALF_UP);
+        BigDecimal maxDriftBps = feeAwareMaxEntryAnchorDriftBps();
+        String waitText = waitMs <= 0 ? "已允许检查追高上限"
+                : "已等待 " + elapsedDurationLabel(waitedMs) + " / " + durationLabel(waitMs);
+        String driftText = maxDriftBps.signum() <= 0
+                ? "最大追高 0 bps，仍需回落到锚点或以下"
+                : "最大追高 " + maxDriftBps.stripTrailingZeros().toPlainString() + " bps";
+        return "暂停新买入：当前买一 " + price.toPlainString()
+                + " 高于买入锚点 " + ceiling.toPlainString()
+                + "，高出 " + driftBps.stripTrailingZeros().toPlainString() + " bps；"
+                + waitText + "；" + driftText + "，" + action;
+    }
+
+    private String elapsedDurationLabel(long durationMs) {
+        if (durationMs < 1_000) return "0 秒";
+        return durationLabel(durationMs);
+    }
+
+    private BigDecimal maxFeeAwareEntryPrice(BigDecimal ceiling, BigDecimal maxDriftBps) {
+        return ceiling.multiply(BigDecimal.ONE.add(maxDriftBps.divide(BigDecimal.valueOf(10_000),
+                java.math.MathContext.DECIMAL64)));
+    }
+
+    private long feeAwareAnchorWaitMs() {
+        var profile = symbolStrategy(properties.getStrategy().getSymbol());
+        Long waitMs = profile == null ? null : profile.getEntryAnchorWaitMs();
+        if (waitMs == null) waitMs = 1_800_000L;
+        return Math.max(0, Math.min(86_400_000L, waitMs));
+    }
+
+    private BigDecimal feeAwareMaxEntryAnchorDriftBps() {
+        var profile = symbolStrategy(properties.getStrategy().getSymbol());
+        BigDecimal bps = profile == null ? null : profile.getMaxEntryAnchorDriftBps();
+        if (bps == null || bps.signum() < 0) return BigDecimal.ZERO;
+        return bps.min(new BigDecimal("100"));
     }
 
     private BigDecimal orderAmountUsdt() {

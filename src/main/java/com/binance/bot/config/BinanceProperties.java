@@ -61,6 +61,10 @@ public class BinanceProperties {
         private BigDecimal makerFeeBps;
         /** Legacy runtime field retained for API compatibility; FEE_AWARE_MAKER ignores profit targets. */
         private BigDecimal targetNetProfitBps;
+        /** Wait before allowing a fee-aware entry above the previous buy anchor. */
+        private Long entryAnchorWaitMs = 1_800_000L;
+        /** Maximum allowed fee-aware entry drift above the previous buy anchor after waiting. */
+        private BigDecimal maxEntryAnchorDriftBps = BigDecimal.ZERO;
     }
 
     @Data

@@ -266,14 +266,19 @@ class HighFrequencyVolumeChurnEngineTest {
     @Test
     void runtimeStrategySwitchAppliesImmediatelyWhenIdleAndPersists() {
         HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
-                "ensousdt", "BID_ASK_MAKER", new BigDecimal("6"), 20_000L, 120_000L);
+                "ensousdt", "BID_ASK_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
+                null, null, 1_800_000L, new BigDecimal("8"));
 
         assertTrue(result.accepted());
         assertTrue(result.applied());
         assertFalse(result.pending());
         assertEquals("BID_ASK_MAKER", engine.getStrategyMode());
         assertEquals(0, new BigDecimal("6").compareTo(engine.getOrderAmountUsdt()));
-        verify(dailyStatsStore).saveStrategyOverride(eq("test-account"), eq("ENSOUSDT"), any());
+        ArgumentCaptor<BinanceProperties.SymbolStrategyProfile> profile =
+                ArgumentCaptor.forClass(BinanceProperties.SymbolStrategyProfile.class);
+        verify(dailyStatsStore).saveStrategyOverride(eq("test-account"), eq("ENSOUSDT"), profile.capture());
+        assertEquals(1_800_000L, profile.getValue().getEntryAnchorWaitMs());
+        assertEquals(0, new BigDecimal("8").compareTo(profile.getValue().getMaxEntryAnchorDriftBps()));
     }
 
     @Test
@@ -336,13 +341,43 @@ class HighFrequencyVolumeChurnEngineTest {
         verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
                 any(), any(), isNull(), anyString());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
-        assertTrue(engine.getStatusReason().get().contains("高于上一轮买入均价"));
+        assertTrue(engine.getStatusReason().get().contains("高于买入锚点"));
 
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
                 new BigDecimal("0.6000"), new BigDecimal("0.6001"));
 
         verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
                 decimalEquals("0.6000"), any(), isNull(), anyString());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING, engine.getCurrentStatus().get());
+    }
+
+    @Test
+    void feeAwareMakerAllowsConfiguredSmallChaseAfterAnchorWait() throws Exception {
+        engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO,
+                1_800_000L, new BigDecimal("10"));
+        atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6.0000"));
+        ReflectionTestUtils.invokeMethod(engine, "completeFlatExit", false);
+        engine.getIsRunning().set(true);
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString()))
+                .thenReturn(new ObjectMapper().readTree("{\"orderId\":102}"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6005"), new BigDecimal("0.6006"));
+
+        verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                any(), any(), isNull(), anyString());
+        assertTrue(engine.getStatusReason().get().contains("已等待"));
+
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(
+                engine, "feeAwareEntryCeilingBlockedSince")).set(System.currentTimeMillis() - 1_801_000L);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6005"), new BigDecimal("0.6006"));
+
+        verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                decimalEquals("0.6005"), any(), isNull(), anyString());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING, engine.getCurrentStatus().get());
     }
 

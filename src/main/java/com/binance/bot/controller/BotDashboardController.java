@@ -116,7 +116,8 @@ public class BotDashboardController {
         }
         HighFrequencyVolumeChurnEngine.StrategySwitchResult result = runtime.get().engine().switchStrategy(
                 request.symbol(), request.mode(), request.orderAmountUsdt(), request.entryTimeoutMs(),
-                request.exitTimeoutMs(), request.makerFeeBps(), request.targetNetProfitBps());
+                request.exitTimeoutMs(), request.makerFeeBps(), request.targetNetProfitBps(),
+                request.entryAnchorWaitMs(), request.maxEntryAnchorDriftBps());
         return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
     }
 
@@ -307,7 +308,8 @@ public class BotDashboardController {
     public record SymbolSwitchRequest(String symbol) { }
     public record StrategySwitchRequest(String symbol, String mode, BigDecimal orderAmountUsdt,
                                         Long entryTimeoutMs, Long exitTimeoutMs, BigDecimal makerFeeBps,
-                                        BigDecimal targetNetProfitBps) { }
+                                        BigDecimal targetNetProfitBps, Long entryAnchorWaitMs,
+                                        BigDecimal maxEntryAnchorDriftBps) { }
     public record AccountSnapshot(String accountId, String symbol, String apiKeyAlias, String accountType,
                                   boolean canTrade, long accountUpdateTimeMs, List<BalanceView> balances,
                                   List<OrderView> filledOrders, List<OrderView> openOrders, int usedApiWeight1m) { }

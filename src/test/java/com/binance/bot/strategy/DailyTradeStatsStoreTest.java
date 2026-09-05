@@ -179,6 +179,8 @@ class DailyTradeStatsStoreTest {
         profile.setExitTimeoutMs(120_000L);
         profile.setMakerFeeBps(new BigDecimal("7.5"));
         profile.setTargetNetProfitBps(new BigDecimal("10"));
+        profile.setEntryAnchorWaitMs(1_800_000L);
+        profile.setMaxEntryAnchorDriftBps(new BigDecimal("8"));
 
         store.saveStrategyOverride("account-a", "ensousdt", profile);
 
@@ -190,6 +192,8 @@ class DailyTradeStatsStoreTest {
         assertEquals(120_000L, loaded.get("ENSOUSDT").getExitTimeoutMs());
         assertDecimal("7.5", loaded.get("ENSOUSDT").getMakerFeeBps());
         assertDecimal("10", loaded.get("ENSOUSDT").getTargetNetProfitBps());
+        assertEquals(1_800_000L, loaded.get("ENSOUSDT").getEntryAnchorWaitMs());
+        assertDecimal("8", loaded.get("ENSOUSDT").getMaxEntryAnchorDriftBps());
         store.close();
     }
 
