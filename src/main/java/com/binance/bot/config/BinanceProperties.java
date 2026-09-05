@@ -67,6 +67,8 @@ public class BinanceProperties {
         private BigDecimal maxEntryAnchorDriftBps = BigDecimal.ZERO;
         /** Total drift cap from the recent-five-buy average anchor. Null follows maxEntryAnchorDriftBps. */
         private BigDecimal maxCumulativeEntryAnchorDriftBps;
+        /** Optional manual cumulative anchor price. Null lets the runtime derive it from recent buys. */
+        private BigDecimal manualEntryAnchorPrice;
     }
 
     @Data

@@ -482,6 +482,42 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void feeAwareMakerManualAnchorOverridesGeneratedRecentBuyAnchor() {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO,
+                0L, new BigDecimal("100"), new BigDecimal("10"), new BigDecimal("0.5900"));
+        assertTrue(result.accepted());
+        atomic("feeAwareEntryPriceCeiling", BigDecimal.class).set(new BigDecimal("0.6200"));
+        ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.6100"));
+        ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.6200"));
+        ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.6300"));
+        ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.6400"));
+        ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.6500"));
+
+        BigDecimal allowed = ReflectionTestUtils.invokeMethod(engine, "feeAwareAllowedEntryPrice",
+                ruleManager.getRule("ENSOUSDT"));
+
+        assertEquals(0, new BigDecimal("0.5905900").compareTo(allowed));
+        assertEquals(0, new BigDecimal("0.5900").compareTo(
+                atomic("feeAwareInitialEntryAnchorPrice", BigDecimal.class).get()));
+        assertEquals(0, new BigDecimal("0.5900").compareTo(
+                engine.getStrategyProfile().getManualEntryAnchorPrice()));
+    }
+
+    @Test
+    void feeAwareMakerRejectsInvalidManualAnchorPrice() {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO,
+                0L, new BigDecimal("100"), new BigDecimal("10"), BigDecimal.ZERO);
+
+        assertFalse(result.accepted());
+        assertTrue(result.message().contains("手动锚定价格必须大于 0"));
+        verify(dailyStatsStore, never()).saveStrategyOverride(anyString(), anyString(), any());
+    }
+
+    @Test
     void feeAwareMakerKeepsLowerRestingBuyWhenBestBidExceedsAllowedAnchorPrice() throws Exception {
         engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
                 1_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO);

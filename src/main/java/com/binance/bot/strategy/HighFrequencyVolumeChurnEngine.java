@@ -2039,7 +2039,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                                               BigDecimal requestedMakerFeeBps,
                                                               BigDecimal requestedTargetNetProfitBps) {
         return switchStrategy(requestedSymbol, requestedMode, requestedAmount, requestedEntryTimeoutMs,
-                requestedExitTimeoutMs, requestedMakerFeeBps, requestedTargetNetProfitBps, null, null, null);
+                requestedExitTimeoutMs, requestedMakerFeeBps, requestedTargetNetProfitBps,
+                null, null, null, null);
     }
 
     public synchronized StrategySwitchResult switchStrategy(String requestedSymbol, String requestedMode,
@@ -2051,7 +2052,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                                               BigDecimal requestedMaxEntryAnchorDriftBps) {
         return switchStrategy(requestedSymbol, requestedMode, requestedAmount, requestedEntryTimeoutMs,
                 requestedExitTimeoutMs, requestedMakerFeeBps, requestedTargetNetProfitBps,
-                requestedEntryAnchorWaitMs, requestedMaxEntryAnchorDriftBps, null);
+                requestedEntryAnchorWaitMs, requestedMaxEntryAnchorDriftBps, null, null);
     }
 
     public synchronized StrategySwitchResult switchStrategy(String requestedSymbol, String requestedMode,
@@ -2062,6 +2063,21 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                                               Long requestedEntryAnchorWaitMs,
                                                               BigDecimal requestedMaxEntryAnchorDriftBps,
                                                               BigDecimal requestedMaxCumulativeEntryAnchorDriftBps) {
+        return switchStrategy(requestedSymbol, requestedMode, requestedAmount, requestedEntryTimeoutMs,
+                requestedExitTimeoutMs, requestedMakerFeeBps, requestedTargetNetProfitBps,
+                requestedEntryAnchorWaitMs, requestedMaxEntryAnchorDriftBps,
+                requestedMaxCumulativeEntryAnchorDriftBps, null);
+    }
+
+    public synchronized StrategySwitchResult switchStrategy(String requestedSymbol, String requestedMode,
+                                                              BigDecimal requestedAmount, Long requestedEntryTimeoutMs,
+                                                              Long requestedExitTimeoutMs,
+                                                              BigDecimal requestedMakerFeeBps,
+                                                              BigDecimal requestedTargetNetProfitBps,
+                                                              Long requestedEntryAnchorWaitMs,
+                                                              BigDecimal requestedMaxEntryAnchorDriftBps,
+                                                              BigDecimal requestedMaxCumulativeEntryAnchorDriftBps,
+                                                              BigDecimal requestedManualEntryAnchorPrice) {
         String symbol = normalizeStrategySymbol(requestedSymbol);
         if (symbol.isBlank() || !symbol.endsWith("USDT")) {
             return StrategySwitchResult.rejected(properties.getStrategy().getSymbol(),
@@ -2119,6 +2135,16 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (!validBps(maxCumulativeEntryAnchorDriftBps, new BigDecimal("100"))) {
             return StrategySwitchResult.rejected(symbol, "累计最大追高必须在 0 到 100 bps 之间");
         }
+        BigDecimal manualEntryAnchorPrice = requestedManualEntryAnchorPrice;
+        if (manualEntryAnchorPrice != null) {
+            if (manualEntryAnchorPrice.signum() <= 0) {
+                return StrategySwitchResult.rejected(symbol, "手动锚定价格必须大于 0，留空则自动生成");
+            }
+            SymbolRuleManager.SymbolRule rule = ruleManager.getRule(symbol);
+            if (rule != null) {
+                manualEntryAnchorPrice = PrecisionUtil.roundUpToStep(manualEntryAnchorPrice, rule.tickSize());
+            }
+        }
         BinanceProperties.SymbolStrategyProfile profile = new BinanceProperties.SymbolStrategyProfile();
         profile.setMode(mode);
         profile.setOrderAmountUsdt(amount);
@@ -2129,6 +2155,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         profile.setEntryAnchorWaitMs(entryAnchorWaitMs);
         profile.setMaxEntryAnchorDriftBps(maxEntryAnchorDriftBps);
         profile.setMaxCumulativeEntryAnchorDriftBps(maxCumulativeEntryAnchorDriftBps);
+        profile.setManualEntryAnchorPrice(manualEntryAnchorPrice);
 
         String currentSymbol = normalizeStrategySymbol(properties.getStrategy().getSymbol());
         if (symbol.equals(currentSymbol) && (activeOrderId.get() != null
@@ -2141,6 +2168,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return StrategySwitchResult.rejected(symbol, "策略配置持久化失败，未切换");
         }
         strategyProfiles.put(symbol, profile);
+        applyFeeAwareManualAnchorIfCurrent(symbol, profile);
         statusReason.set("策略已切换为 " + mode + (symbol.equals(currentSymbol) ? "，等待下一次状态机周期" : ""));
         log.info("[accountId={} alias={}] 运行时策略已切换: symbol={} mode={}", accountId, accountAlias, symbol, mode);
         return new StrategySwitchResult(true, true, false, symbol, mode, statusReason.get());
@@ -2167,9 +2195,26 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return;
         }
         strategyProfiles.put(symbol, pending);
+        applyFeeAwareManualAnchorIfCurrent(symbol, pending);
         statusReason.set("策略切换已应用为 " + getStrategyMode());
         log.info("[accountId={} alias={}] 已在 IDLE 安全边界应用排队策略: symbol={} mode={}",
                 accountId, accountAlias, symbol, getStrategyMode());
+    }
+
+    private void applyFeeAwareManualAnchorIfCurrent(String symbol, BinanceProperties.SymbolStrategyProfile profile) {
+        if (!normalizeStrategySymbol(properties.getStrategy().getSymbol()).equals(symbol)) return;
+        if (profile == null || !"FEE_AWARE_MAKER".equalsIgnoreCase(profile.getMode())) {
+            feeAwareInitialEntryAnchorPrice.set(null);
+            return;
+        }
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule(symbol);
+        BigDecimal manual = configuredManualEntryAnchorPrice(profile, rule);
+        if (manual != null && manual.signum() > 0) {
+            feeAwareInitialEntryAnchorPrice.set(manual);
+        } else {
+            feeAwareInitialEntryAnchorPrice.set(null);
+        }
+        feeAwareEntryCeilingBlockedSince.set(0);
     }
 
     private boolean validStrategyTimeout(Long timeoutMs) {
@@ -2202,6 +2247,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         copy.setEntryAnchorWaitMs(source.getEntryAnchorWaitMs());
         copy.setMaxEntryAnchorDriftBps(source.getMaxEntryAnchorDriftBps());
         copy.setMaxCumulativeEntryAnchorDriftBps(source.getMaxCumulativeEntryAnchorDriftBps());
+        copy.setManualEntryAnchorPrice(source.getManualEntryAnchorPrice());
         return copy;
     }
 
@@ -2329,8 +2375,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         String driftText = maxDriftBps.signum() <= 0
                 ? "最大追高 0 bps，仍需回落到锚点或以下"
                 : "最大追高 " + maxDriftBps.stripTrailingZeros().toPlainString() + " bps";
+        BigDecimal manualAnchor = configuredManualEntryAnchorPrice(
+                symbolStrategy(properties.getStrategy().getSymbol()), rule);
+        String anchorLabel = manualAnchor != null && manualAnchor.signum() > 0
+                ? "手动锚定价 " : "最近5笔均价锚点 ";
         String cumulativeText = initialAnchor == null || initialAnchor.signum() <= 0 ? ""
-                : "；最近5笔均价锚点 " + initialAnchor.toPlainString()
+                : "；" + anchorLabel + initialAnchor.toPlainString()
                 + "，累计最大追高 " + cumulativeBps.stripTrailingZeros().toPlainString() + " bps";
         String allowedText = maxAllowed == null || maxAllowed.signum() <= 0 ? ""
                 : "，最终允许最高 " + maxAllowed.toPlainString();
@@ -2363,6 +2413,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     private BigDecimal ensureFeeAwareInitialEntryAnchor(SymbolRuleManager.SymbolRule rule) {
+        BigDecimal manual = configuredManualEntryAnchorPrice(symbolStrategy(properties.getStrategy().getSymbol()), rule);
+        if (manual != null && manual.signum() > 0) {
+            feeAwareInitialEntryAnchorPrice.set(manual);
+            return manual;
+        }
         BigDecimal existing = feeAwareInitialEntryAnchorPrice.get();
         if (existing != null && existing.signum() > 0) return existing;
         BigDecimal average = recentFeeAwareBuyAverageFloorPrice(rule);
@@ -2370,6 +2425,14 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (average == null || average.signum() <= 0) return BigDecimal.ZERO;
         feeAwareInitialEntryAnchorPrice.compareAndSet(null, average);
         return feeAwareInitialEntryAnchorPrice.get();
+    }
+
+    private BigDecimal configuredManualEntryAnchorPrice(BinanceProperties.SymbolStrategyProfile profile,
+                                                        SymbolRuleManager.SymbolRule rule) {
+        if (profile == null || profile.getManualEntryAnchorPrice() == null
+                || profile.getManualEntryAnchorPrice().signum() <= 0) return null;
+        return rule == null ? profile.getManualEntryAnchorPrice()
+                : PrecisionUtil.roundUpToStep(profile.getManualEntryAnchorPrice(), rule.tickSize());
     }
 
     private void rememberFeeAwareRecentBuyPrice(BigDecimal price) {
