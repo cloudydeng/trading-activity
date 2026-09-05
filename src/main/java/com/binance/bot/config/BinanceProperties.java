@@ -50,7 +50,7 @@ public class BinanceProperties {
 
     @Data
     public static class SymbolStrategyProfile {
-        /** CURRENT keeps legacy behavior; BID_ASK_MAKER uses bid/ask; FEE_AWARE_MAKER protects net profit. */
+        /** CURRENT keeps legacy behavior; BID_ASK_MAKER uses bid/ask; FEE_AWARE_MAKER protects fees. */
         private String mode = "CURRENT";
         private BigDecimal orderAmountUsdt;
         /** Entry timeout after which a stale bid is canceled; same bid remains working. */
@@ -59,7 +59,7 @@ public class BinanceProperties {
         private Long exitTimeoutMs;
         /** Optional manual maker fee override in bps; null reads the account/symbol rate from Binance. */
         private BigDecimal makerFeeBps;
-        /** Desired net profit after both the recorded buy cost and estimated sell commission. */
+        /** Legacy runtime field retained for API compatibility; FEE_AWARE_MAKER ignores profit targets. */
         private BigDecimal targetNetProfitBps;
     }
 

@@ -25,8 +25,7 @@ BOT_ACCOUNT_PROFILES_JSON='{
                 "orderAmountsUsdt":{"ENSOUSDT":6,"BTCUSDT":12},
                 "symbolStrategies":{"ENSOUSDT":{"mode":"CURRENT"},
                                      "BTCUSDT":{"mode":"FEE_AWARE_MAKER","orderAmountUsdt":6,
-                                                 "entryTimeoutMs":180000,"exitTimeoutMs":600000,
-                                                 "targetNetProfitBps":10}}}
+                                                 "entryTimeoutMs":180000,"exitTimeoutMs":600000}}}
 }'
 ```
 
@@ -35,7 +34,8 @@ BOT_ACCOUNT_PROFILES_JSON='{
 
 `symbolStrategies` 可为每个账户的每个交易对选择策略：`CURRENT` 保留旧版成本价退出；
 `BID_ASK_MAKER` 在买一挂买单、成交后按卖一挂普通限价卖单；`FEE_AWARE_MAKER` 在买一挂买单，
-卖出只使用 `LIMIT_MAKER`，并以“已记录买入成本 + 预计卖出手续费 + 目标净利润”为永久价格下限。
+卖出只使用 `LIMIT_MAKER`，并以“已记录买入成本 + 预计卖出手续费”为永久价格下限，只求把手续费赚回。
+卖出完成后，下一轮买单价格不得高于上一轮 BUY 成交均价；如果当前买一高于该价格，策略会等待价格回落。
 手续费保护策略到达卖单检查时间后，若当前挂价仍正确则保留订单和队列位置；仅在安全目标价变化时撤换，
 且不会降到保本线以下。未配置的交易对回退到 `CURRENT`。
 
@@ -45,7 +45,7 @@ BOT_ACCOUNT_PROFILES_JSON='{
 
 对应接口为 `POST /api/accounts/{accountId}/strategy`（旧版默认账户也支持
 `POST /api/bot/strategy`），请求体字段为 `symbol`、`mode`、`orderAmountUsdt`、`entryTimeoutMs`、
-`exitTimeoutMs`、`makerFeeBps` 和 `targetNetProfitBps`。`makerFeeBps` 留空时按账户和交易对从币安读取
+`exitTimeoutMs`、`makerFeeBps` 和兼容旧请求的 `targetNetProfitBps`。`makerFeeBps` 留空时按账户和交易对从币安读取
 实际 Maker 卖出费率，读取失败才回退到全局保守估值；金额不能超过生产上限，超时时间限制为 1 秒至 30 分钟。
 
 单账户旧配置仍作为兼容回退，仅在未配置 `BOT_ACCOUNT_PROFILES_JSON` 时生效：
