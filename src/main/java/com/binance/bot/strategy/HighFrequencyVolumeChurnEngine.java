@@ -317,12 +317,15 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             liveArmed.set(false);
             return false;
         }
+        DailyTradeStatsStore.RuntimeState runtimeState = loadRuntimeState();
+        restoreFeeAwareEntryPriceCeiling(runtimeState);
         JsonNode openOrders = tradeService.getOpenOrders(properties.getStrategy().getSymbol());
         if (openOrders == null) {
             halt("无法确认交易所活动订单，拒绝启动");
             return false;
         }
         if (!openOrders.isEmpty()) {
+            if (restoreActiveSellOrder(openOrders, runtimeState)) return true;
             halt("发现未由本进程恢复的活动订单，需先人工对账");
             return false;
         }
@@ -343,11 +346,116 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         } else {
             statusReason.set("运行中，等待入场信号");
             resetEntryTarget();
+            persistRuntimeState(false);
         }
         orderPlacedTimestamp.set(0);
         log.info("[accountId={} alias={}] 引擎启动，当前标的持仓: {}", accountId, accountAlias,
                 holdingInventory.get());
         return true;
+    }
+
+    private DailyTradeStatsStore.RuntimeState loadRuntimeState() {
+        try {
+            return dailyStatsStore.loadRuntimeState(accountId, properties.getStrategy().getSymbol()).orElse(null);
+        } catch (RuntimeException e) {
+            log.warn("[accountId={} alias={}] 读取运行状态快照失败，按无快照处理", accountId, accountAlias);
+            return null;
+        }
+    }
+
+    private void restoreFeeAwareEntryPriceCeiling(DailyTradeStatsStore.RuntimeState state) {
+        if (!usesFeeAwareMakerStrategy() || state == null
+                || state.feeAwareEntryPriceCeiling() == null
+                || state.feeAwareEntryPriceCeiling().signum() <= 0) return;
+        feeAwareEntryPriceCeiling.set(state.feeAwareEntryPriceCeiling());
+    }
+
+    private boolean restoreActiveSellOrder(JsonNode openOrders, DailyTradeStatsStore.RuntimeState state) {
+        if (state == null || state.orderId() == null
+                || state.clientOrderId() == null || state.clientOrderId().isBlank()
+                || !"SELLING".equalsIgnoreCase(state.status())
+                || !"SELL".equalsIgnoreCase(state.side())
+                || !openOrders.isArray() || openOrders.size() != 1) return false;
+        JsonNode order = openOrders.get(0);
+        if (order.path("orderId").asLong(-1) != state.orderId()) return false;
+        if (!state.clientOrderId().equals(order.path("clientOrderId").asText(""))) return false;
+        if (!"SELL".equalsIgnoreCase(order.path("side").asText(""))) return false;
+        BigDecimal executedQty = decimal(order.path("executedQty").asText("0"));
+        if (executedQty.signum() > 0) return false;
+
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule(properties.getStrategy().getSymbol());
+        DailyTradeStatsStore.DailyStatsSnapshot durable = getDailyStatsSnapshot();
+        if (rule == null || durable.positionQty().signum() <= 0
+                || durable.positionCostQuote().signum() <= 0
+                || holdingInventory.get().compareTo(rule.stepSize()) < 0) return false;
+        if (holdingInventory.get().subtract(durable.positionQty()).abs().compareTo(rule.stepSize()) >= 0) {
+            return false;
+        }
+
+        BigDecimal orderPrice = decimal(order.path("price").asText(
+                state.orderPrice() == null ? "0" : state.orderPrice().toPlainString()));
+        BigDecimal originalQty = decimal(order.path("origQty").asText("0"));
+        BigDecimal remainingQty = originalQty.subtract(executedQty);
+        if (remainingQty.signum() <= 0) remainingQty = state.activeSellCoveredQty();
+        if (remainingQty == null || remainingQty.signum() <= 0) return false;
+
+        knownOrderIds.add(state.orderId());
+        pendingClientOrderIds.add(state.clientOrderId());
+        activeOrderId.set(state.orderId());
+        activeClientOrderId.set(state.clientOrderId());
+        activeOrderPrice.set(orderPrice.signum() > 0 ? orderPrice : state.orderPrice());
+        activeSellCoveredQty.set(remainingQty);
+        orderPlacedTimestamp.set(state.orderPlacedAtMs() > 0 ? state.orderPlacedAtMs() : System.currentTimeMillis());
+        entryCancellationPending.set(false);
+        BigDecimal markPrice = lastBestAskOrZero().signum() > 0 ? lastBestAskOrZero() : activeOrderPrice.get();
+        riskGuard.restoreOpenPosition(durable.positionQty(), durable.positionCostQuote(),
+                markPrice, orderPlacedTimestamp.get(), properties.getStrategy());
+        isRunning.set(true);
+        currentStatus.set(ChurnStatus.SELLING);
+        statusReason.set("重启后已恢复本进程卖单 " + state.orderId()
+                + "，继续等待成交/检查换单");
+        persistRuntimeState(true);
+        if (currentStatus.get() == ChurnStatus.HALTED) return false;
+        scheduleOrderReconciliation(state.orderId());
+        log.warn("[accountId={} alias={}] 重启恢复 SELL 单: orderId={} clientOrderId={} qty={} price={}",
+                accountId, accountAlias, state.orderId(), state.clientOrderId(),
+                remainingQty, activeOrderPrice.get());
+        return true;
+    }
+
+    private void persistRuntimeState(boolean includeActiveOrder) {
+        String symbol = properties.getStrategy().getSymbol();
+        BigDecimal ceiling = runtimeFeeAwareEntryPriceCeiling(symbol);
+        Long orderId = includeActiveOrder ? activeOrderId.get() : null;
+        ChurnStatus status = includeActiveOrder && orderId != null ? currentStatus.get() : ChurnStatus.IDLE;
+        String clientOrderId = includeActiveOrder ? activeClientOrderId.get() : null;
+        String side = status == ChurnStatus.BUYING ? "BUY" : status == ChurnStatus.SELLING ? "SELL" : null;
+        try {
+            if (orderId == null && (ceiling == null || ceiling.signum() <= 0)) {
+                dailyStatsStore.clearRuntimeState(accountId, symbol);
+                return;
+            }
+            dailyStatsStore.saveRuntimeState(accountId, symbol, new DailyTradeStatsStore.RuntimeState(
+                    accountId, symbol, status.name(), orderId, clientOrderId, side, activeOrderPrice.get(),
+                    activeSellCoveredQty.get(), ceiling, orderPlacedTimestamp.get(), System.currentTimeMillis()));
+        } catch (RuntimeException e) {
+            log.error("[accountId={} alias={}] 保存运行状态快照失败", accountId, accountAlias, e);
+            if (includeActiveOrder && orderId != null) {
+                liveArmed.set(false);
+                halt("活动订单状态持久化失败，已停止真实交易，需人工对账");
+            }
+        }
+    }
+
+    private BigDecimal runtimeFeeAwareEntryPriceCeiling(String symbol) {
+        if (!usesFeeAwareMakerStrategy()) return null;
+        BigDecimal ceiling = feeAwareEntryPriceCeiling.get();
+        if (currentStatus.get() == ChurnStatus.SELLING && filledEntryQuantity.get().signum() > 0) {
+            SymbolRuleManager.SymbolRule rule = ruleManager.getRule(symbol);
+            BigDecimal currentEntryAverage = entryAverageFloorPrice(rule);
+            if (currentEntryAverage.signum() > 0) ceiling = currentEntryAverage;
+        }
+        return ceiling;
     }
 
     public synchronized boolean stopTrading() {
@@ -443,6 +551,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (response != null && response.has("orderId")) {
             long orderId = response.get("orderId").asLong();
             trackOrder(orderId, clientOrderId, ChurnStatus.SELLING);
+            activeOrderPrice.set(BigDecimal.ZERO);
+            persistRuntimeState(true);
             statusReason.set("已提交人工授权市价清仓单，等待账户成交流确认");
             log.warn("[accountId={} alias={}] 人工授权清仓：已提交市价卖单 ID={} qty={} {}",
                     accountId, accountAlias, orderId, qty, baseAsset());
@@ -931,6 +1041,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 floorPrice, clientOrderId);
         if (response != null && response.has("orderId")) {
             trackOrder(response.get("orderId").asLong(), clientOrderId, ChurnStatus.SELLING);
+            activeOrderPrice.set(floorPrice);
+            persistRuntimeState(true);
             statusReason.set(usesBidAskMakerStrategy()
                     ? "BUY 成交后按当前卖一价挂限价卖单 @ " + floorPrice.toPlainString()
                     : "BUY 成交后按买入均价下限卖出中 @ " + floorPrice.toPlainString());
@@ -1005,6 +1117,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             JsonNode response = tradeService.placeLimitGtcSell(symbol, quantity, price, clientOrderId);
             if (response != null && response.has("orderId")) {
                 trackOrder(response.get("orderId").asLong(), clientOrderId, ChurnStatus.SELLING);
+                activeOrderPrice.set(price);
+                persistRuntimeState(true);
                 statusReason.set("上一张卖单满 " + durationLabel(exitOrderTimeoutMs())
                         + "，剩余持仓已按卖一价挂 LIMIT @ "
                         + price.toPlainString());
@@ -1328,7 +1442,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     : response == null ? null : response.path("newOrderResponse");
             if (acceptedOrder != null && acceptedOrder.has("orderId")) {
                 long acceptedOrderId = acceptedOrder.get("orderId").asLong();
-                if (Long.valueOf(acceptedOrderId).equals(activeOrderId.get())) activeOrderPrice.set(price);
+                if (Long.valueOf(acceptedOrderId).equals(activeOrderId.get())) {
+                    activeOrderPrice.set(price);
+                    persistRuntimeState(true);
+                }
                 log.info("[accountId={} alias={}] Maker 报单已接受: ID={} side={} qty={} price={} clientOrderId={}",
                         accountId, accountAlias, acceptedOrderId, side, qty, price, clientOrderId);
                 if ("SELL".equalsIgnoreCase(side)) {
@@ -1472,6 +1589,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 BigDecimal remainingQty = originalQty.subtract(executedQty);
                 activeSellCoveredQty.set(remainingQty.signum() < 0 ? BigDecimal.ZERO : remainingQty);
             }
+            persistRuntimeState(true);
             return;
         }
         pendingClientOrderIds.remove(clientOrderId);
@@ -1524,7 +1642,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         entryCancellationPending.set(false);
         orderPlacedTimestamp.set(System.currentTimeMillis());
         currentStatus.set(status);
-        scheduleOrderReconciliation(orderId);
+        persistRuntimeState(true);
+        if (currentStatus.get() != ChurnStatus.HALTED) scheduleOrderReconciliation(orderId);
     }
 
     private void scheduleOrderReconciliation(long orderId) {
@@ -1605,6 +1724,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         currentStatus.set(ChurnStatus.IDLE);
         rememberFeeAwareEntryPriceCeiling(rule);
         resetEntryTarget();
+        persistRuntimeState(false);
         statusReason.set(isRunning.get() ? "运行中，等待入场信号"
                 : "人工授权市价清仓已完成" + (restReconciled ? "（REST 对账）" : ""));
     }
@@ -1642,6 +1762,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         activeOrderPrice.set(null);
         activeSellCoveredQty.set(BigDecimal.ZERO);
         orderPlacedTimestamp.set(0);
+        persistRuntimeState(false);
     }
 
     private void clearTrackedOrders() {
@@ -1669,6 +1790,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private boolean isTerminal(String status) {
         return "FILLED".equals(status) || "CANCELED".equals(status) || "EXPIRED".equals(status)
                 || "EXPIRED_IN_MATCH".equals(status) || "REJECTED".equals(status);
+    }
+
+    private BigDecimal decimal(String value) {
+        return value == null || value.isBlank() ? BigDecimal.ZERO : new BigDecimal(value);
     }
 
 
@@ -1756,6 +1881,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
 
         try {
+            dailyStatsStore.clearRuntimeState(accountId, current);
             dailyStatsStore.saveActiveSymbol(accountId, target);
         } catch (RuntimeException e) {
             log.error("保存目标交易对失败", e);

@@ -38,6 +38,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.atLeast;
 
 class HighFrequencyVolumeChurnEngineTest {
     private BinanceProperties properties;
@@ -82,6 +83,7 @@ class HighFrequencyVolumeChurnEngineTest {
                 any(), any(), any(), any(), any(), anyLong()))
                 .thenReturn(DailyTradeStatsStore.RecordResult.APPLIED);
         when(dailyStatsStore.reconcileFlatDust(anyString(), anyString(), any())).thenReturn(true);
+        when(dailyStatsStore.loadRuntimeState(anyString(), anyString())).thenReturn(Optional.empty());
         when(dailyStatsStore.today(anyString(), anyString(), anyString())).thenReturn(new DailyTradeStatsStore.DailyStatsSnapshot(
                 LocalDate.now(), "test-account", "test-bot", "ENSOUSDT", BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
                 BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
@@ -288,6 +290,8 @@ class HighFrequencyVolumeChurnEngineTest {
         TradingRiskGuard guard = (TradingRiskGuard) ReflectionTestUtils.getField(engine, "riskGuard");
         guard.recordActualFill("BUY", new BigDecimal("10"), new BigDecimal("6"),
                 new BigDecimal("0.006"), System.currentTimeMillis(), properties.getStrategy());
+        atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6.0000"));
         when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), decimalEquals("0.6013"),
                 decimalEquals("10"), isNull(), anyString()))
                 .thenReturn(new ObjectMapper().readTree("{\"orderId\":77}"));
@@ -298,6 +302,11 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(77L, atomic("activeOrderId", Long.class).get());
         assertEquals(0, new BigDecimal("0.6013").compareTo(atomic("activeOrderPrice", BigDecimal.class).get()));
         verify(tradeService, never()).placeLimitGtcSell(anyString(), any(), any(), anyString());
+        ArgumentCaptor<DailyTradeStatsStore.RuntimeState> runtimeState =
+                ArgumentCaptor.forClass(DailyTradeStatsStore.RuntimeState.class);
+        verify(dailyStatsStore, atLeast(1)).saveRuntimeState(eq("test-account"), eq("ENSOUSDT"), runtimeState.capture());
+        assertEquals(77L, runtimeState.getValue().orderId());
+        assertEquals(0, new BigDecimal("0.6000").compareTo(runtimeState.getValue().feeAwareEntryPriceCeiling()));
 
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
                 .set(System.currentTimeMillis() - 121_000);
@@ -358,6 +367,58 @@ class HighFrequencyVolumeChurnEngineTest {
         verify(tradeService, never()).cancelOrder("ENSOUSDT", 42L);
         assertEquals(42L, atomic("activeOrderId", Long.class).get());
         assertTrue(engine.getStatusReason().get().contains("保留较低 Maker 买单"));
+    }
+
+    @Test
+    void feeAwareMakerPersistsNextEntryCeilingAfterFlatExit() {
+        engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO);
+        atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6.0000"));
+
+        ReflectionTestUtils.invokeMethod(engine, "completeFlatExit", false);
+
+        ArgumentCaptor<DailyTradeStatsStore.RuntimeState> state =
+                ArgumentCaptor.forClass(DailyTradeStatsStore.RuntimeState.class);
+        verify(dailyStatsStore).saveRuntimeState(eq("test-account"), eq("ENSOUSDT"), state.capture());
+        assertNull(state.getValue().orderId());
+        assertEquals(0, new BigDecimal("0.6000").compareTo(state.getValue().feeAwareEntryPriceCeiling()));
+    }
+
+    @Test
+    void startTradingRestoresMatchingDurableSellOrderAfterRestart() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        long now = System.currentTimeMillis();
+        engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO);
+        engine.getLiveArmed().set(true);
+        stubObservationSummaries();
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
+                .set(now);
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
+                .set(now);
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "ENSO", new BigDecimal("10"), BigDecimal.ZERO, new BigDecimal("10")));
+        when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("""
+                [{"orderId":77,"clientOrderId":"ta-restore-S-1","side":"SELL","price":"0.6013",
+                  "origQty":"10","executedQty":"0","status":"NEW"}]
+                """));
+        when(dailyStatsStore.today(eq("test-account"), eq("test-bot"), eq("ENSOUSDT")))
+                .thenReturn(dailyStatsWithPosition("ENSOUSDT", "10", "6.006"));
+        when(dailyStatsStore.loadRuntimeState("test-account", "ENSOUSDT")).thenReturn(Optional.of(
+                new DailyTradeStatsStore.RuntimeState("test-account", "ENSOUSDT", "SELLING", 77L,
+                        "ta-restore-S-1", "SELL", new BigDecimal("0.6013"), new BigDecimal("10"),
+                        new BigDecimal("0.6000"), now - 10_000, now - 10_000)));
+
+        assertTrue(engine.startTrading());
+
+        assertTrue(engine.getIsRunning().get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
+        assertEquals(77L, atomic("activeOrderId", Long.class).get());
+        assertEquals(0, new BigDecimal("6.006").compareTo(engine.getRiskSnapshot().positionCostUsdt()));
+        assertEquals(0, new BigDecimal("0.6000").compareTo(
+                atomic("feeAwareEntryPriceCeiling", BigDecimal.class).get()));
+        assertTrue(engine.getStatusReason().get().contains("重启后已恢复本进程卖单"));
     }
 
     @Test

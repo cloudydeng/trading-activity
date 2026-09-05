@@ -39,6 +39,7 @@ public class DailyTradeStatsStore {
     private static final BigDecimal ONE_MILLION = new BigDecimal("1000000");
     private static final TypeReference<LinkedHashSet<String>> STRING_SET = new TypeReference<>() { };
     private static final String STRATEGY_OVERRIDE_PREFIX = "strategy_override:";
+    private static final String RUNTIME_STATE_PREFIX = "runtime_state:";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Connection connection;
@@ -561,6 +562,48 @@ public class DailyTradeStatsStore {
         }
     }
 
+    /** Persists non-secret handoff state so a restarted process can resume its own active sell order. */
+    public synchronized void saveRuntimeState(String accountId, String symbol, RuntimeState state) {
+        if (state == null) throw new IllegalArgumentException("运行状态不能为空");
+        String normalizedAccountId = normalizeAccountId(accountId);
+        String normalizedSymbol = normalizeSymbol(symbol);
+        try {
+            saveSetting(RUNTIME_STATE_PREFIX + normalizedAccountId + ":" + normalizedSymbol,
+                    objectMapper.writeValueAsString(state), "保存运行状态失败");
+        } catch (Exception e) {
+            if (e instanceof IllegalStateException stateException) throw stateException;
+            throw new IllegalStateException("保存运行状态失败", e);
+        }
+    }
+
+    public synchronized java.util.Optional<RuntimeState> loadRuntimeState(String accountId, String symbol) {
+        String normalizedAccountId = normalizeAccountId(accountId);
+        String normalizedSymbol = normalizeSymbol(symbol);
+        try {
+            java.util.Optional<String> payload = loadSetting(
+                    RUNTIME_STATE_PREFIX + normalizedAccountId + ":" + normalizedSymbol);
+            if (payload.isEmpty()) return java.util.Optional.empty();
+            RuntimeState state = objectMapper.readValue(payload.get(), RuntimeState.class);
+            if (state == null || !normalizedAccountId.equals(normalizeAccountId(state.accountId()))
+                    || !normalizedSymbol.equals(normalizeSymbol(state.symbol()))) {
+                log.warn("忽略账号或交易对不匹配的运行状态快照: accountId={} symbol={}",
+                        normalizedAccountId, normalizedSymbol);
+                return java.util.Optional.empty();
+            }
+            return java.util.Optional.of(state);
+        } catch (Exception e) {
+            log.warn("忽略无效的运行状态快照: accountId={} symbol={}", normalizedAccountId, normalizedSymbol);
+            return java.util.Optional.empty();
+        }
+    }
+
+    public synchronized void clearRuntimeState(String accountId, String symbol) {
+        String normalizedAccountId = normalizeAccountId(accountId);
+        String normalizedSymbol = normalizeSymbol(symbol);
+        deleteSetting(RUNTIME_STATE_PREFIX + normalizedAccountId + ":" + normalizedSymbol,
+                "清除运行状态失败");
+    }
+
     private String normalizeSymbol(String symbol) {
         String normalized = symbol == null ? "" : symbol.trim().toUpperCase();
         if (!normalized.matches("[A-Z0-9]{5,20}") || !normalized.endsWith("USDT")) {
@@ -577,6 +620,16 @@ public class DailyTradeStatsStore {
             statement.setString(1, key);
             statement.setString(2, value);
             statement.setLong(3, System.currentTimeMillis());
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException(errorMessage, e);
+        }
+    }
+
+    private void deleteSetting(String key, String errorMessage) {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "DELETE FROM runtime_setting WHERE setting_key=?")) {
+            statement.setString(1, key);
             statement.executeUpdate();
         } catch (SQLException e) {
             throw new IllegalStateException(errorMessage, e);
@@ -732,6 +785,11 @@ public class DailyTradeStatsStore {
                                              BigDecimal realizedGrossPnlQuote, BigDecimal netRealizedPnlQuote,
                                              int tradeCount, int roundTrips,
                                              boolean commissionConversionComplete) { }
+
+    public record RuntimeState(String accountId, String symbol, String status, Long orderId,
+                               String clientOrderId, String side, BigDecimal orderPrice,
+                               BigDecimal activeSellCoveredQty, BigDecimal feeAwareEntryPriceCeiling,
+                               long orderPlacedAtMs, long updatedAtMs) { }
 
     private static final class MutableSymbolSummary {
         private final String accountId;

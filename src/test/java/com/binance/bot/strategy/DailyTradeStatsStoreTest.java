@@ -194,6 +194,28 @@ class DailyTradeStatsStoreTest {
     }
 
     @Test
+    void persistsLoadsAndClearsRuntimeStateAcrossRestart() {
+        BinanceProperties properties = properties();
+        DailyTradeStatsStore first = new DailyTradeStatsStore(properties);
+        first.saveRuntimeState("account-a", "ENSOUSDT", new DailyTradeStatsStore.RuntimeState(
+                "account-a", "ENSOUSDT", "SELLING", 77L, "ta-a-S-1", "SELL",
+                new BigDecimal("0.6013"), new BigDecimal("10"), new BigDecimal("0.6000"),
+                1234L, 5678L));
+        first.close();
+
+        DailyTradeStatsStore restarted = new DailyTradeStatsStore(properties);
+        DailyTradeStatsStore.RuntimeState state = restarted.loadRuntimeState("account-a", "ENSOUSDT").orElseThrow();
+        assertEquals(77L, state.orderId());
+        assertEquals("ta-a-S-1", state.clientOrderId());
+        assertDecimal("0.6013", state.orderPrice());
+        assertDecimal("0.6000", state.feeAwareEntryPriceCeiling());
+
+        restarted.clearRuntimeState("account-a", "ENSOUSDT");
+        assertEquals(true, restarted.loadRuntimeState("account-a", "ENSOUSDT").isEmpty());
+        restarted.close();
+    }
+
+    @Test
     void migratesLegacyAliasSchemaWithoutDeletingHistoricalData() throws Exception {
         Path database = tempDir.resolve("legacy.db");
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + database);

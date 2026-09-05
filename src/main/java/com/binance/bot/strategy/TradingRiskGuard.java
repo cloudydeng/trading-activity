@@ -145,6 +145,18 @@ public class TradingRiskGuard {
         evaluate(System.currentTimeMillis(), config);
     }
 
+    /** Safe only after exchange and durable ledger both confirm this open position belongs to the bot. */
+    public synchronized void restoreOpenPosition(BigDecimal quantity, BigDecimal costUsdt, BigDecimal markPrice,
+                                                 long openedAtMs, BinanceProperties.Strategy config) {
+        rollDayIfNeeded();
+        if (quantity == null || quantity.signum() <= 0 || costUsdt == null || costUsdt.signum() <= 0) return;
+        positionQty = quantity;
+        positionCostUsdt = costUsdt;
+        this.markPrice = markPrice;
+        positionOpenedAtMs = openedAtMs > 0 ? openedAtMs : System.currentTimeMillis();
+        evaluate(System.currentTimeMillis(), config);
+    }
+
     private void evaluate(long nowMs, BinanceProperties.Strategy config) {
         evaluate(nowMs, config, false);
     }
