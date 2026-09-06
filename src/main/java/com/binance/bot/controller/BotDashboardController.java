@@ -39,6 +39,13 @@ public class BotDashboardController {
         int safeDays = Math.max(1, Math.min(90, days));
         return accountManager.runtimes().stream()
                 .flatMap(runtime -> runtime.engine().getAccountSymbolVolumeSummaries(safeDays).stream())
+                .sorted(Comparator
+                        .comparing(DailyTradeStatsStore.AccountSymbolVolumeSummary::symbol,
+                                String.CASE_INSENSITIVE_ORDER)
+                        .thenComparing(DailyTradeStatsStore.AccountSymbolVolumeSummary::accountAlias,
+                                String.CASE_INSENSITIVE_ORDER)
+                        .thenComparing(DailyTradeStatsStore.AccountSymbolVolumeSummary::accountId,
+                                String.CASE_INSENSITIVE_ORDER))
                 .toList();
     }
 
