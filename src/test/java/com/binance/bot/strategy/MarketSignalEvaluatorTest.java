@@ -87,6 +87,33 @@ class MarketSignalEvaluatorTest {
     }
 
     @Test
+    void bestBidMakerBlocksAggressiveSellFlowWithoutFullFeeAwareBookGate() {
+        MarketSignalEvaluator evaluator = new MarketSignalEvaluator();
+        evaluator.recordQuote(decimal("100"), decimal("1"), decimal("101"), decimal("200"), 1_000, config);
+        evaluator.recordQuote(decimal("100"), decimal("1"), decimal("101"), decimal("200"), 1_500, config);
+        evaluator.recordAggTrade(decimal("20"), true, 1_300, config);
+        evaluator.recordAggTrade(decimal("20"), true, 1_400, config);
+        evaluator.recordAggTrade(decimal("20"), true, 1_500, config);
+
+        assertEquals("SELL_TAKER_PRESSURE", evaluator.evaluateBestBidMaker(1_500, config).reason());
+    }
+
+    @Test
+    void bestBidMakerAllowsThinBookWhenSellPressureGateIsClean() {
+        MarketSignalEvaluator evaluator = new MarketSignalEvaluator();
+        config.setOrderAmountUsdt(decimal("12"));
+        config.setMinTopBookNotionalMultiplier(1.0);
+        config.setMinDepthNotionalMultiplier(1.0);
+        evaluator.recordQuote(decimal("1"), decimal("1"), decimal("1.01"), decimal("1"), 1_000, config);
+        evaluator.recordQuote(decimal("1"), decimal("1"), decimal("1.01"), decimal("1"), 1_500, config);
+
+        MarketSignalEvaluator.EntryDecision decision = evaluator.evaluateBestBidMaker(1_500, config);
+
+        assertTrue(decision.allowed());
+        assertEquals("BEST_BID_MAKER", decision.reason());
+    }
+
+    @Test
     void treatsSparseSingleSellAsNeutralFlow() {
         MarketSignalEvaluator evaluator = new MarketSignalEvaluator();
         config.setMinTakerFlowSamples(3);
@@ -145,6 +172,24 @@ class MarketSignalEvaluatorTest {
         evaluator.recordQuote(decimal("100"), decimal("110"), decimal("101"), decimal("90"), 1_800, config);
         evaluator.recordDepth(decimal("1100"), decimal("900"), 1_800);
         assertEquals("ALLOWED", evaluator.evaluate(1_800, config).reason());
+    }
+
+    @Test
+    void bestBidMakerRequiresReclaimAfterShortTermDownmove() {
+        MarketSignalEvaluator evaluator = new MarketSignalEvaluator();
+        config.setSignalLookbackMs(1_000);
+        config.setPostSelloffCooldownMs(1_000);
+        config.setMinPostSelloffReclaimBps(3);
+        evaluator.recordQuote(decimal("100"), decimal("100"), decimal("101"), decimal("100"), 0, config);
+        evaluator.recordQuote(decimal("99"), decimal("110"), decimal("100"), decimal("90"), 500, config);
+        assertEquals("SHORT_TERM_DOWNMOVE", evaluator.evaluateBestBidMaker(500, config).reason());
+
+        evaluator.recordQuote(decimal("99"), decimal("110"), decimal("100"), decimal("90"), 1_200, config);
+        evaluator.recordQuote(decimal("99"), decimal("110"), decimal("100"), decimal("90"), 1_600, config);
+        assertEquals("WAIT_FOR_PRICE_RECLAIM", evaluator.evaluateBestBidMaker(1_600, config).reason());
+
+        evaluator.recordQuote(decimal("100"), decimal("110"), decimal("101"), decimal("90"), 1_800, config);
+        assertEquals("BEST_BID_MAKER", evaluator.evaluateBestBidMaker(1_800, config).reason());
     }
 
     private static BigDecimal decimal(String value) { return new BigDecimal(value); }

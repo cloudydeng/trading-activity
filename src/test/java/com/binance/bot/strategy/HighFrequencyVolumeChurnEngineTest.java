@@ -95,6 +95,9 @@ class HighFrequencyVolumeChurnEngineTest {
         when(marketSignalEvaluator.markBestBidMakerReady()).thenReturn(
                 new MarketSignalEvaluator.EntryDecision(true, "BEST_BID_MAKER", BigDecimal.ZERO,
                         BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
+        when(marketSignalEvaluator.evaluateBestBidMaker(anyLong(), eq(properties.getStrategy()))).thenReturn(
+                new MarketSignalEvaluator.EntryDecision(true, "BEST_BID_MAKER", BigDecimal.ZERO,
+                        BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
         when(marketSignalEvaluator.evaluate(anyLong(), eq(properties.getStrategy()))).thenReturn(
                 MarketSignalEvaluator.EntryDecision.allow(new BigDecimal("0.2"), new BigDecimal("0.2"),
                         new BigDecimal("0.2"), BigDecimal.ZERO, BigDecimal.ZERO));
@@ -303,6 +306,25 @@ class HighFrequencyVolumeChurnEngineTest {
         engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO);
         when(marketSignalEvaluator.evaluate(anyLong(), eq(properties.getStrategy()))).thenReturn(
+                MarketSignalEvaluator.EntryDecision.block("SELL_TAKER_PRESSURE",
+                        new BigDecimal("-0.1"), BigDecimal.ZERO, new BigDecimal("-0.8"),
+                        BigDecimal.ZERO, BigDecimal.ZERO));
+        engine.getIsRunning().set(true);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+
+        verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                any(), any(), isNull(), anyString());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+        assertTrue(engine.getStatusReason().get().contains("SELL_TAKER_PRESSURE"));
+    }
+
+    @Test
+    void bidAskMakerBlocksEntryWhenBestBidGateRejectsSellPressure() throws Exception {
+        engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L);
+        when(marketSignalEvaluator.evaluateBestBidMaker(anyLong(), eq(properties.getStrategy()))).thenReturn(
                 MarketSignalEvaluator.EntryDecision.block("SELL_TAKER_PRESSURE",
                         new BigDecimal("-0.1"), BigDecimal.ZERO, new BigDecimal("-0.8"),
                         BigDecimal.ZERO, BigDecimal.ZERO));

@@ -2019,7 +2019,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     public BigDecimal getFeeAwareRecommendedEntryAnchorPrice() {
-        if (!usesFeeAwareMakerStrategy()) return null;
+        if (!usesFeeAwareMakerStrategy()) return BigDecimal.ZERO;
         SymbolRuleManager.SymbolRule rule = ruleManager.getRule(properties.getStrategy().getSymbol());
         BinanceProperties.SymbolStrategyProfile profile = symbolStrategy(properties.getStrategy().getSymbol());
         BigDecimal manual = configuredManualEntryAnchorPrice(profile, rule);
@@ -2291,7 +2291,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private MarketSignalEvaluator.EntryDecision entryDecisionForStrategy(long now) {
         return usesFeeAwareMakerStrategy()
                 ? marketSignalEvaluator.evaluate(now, properties.getStrategy())
-                : marketSignalEvaluator.markBestBidMakerReady();
+                : marketSignalEvaluator.evaluateBestBidMaker(now, properties.getStrategy());
     }
 
     private long entryOrderTimeoutMs() {
