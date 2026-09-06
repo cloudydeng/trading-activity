@@ -1082,7 +1082,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             activeOrderPrice.set(floorPrice);
             persistRuntimeState(true);
             statusReason.set(usesBidAskMakerStrategy()
-                    ? "BUY 成交后按当前卖一价挂限价卖单 @ " + floorPrice.toPlainString()
+                    ? "BUY 成交后按卖一/买入价上方挂限价卖单 @ " + floorPrice.toPlainString()
                     : "BUY 成交后按买入均价下限卖出中 @ " + floorPrice.toPlainString());
             log.info("[accountId={} alias={}] BUY 成交后已挂 GTC 限价卖出 {} {} @ {}",
                     accountId, accountAlias, quantity, baseAsset(), floorPrice);
@@ -1092,9 +1092,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     /**
-     * Every sell order has a two-minute working window. Once it expires, cancel and
-     * reconcile the old order before placing the remaining inventory at the latest
-     * best ask. This repeats for each replacement and never falls back to MARKET.
+     * Every sell order has a configurable working window. Once it expires, cancel
+     * and reconcile the old order before placing the remaining inventory back on a
+     * protected LIMIT price. BID_ASK_MAKER follows the latest best ask only when it
+     * stays above the actual buy average; it never falls back to MARKET.
      */
     private void rollTimedOutExitToBestAsk(String symbol, BigDecimal bestAsk,
                                            SymbolRuleManager.SymbolRule rule, long orderId) {
@@ -1131,7 +1132,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
             BigDecimal price = usesFeeAwareMakerStrategy()
                     ? feeProtectedExitPrice(rule, bestAsk)
-                    : PrecisionUtil.roundDownToStep(bestAsk, rule.tickSize());
+                    : bidAskMakerExitPrice(rule, bestAsk);
             SellabilityResult sellability = currentSellability(rule, price);
             if (!sellability.sellable()) {
                 if (!verifyDustWithinLimit(sellability)) return;
@@ -1158,9 +1159,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 activeOrderPrice.set(price);
                 persistRuntimeState(true);
                 statusReason.set("上一张卖单满 " + durationLabel(exitOrderTimeoutMs())
-                        + "，剩余持仓已按卖一价挂 LIMIT @ "
+                        + "，剩余持仓已按卖一/买入价上方挂 LIMIT @ "
                         + price.toPlainString());
-                log.info("[accountId={} alias={}] 卖单满 {}，已按最新卖一价重新挂 LIMIT {} {} @ {}",
+                log.info("[accountId={} alias={}] 卖单满 {}，已按卖一/买入价上方重新挂 LIMIT {} {} @ {}",
                         accountId, accountAlias, durationLabel(exitOrderTimeoutMs()),
                         quantity, baseAsset(), price);
             } else {
@@ -1332,14 +1333,38 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 java.math.MathContext.DECIMAL64), rule.tickSize());
     }
 
+    private BigDecimal entryAverageStrictlyHigherPrice(SymbolRuleManager.SymbolRule rule) {
+        BigDecimal filledQuantity = filledEntryQuantity.get();
+        BigDecimal filledQuote = filledEntryQuoteQuantity.get();
+        if (rule == null) return BigDecimal.ZERO;
+        BigDecimal average = BigDecimal.ZERO;
+        if (filledQuantity.signum() > 0 && filledQuote.signum() > 0) {
+            average = filledQuote.divide(filledQuantity, java.math.MathContext.DECIMAL64);
+        } else {
+            TradingRiskGuard.RiskSnapshot risk = riskGuard.snapshot();
+            if (risk.positionQty() != null && risk.positionQty().signum() > 0
+                    && risk.positionCostUsdt() != null && risk.positionCostUsdt().signum() > 0) {
+                average = risk.positionCostUsdt().divide(risk.positionQty(), java.math.MathContext.DECIMAL64);
+            }
+        }
+        if (average.signum() <= 0) return BigDecimal.ZERO;
+        return PrecisionUtil.roundUpToStep(average.add(rule.tickSize()), rule.tickSize());
+    }
+
+    private BigDecimal bidAskMakerExitPrice(SymbolRuleManager.SymbolRule rule, BigDecimal bestAsk) {
+        BigDecimal ask = positiveOrZero(bestAsk).signum() > 0
+                ? PrecisionUtil.roundDownToStep(bestAsk, rule.tickSize()) : BigDecimal.ZERO;
+        BigDecimal aboveEntry = entryAverageStrictlyHigherPrice(rule);
+        BigDecimal price = aboveEntry.signum() > 0 ? ask.max(aboveEntry) : ask;
+        return price.signum() > 0 ? price : aboveEntry;
+    }
+
     private BigDecimal exitReferencePrice(SymbolRuleManager.SymbolRule rule) {
         return exitReferencePrice(rule, lastBestAskOrZero());
     }
 
     private BigDecimal exitReferencePrice(SymbolRuleManager.SymbolRule rule, BigDecimal fallbackPrice) {
-        if (usesBidAskMakerStrategy() && fallbackPrice != null && fallbackPrice.signum() > 0) {
-            return PrecisionUtil.roundDownToStep(fallbackPrice, rule.tickSize());
-        }
+        if (usesBidAskMakerStrategy()) return bidAskMakerExitPrice(rule, fallbackPrice);
         BigDecimal entryFloor = entryAverageFloorPrice(rule);
         return entryFloor.signum() > 0 ? entryFloor : positiveOrZero(fallbackPrice);
     }
@@ -2314,8 +2339,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private BigDecimal initialStrategyExitPrice(SymbolRuleManager.SymbolRule rule) {
         if (usesFeeAwareMakerStrategy()) return feeProtectedExitPrice(rule, lastBestAskOrZero());
         if (usesBidAskMakerStrategy()) {
-            BigDecimal ask = lastBestAskOrZero();
-            if (ask.signum() > 0) return PrecisionUtil.roundDownToStep(ask, rule.tickSize());
+            BigDecimal price = bidAskMakerExitPrice(rule, lastBestAskOrZero());
+            if (price.signum() > 0) return price;
         }
         return exitReferencePrice(rule);
     }
