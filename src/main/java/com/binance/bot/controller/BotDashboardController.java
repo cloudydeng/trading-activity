@@ -63,6 +63,11 @@ public class BotDashboardController {
                 .orElseGet(() -> ResponseEntity.notFound().build());
     }
 
+    @GetMapping("/api/accounts/notifications")
+    public List<?> allNotifications(@RequestParam(defaultValue = "10") int limit) {
+        return notificationService.recentFills(Math.max(1, Math.min(500, limit)));
+    }
+
     @GetMapping("/api/accounts/{accountId}/notifications")
     public ResponseEntity<?> notifications(@PathVariable String accountId,
                                            @RequestParam(defaultValue = "100") int limit) {
