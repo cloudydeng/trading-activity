@@ -326,6 +326,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         DailyTradeStatsStore.RuntimeState runtimeState = loadRuntimeState();
         restoreFeeAwareEntryPriceCeiling(runtimeState);
+        applyConfiguredManualAnchorToCurrentCeiling();
         JsonNode openOrders = tradeService.getOpenOrders(properties.getStrategy().getSymbol());
         if (openOrders == null) {
             halt("无法确认交易所活动订单，拒绝启动");
@@ -382,6 +383,18 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             feeAwareEntryPriceCeiling.set(state.feeAwareEntryPriceCeiling());
             feeAwareInitialEntryAnchorPrice.compareAndSet(null, state.feeAwareEntryPriceCeiling());
         }
+    }
+
+    private void applyConfiguredManualAnchorToCurrentCeiling() {
+        if (!usesFeeAwareMakerStrategy()) return;
+        String symbol = normalizeStrategySymbol(properties.getStrategy().getSymbol());
+        BinanceProperties.SymbolStrategyProfile profile = symbolStrategy(symbol);
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule(symbol);
+        BigDecimal manual = configuredManualEntryAnchorPrice(profile, rule);
+        if (manual == null || manual.signum() <= 0) return;
+        feeAwareInitialEntryAnchorPrice.set(manual);
+        feeAwareEntryPriceCeiling.set(manual);
+        feeAwareEntryCeilingBlockedSince.set(0);
     }
 
     private void restoreFeeAwareRecentBuyPrices(List<BigDecimal> prices) {
@@ -1486,9 +1499,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     static boolean isHardEntryRisk(String reason) {
         return switch (reason) {
             case "STALE_MARKET_DATA", "STALE_DEPTH_DATA", "EMPTY_TOP_OF_BOOK", "EMPTY_DEPTH_BOOK",
-                    "THIN_TOP_OF_BOOK", "THIN_DEPTH_BOOK", "SELL_TAKER_PRESSURE", "SHORT_TERM_DOWNMOVE",
-                    "EXCESS_SHORT_TERM_VOLATILITY",
-                    "POST_SELLOFF_COOLDOWN" -> true;
+                    "THIN_TOP_OF_BOOK", "THIN_DEPTH_BOOK", "EXCESS_SHORT_TERM_VOLATILITY" -> true;
             default -> false;
         };
     }
@@ -2255,6 +2266,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         BigDecimal manual = configuredManualEntryAnchorPrice(profile, rule);
         if (manual != null && manual.signum() > 0) {
             feeAwareInitialEntryAnchorPrice.set(manual);
+            feeAwareEntryPriceCeiling.set(manual);
         } else {
             feeAwareInitialEntryAnchorPrice.set(null);
         }
@@ -2314,9 +2326,23 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     private MarketSignalEvaluator.EntryDecision entryDecisionForStrategy(long now) {
-        return usesFeeAwareMakerStrategy()
+        MarketSignalEvaluator.EntryDecision decision = usesFeeAwareMakerStrategy()
                 ? marketSignalEvaluator.evaluate(now, properties.getStrategy())
                 : marketSignalEvaluator.evaluateBestBidMaker(now, properties.getStrategy());
+        if (decision != null && !decision.allowed() && isIgnoredFlowEntryReason(decision.reason())) {
+            return new MarketSignalEvaluator.EntryDecision(true, "IGNORED_" + decision.reason(),
+                    decision.bookImbalance(), decision.depthImbalance(), decision.takerFlowImbalance(),
+                    decision.returnBps(), decision.rangeBps());
+        }
+        return decision;
+    }
+
+    private static boolean isIgnoredFlowEntryReason(String reason) {
+        return switch (reason) {
+            case "SELL_TAKER_PRESSURE", "SHORT_TERM_DOWNMOVE", "POST_SELLOFF_COOLDOWN",
+                    "WAIT_FOR_PRICE_RECLAIM" -> true;
+            default -> false;
+        };
     }
 
     private long entryOrderTimeoutMs() {

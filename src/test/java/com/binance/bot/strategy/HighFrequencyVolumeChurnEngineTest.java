@@ -302,41 +302,43 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void feeAwareMakerBlocksEntryWhenSignalGateRejectsMarket() throws Exception {
+    void feeAwareMakerIgnoresSellPressureSignalGate() throws Exception {
         engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO);
         when(marketSignalEvaluator.evaluate(anyLong(), eq(properties.getStrategy()))).thenReturn(
                 MarketSignalEvaluator.EntryDecision.block("SELL_TAKER_PRESSURE",
                         new BigDecimal("-0.1"), BigDecimal.ZERO, new BigDecimal("-0.8"),
                         BigDecimal.ZERO, BigDecimal.ZERO));
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString()))
+                .thenReturn(new ObjectMapper().readTree("{\"orderId\":301}"));
         engine.getIsRunning().set(true);
 
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
                 new BigDecimal("0.6000"), new BigDecimal("0.6001"));
 
-        verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
-                any(), any(), isNull(), anyString());
-        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
-        assertTrue(engine.getStatusReason().get().contains("SELL_TAKER_PRESSURE"));
+        verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                decimalEquals("0.6000"), any(), isNull(), anyString());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING, engine.getCurrentStatus().get());
     }
 
     @Test
-    void bidAskMakerBlocksEntryWhenBestBidGateRejectsSellPressure() throws Exception {
+    void bidAskMakerIgnoresSellPressureSignalGate() throws Exception {
         engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L);
         when(marketSignalEvaluator.evaluateBestBidMaker(anyLong(), eq(properties.getStrategy()))).thenReturn(
                 MarketSignalEvaluator.EntryDecision.block("SELL_TAKER_PRESSURE",
                         new BigDecimal("-0.1"), BigDecimal.ZERO, new BigDecimal("-0.8"),
                         BigDecimal.ZERO, BigDecimal.ZERO));
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString()))
+                .thenReturn(new ObjectMapper().readTree("{\"orderId\":302}"));
         engine.getIsRunning().set(true);
 
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
                 new BigDecimal("0.6000"), new BigDecimal("0.6001"));
 
-        verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
-                any(), any(), isNull(), anyString());
-        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
-        assertTrue(engine.getStatusReason().get().contains("SELL_TAKER_PRESSURE"));
+        verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                decimalEquals("0.6000"), any(), isNull(), anyString());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING, engine.getCurrentStatus().get());
     }
 
     @Test
@@ -532,6 +534,8 @@ class HighFrequencyVolumeChurnEngineTest {
                 20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO,
                 0L, new BigDecimal("100"), new BigDecimal("10"), new BigDecimal("0.5900"));
         assertTrue(result.accepted());
+        assertEquals(0, new BigDecimal("0.5900").compareTo(
+                atomic("feeAwareEntryPriceCeiling", BigDecimal.class).get()));
         atomic("feeAwareEntryPriceCeiling", BigDecimal.class).set(new BigDecimal("0.6200"));
         ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.6100"));
         ReflectionTestUtils.invokeMethod(engine, "rememberFeeAwareRecentBuyPrice", new BigDecimal("0.6200"));
@@ -1209,10 +1213,11 @@ class HighFrequencyVolumeChurnEngineTest {
 
     @Test
     void classifiesOnlyImmediateSafetyConditionsAsHardEntryRisk() {
-        assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("SELL_TAKER_PRESSURE"));
-        assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("SHORT_TERM_DOWNMOVE"));
         assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("STALE_MARKET_DATA"));
         assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("THIN_DEPTH_BOOK"));
+        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("SELL_TAKER_PRESSURE"));
+        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("SHORT_TERM_DOWNMOVE"));
+        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("WAIT_FOR_PRICE_RECLAIM"));
         assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("WEAK_TOP_OF_BOOK"));
         assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("WEAK_MULTI_LEVEL_BIDS"));
         assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("MICROPRICE_NOT_SUPPORTIVE"));

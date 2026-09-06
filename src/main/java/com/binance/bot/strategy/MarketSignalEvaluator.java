@@ -92,21 +92,10 @@ public class MarketSignalEvaluator {
                 ? BigDecimal.ZERO : signedTradeQty.divide(totalTradeQty, MC);
 
         if (imbalance.compareTo(BigDecimal.valueOf(config.getMinBookImbalance())) < 0) return set(EntryDecision.block("WEAK_TOP_OF_BOOK", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
-        if (takerFlowImbalance.compareTo(BigDecimal.valueOf(config.getMinTakerFlowImbalance())) < 0) {
-            recordSelloff(mid, nowMs);
-            return set(EntryDecision.block("SELL_TAKER_PRESSURE", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
-        }
-        if (returnBps.compareTo(BigDecimal.valueOf(-config.getMaxDownwardMoveBps())) < 0) {
-            recordSelloff(mid, nowMs);
-            return set(EntryDecision.block("SHORT_TERM_DOWNMOVE", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
-        }
         if (rangeBps.compareTo(BigDecimal.valueOf(config.getMaxShortTermVolatilityBps())) > 0) return set(EntryDecision.block("EXCESS_SHORT_TERM_VOLATILITY", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
-        if (selloff != null) {
-            if (nowMs - selloff.detectedAtMs() < config.getPostSelloffCooldownMs()) return set(EntryDecision.block("POST_SELLOFF_COOLDOWN", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
-            BigDecimal reclaimBps = mid.subtract(selloff.lowMid()).multiply(BigDecimal.valueOf(10_000)).divide(selloff.lowMid(), MC);
-            if (reclaimBps.compareTo(BigDecimal.valueOf(config.getMinPostSelloffReclaimBps())) < 0) return set(EntryDecision.block("WAIT_FOR_PRICE_RECLAIM", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
-            selloff = null;
-        }
+        // Taker sell pressure, short-term down moves, and post-selloff reclaim are still
+        // measured for visibility, but they no longer block maker entries.
+        selloff = null;
         return set(EntryDecision.allow(imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
     }
 
@@ -151,29 +140,7 @@ public class MarketSignalEvaluator {
                 || totalTradeQty.signum() == 0
                 ? BigDecimal.ZERO : signedTradeQty.divide(totalTradeQty, MC);
 
-        if (takerFlowImbalance.compareTo(BigDecimal.valueOf(config.getMinTakerFlowImbalance())) < 0) {
-            recordSelloff(mid, nowMs);
-            return set(EntryDecision.block("SELL_TAKER_PRESSURE", imbalance, depthImbalance,
-                    takerFlowImbalance, returnBps, rangeBps));
-        }
-        if (returnBps.compareTo(BigDecimal.valueOf(-config.getMaxDownwardMoveBps())) < 0) {
-            recordSelloff(mid, nowMs);
-            return set(EntryDecision.block("SHORT_TERM_DOWNMOVE", imbalance, depthImbalance,
-                    takerFlowImbalance, returnBps, rangeBps));
-        }
-        if (selloff != null) {
-            if (nowMs - selloff.detectedAtMs() < config.getPostSelloffCooldownMs()) {
-                return set(EntryDecision.block("POST_SELLOFF_COOLDOWN", imbalance, depthImbalance,
-                        takerFlowImbalance, returnBps, rangeBps));
-            }
-            BigDecimal reclaimBps = mid.subtract(selloff.lowMid()).multiply(BigDecimal.valueOf(10_000))
-                    .divide(selloff.lowMid(), MC);
-            if (reclaimBps.compareTo(BigDecimal.valueOf(config.getMinPostSelloffReclaimBps())) < 0) {
-                return set(EntryDecision.block("WAIT_FOR_PRICE_RECLAIM", imbalance, depthImbalance,
-                        takerFlowImbalance, returnBps, rangeBps));
-            }
-            selloff = null;
-        }
+        selloff = null;
         return set(new EntryDecision(true, "BEST_BID_MAKER", imbalance, depthImbalance,
                 takerFlowImbalance, returnBps, rangeBps));
     }
