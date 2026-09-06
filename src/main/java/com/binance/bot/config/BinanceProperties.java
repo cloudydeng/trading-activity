@@ -69,6 +69,8 @@ public class BinanceProperties {
         private BigDecimal maxCumulativeEntryAnchorDriftBps;
         /** Optional manual cumulative anchor price. Null lets the runtime derive it from recent buys. */
         private BigDecimal manualEntryAnchorPrice;
+        /** BID_ASK_MAKER waits this long after a flat sell before opening the next buy. */
+        private Long postSellEntryDelayMs = 60_000L;
     }
 
     @Data

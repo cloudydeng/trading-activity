@@ -80,6 +80,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicReference<BigDecimal> feeAwareInitialEntryAnchorPrice = new AtomicReference<>();
     private final ArrayDeque<BigDecimal> feeAwareRecentBuyPrices = new ArrayDeque<>();
     private final AtomicLong feeAwareEntryCeilingBlockedSince = new AtomicLong(0);
+    private final AtomicLong bidAskNextEntryAllowedAtMs = new AtomicLong(0);
     private final AtomicReference<String> activeClientOrderId = new AtomicReference<>();
     private final AtomicReference<Long> replacingOrderId = new AtomicReference<>();
     @Getter private final AtomicReference<String> statusReason = new AtomicReference<>("等待启动");
@@ -708,6 +709,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     }
                     updateDustState(residual, "残余库存等待后续 BUY 合并");
                 }
+                if (bidAskPostSellEntryDelayActive(now)) return;
                 MarketSignalEvaluator.EntryDecision decision = entryDecisionForStrategy(now);
                 activeEntrySignalReason.set(decision.reason());
                 activeEntryContext.set(marketSignalEvaluator.getMarketContext(now));
@@ -1800,8 +1802,14 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         rememberFeeAwareEntryPriceCeiling(rule);
         resetEntryTarget();
         persistRuntimeState(false);
-        statusReason.set(isRunning.get() ? "运行中，等待入场信号"
-                : "人工授权市价清仓已完成" + (restReconciled ? "（REST 对账）" : ""));
+        long postSellDelayMs = scheduleBidAskPostSellEntryDelay();
+        if (isRunning.get() && postSellDelayMs > 0) {
+            statusReason.set("BID_ASK_MAKER 卖单已成交，等待 "
+                    + durationLabel(postSellDelayMs) + " 后再挂下一笔买单");
+        } else {
+            statusReason.set(isRunning.get() ? "运行中，等待入场信号"
+                    : "人工授权市价清仓已完成" + (restReconciled ? "（REST 对账）" : ""));
+        }
     }
 
     private boolean continueAfterConfirmedFlatSell(long orderId, String side,
@@ -1981,6 +1989,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             feeAwareRecentBuyPrices.clear();
         }
         feeAwareEntryCeilingBlockedSince.set(0);
+        bidAskNextEntryAllowedAtMs.set(0);
         commissionPriceCache.clear();
         makerSellFeeRateCache.clear();
         lastBestBid.set(null);
@@ -2095,7 +2104,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                                               BigDecimal requestedTargetNetProfitBps) {
         return switchStrategy(requestedSymbol, requestedMode, requestedAmount, requestedEntryTimeoutMs,
                 requestedExitTimeoutMs, requestedMakerFeeBps, requestedTargetNetProfitBps,
-                null, null, null, null);
+                null, null, null, null, null);
     }
 
     public synchronized StrategySwitchResult switchStrategy(String requestedSymbol, String requestedMode,
@@ -2107,7 +2116,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                                               BigDecimal requestedMaxEntryAnchorDriftBps) {
         return switchStrategy(requestedSymbol, requestedMode, requestedAmount, requestedEntryTimeoutMs,
                 requestedExitTimeoutMs, requestedMakerFeeBps, requestedTargetNetProfitBps,
-                requestedEntryAnchorWaitMs, requestedMaxEntryAnchorDriftBps, null, null);
+                requestedEntryAnchorWaitMs, requestedMaxEntryAnchorDriftBps, null, null, null);
     }
 
     public synchronized StrategySwitchResult switchStrategy(String requestedSymbol, String requestedMode,
@@ -2121,7 +2130,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return switchStrategy(requestedSymbol, requestedMode, requestedAmount, requestedEntryTimeoutMs,
                 requestedExitTimeoutMs, requestedMakerFeeBps, requestedTargetNetProfitBps,
                 requestedEntryAnchorWaitMs, requestedMaxEntryAnchorDriftBps,
-                requestedMaxCumulativeEntryAnchorDriftBps, null);
+                requestedMaxCumulativeEntryAnchorDriftBps, null, null);
     }
 
     public synchronized StrategySwitchResult switchStrategy(String requestedSymbol, String requestedMode,
@@ -2133,6 +2142,22 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                                               BigDecimal requestedMaxEntryAnchorDriftBps,
                                                               BigDecimal requestedMaxCumulativeEntryAnchorDriftBps,
                                                               BigDecimal requestedManualEntryAnchorPrice) {
+        return switchStrategy(requestedSymbol, requestedMode, requestedAmount, requestedEntryTimeoutMs,
+                requestedExitTimeoutMs, requestedMakerFeeBps, requestedTargetNetProfitBps,
+                requestedEntryAnchorWaitMs, requestedMaxEntryAnchorDriftBps,
+                requestedMaxCumulativeEntryAnchorDriftBps, requestedManualEntryAnchorPrice, null);
+    }
+
+    public synchronized StrategySwitchResult switchStrategy(String requestedSymbol, String requestedMode,
+                                                              BigDecimal requestedAmount, Long requestedEntryTimeoutMs,
+                                                              Long requestedExitTimeoutMs,
+                                                              BigDecimal requestedMakerFeeBps,
+                                                              BigDecimal requestedTargetNetProfitBps,
+                                                              Long requestedEntryAnchorWaitMs,
+                                                              BigDecimal requestedMaxEntryAnchorDriftBps,
+                                                              BigDecimal requestedMaxCumulativeEntryAnchorDriftBps,
+                                                              BigDecimal requestedManualEntryAnchorPrice,
+                                                              Long requestedPostSellEntryDelayMs) {
         String symbol = normalizeStrategySymbol(requestedSymbol);
         if (symbol.isBlank() || !symbol.endsWith("USDT")) {
             return StrategySwitchResult.rejected(properties.getStrategy().getSymbol(),
@@ -2158,6 +2183,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 ? existing.getExitTimeoutMs() : requestedExitTimeoutMs;
         if (!validStrategyTimeout(entryTimeout) || !validStrategyTimeout(exitTimeout)) {
             return StrategySwitchResult.rejected(symbol, "超时时间必须在 1 秒到 30 分钟之间");
+        }
+        Long postSellEntryDelayMs = requestedPostSellEntryDelayMs == null && existing != null
+                ? existing.getPostSellEntryDelayMs() : requestedPostSellEntryDelayMs;
+        if (postSellEntryDelayMs == null) postSellEntryDelayMs = 60_000L;
+        if (!validPostSellEntryDelay(postSellEntryDelayMs)) {
+            return StrategySwitchResult.rejected(symbol, "卖出后买入等待时间必须在 0 秒到 24 小时之间");
         }
         // Null deliberately clears a manual fee/profit override: the fee returns to automatic
         // account lookup and the profit target returns to the global default.
@@ -2211,6 +2242,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         profile.setMaxEntryAnchorDriftBps(maxEntryAnchorDriftBps);
         profile.setMaxCumulativeEntryAnchorDriftBps(maxCumulativeEntryAnchorDriftBps);
         profile.setManualEntryAnchorPrice(manualEntryAnchorPrice);
+        profile.setPostSellEntryDelayMs(postSellEntryDelayMs);
 
         String currentSymbol = normalizeStrategySymbol(properties.getStrategy().getSymbol());
         if (symbol.equals(currentSymbol) && (activeOrderId.get() != null
@@ -2277,6 +2309,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return timeoutMs == null || (timeoutMs >= 1_000 && timeoutMs <= 1_800_000);
     }
 
+    private boolean validPostSellEntryDelay(Long delayMs) {
+        return delayMs == null || (delayMs >= 0 && delayMs <= 86_400_000L);
+    }
+
     private boolean validBps(BigDecimal value, BigDecimal maximum) {
         return value == null || (value.signum() >= 0 && value.compareTo(maximum) <= 0);
     }
@@ -2304,6 +2340,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         copy.setMaxEntryAnchorDriftBps(source.getMaxEntryAnchorDriftBps());
         copy.setMaxCumulativeEntryAnchorDriftBps(source.getMaxCumulativeEntryAnchorDriftBps());
         copy.setManualEntryAnchorPrice(source.getManualEntryAnchorPrice());
+        copy.setPostSellEntryDelayMs(source.getPostSellEntryDelayMs());
         return copy;
     }
 
@@ -2355,6 +2392,39 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         var profile = symbolStrategy(properties.getStrategy().getSymbol());
         return profile != null && profile.getExitTimeoutMs() != null && profile.getExitTimeoutMs() > 0
                 ? profile.getExitTimeoutMs() : properties.getStrategy().getLimitSellTimeoutMs();
+    }
+
+    private long bidAskPostSellEntryDelayMs() {
+        var profile = symbolStrategy(properties.getStrategy().getSymbol());
+        Long delayMs = profile == null ? null : profile.getPostSellEntryDelayMs();
+        if (delayMs == null) delayMs = 60_000L;
+        return Math.max(0, Math.min(86_400_000L, delayMs));
+    }
+
+    private long scheduleBidAskPostSellEntryDelay() {
+        if (!usesBidAskMakerStrategy() || !isRunning.get()) {
+            bidAskNextEntryAllowedAtMs.set(0);
+            return 0;
+        }
+        long delayMs = bidAskPostSellEntryDelayMs();
+        bidAskNextEntryAllowedAtMs.set(delayMs > 0 ? System.currentTimeMillis() + delayMs : 0);
+        return delayMs;
+    }
+
+    private boolean bidAskPostSellEntryDelayActive(long nowMs) {
+        if (!usesBidAskMakerStrategy()) {
+            bidAskNextEntryAllowedAtMs.set(0);
+            return false;
+        }
+        long allowedAtMs = bidAskNextEntryAllowedAtMs.get();
+        if (allowedAtMs <= 0) return false;
+        if (nowMs >= allowedAtMs) {
+            bidAskNextEntryAllowedAtMs.compareAndSet(allowedAtMs, 0);
+            return false;
+        }
+        statusReason.set("BID_ASK_MAKER 卖出后冷却中，剩余 "
+                + durationLabel(allowedAtMs - nowMs) + " 再挂下一笔买单");
+        return true;
     }
 
     private String durationLabel(long durationMs) {

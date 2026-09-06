@@ -125,7 +125,8 @@ public class BotDashboardController {
                 request.symbol(), request.mode(), request.orderAmountUsdt(), request.entryTimeoutMs(),
                 request.exitTimeoutMs(), request.makerFeeBps(), request.targetNetProfitBps(),
                 request.entryAnchorWaitMs(), request.maxEntryAnchorDriftBps(),
-                request.maxCumulativeEntryAnchorDriftBps(), request.manualEntryAnchorPrice());
+                request.maxCumulativeEntryAnchorDriftBps(), request.manualEntryAnchorPrice(),
+                request.postSellEntryDelayMs());
         return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
     }
 
@@ -320,7 +321,8 @@ public class BotDashboardController {
                                         BigDecimal targetNetProfitBps, Long entryAnchorWaitMs,
                                         BigDecimal maxEntryAnchorDriftBps,
                                         BigDecimal maxCumulativeEntryAnchorDriftBps,
-                                        BigDecimal manualEntryAnchorPrice) { }
+                                        BigDecimal manualEntryAnchorPrice,
+                                        Long postSellEntryDelayMs) { }
     public record AccountSnapshot(String accountId, String symbol, String apiKeyAlias, String accountType,
                                   boolean canTrade, long accountUpdateTimeMs, List<BalanceView> balances,
                                   List<OrderView> filledOrders, List<OrderView> openOrders, int usedApiWeight1m) { }
