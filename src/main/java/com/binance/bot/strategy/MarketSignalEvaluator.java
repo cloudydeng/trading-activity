@@ -52,6 +52,13 @@ public class MarketSignalEvaluator {
         BigDecimal mid = latest.bid().add(latest.ask()).divide(BigDecimal.valueOf(2), MC);
         BigDecimal totalQty = latest.bidQty().add(latest.askQty());
         if (totalQty.signum() == 0) return set(EntryDecision.block("EMPTY_TOP_OF_BOOK"));
+        BigDecimal minimumTopBookNotional = minimumOrderBookNotional(config.getOrderAmountUsdt(),
+                config.getMinTopBookNotionalMultiplier());
+        if (minimumTopBookNotional.signum() > 0
+                && (latest.bid().multiply(latest.bidQty()).compareTo(minimumTopBookNotional) < 0
+                || latest.ask().multiply(latest.askQty()).compareTo(minimumTopBookNotional) < 0)) {
+            return set(EntryDecision.block("THIN_TOP_OF_BOOK"));
+        }
         BigDecimal imbalance = latest.bidQty().subtract(latest.askQty()).divide(totalQty, MC);
         Quote first = quotes.peekFirst();
         BigDecimal firstMid = first.bid().add(first.ask()).divide(BigDecimal.valueOf(2), MC);
@@ -66,6 +73,13 @@ public class MarketSignalEvaluator {
         BigDecimal rangeBps = maxMid.subtract(minMid).multiply(BigDecimal.valueOf(10_000)).divide(mid, MC);
         BigDecimal depthTotal = latestDepth.bidDepth().add(latestDepth.askDepth());
         if (depthTotal.signum() == 0) return set(EntryDecision.block("EMPTY_DEPTH_BOOK"));
+        BigDecimal minimumDepthNotional = minimumOrderBookNotional(config.getOrderAmountUsdt(),
+                config.getMinDepthNotionalMultiplier());
+        if (minimumDepthNotional.signum() > 0
+                && (latestDepth.bidDepth().multiply(mid).compareTo(minimumDepthNotional) < 0
+                || latestDepth.askDepth().multiply(mid).compareTo(minimumDepthNotional) < 0)) {
+            return set(EntryDecision.block("THIN_DEPTH_BOOK"));
+        }
         BigDecimal depthImbalance = latestDepth.bidDepth().subtract(latestDepth.askDepth()).divide(depthTotal, MC);
         BigDecimal signedTradeQty = BigDecimal.ZERO;
         BigDecimal totalTradeQty = BigDecimal.ZERO;
@@ -78,25 +92,59 @@ public class MarketSignalEvaluator {
                 ? BigDecimal.ZERO : signedTradeQty.divide(totalTradeQty, MC);
 
         if (imbalance.compareTo(BigDecimal.valueOf(config.getMinBookImbalance())) < 0) return set(EntryDecision.block("WEAK_TOP_OF_BOOK", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
-        if (takerFlowImbalance.compareTo(BigDecimal.valueOf(config.getMinTakerFlowImbalance())) < 0) {
-            recordSelloff(mid, nowMs);
-            return set(EntryDecision.block("SELL_TAKER_PRESSURE", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
-        }
-        if (returnBps.compareTo(BigDecimal.valueOf(-config.getMaxDownwardMoveBps())) < 0) {
-            recordSelloff(mid, nowMs);
-            return set(EntryDecision.block("SHORT_TERM_DOWNMOVE", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
-        }
         if (rangeBps.compareTo(BigDecimal.valueOf(config.getMaxShortTermVolatilityBps())) > 0) return set(EntryDecision.block("EXCESS_SHORT_TERM_VOLATILITY", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
-        if (selloff != null) {
-            if (nowMs - selloff.detectedAtMs() < config.getPostSelloffCooldownMs()) return set(EntryDecision.block("POST_SELLOFF_COOLDOWN", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
-            BigDecimal reclaimBps = mid.subtract(selloff.lowMid()).multiply(BigDecimal.valueOf(10_000)).divide(selloff.lowMid(), MC);
-            if (reclaimBps.compareTo(BigDecimal.valueOf(config.getMinPostSelloffReclaimBps())) < 0) return set(EntryDecision.block("WAIT_FOR_PRICE_RECLAIM", imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
-            selloff = null;
-        }
+        // Taker sell pressure, short-term down moves, and post-selloff reclaim are still
+        // measured for visibility, but they no longer block maker entries.
+        selloff = null;
         return set(EntryDecision.allow(imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
     }
 
     public EntryDecision getLastDecision() { return lastDecision.get(); }
+
+    public synchronized EntryDecision evaluateBestBidMaker(long nowMs, BinanceProperties.Strategy config) {
+        pruneTrades(nowMs - config.getSignalLookbackMs());
+        Quote latest = quotes.peekLast();
+        if (latest == null || nowMs - latest.timestampMs() > config.getMarketDataStaleMs()
+                || quotes.size() < 2) {
+            return markBestBidMakerReady();
+        }
+        BigDecimal mid = latest.bid().add(latest.ask()).divide(BigDecimal.valueOf(2), MC);
+        BigDecimal totalQty = latest.bidQty().add(latest.askQty());
+        BigDecimal imbalance = totalQty.signum() == 0 ? BigDecimal.ZERO
+                : latest.bidQty().subtract(latest.askQty()).divide(totalQty, MC);
+        Quote first = quotes.peekFirst();
+        BigDecimal firstMid = first.bid().add(first.ask()).divide(BigDecimal.valueOf(2), MC);
+        BigDecimal returnBps = mid.subtract(firstMid).multiply(BigDecimal.valueOf(10_000)).divide(firstMid, MC);
+        BigDecimal minMid = mid;
+        BigDecimal maxMid = mid;
+        for (Quote quote : quotes) {
+            BigDecimal quoteMid = quote.bid().add(quote.ask()).divide(BigDecimal.valueOf(2), MC);
+            minMid = minMid.min(quoteMid);
+            maxMid = maxMid.max(quoteMid);
+        }
+        BigDecimal rangeBps = maxMid.subtract(minMid).multiply(BigDecimal.valueOf(10_000)).divide(mid, MC);
+        BigDecimal depthImbalance = BigDecimal.ZERO;
+        if (latestDepth != null && nowMs - latestDepth.timestampMs() <= config.getDepthDataStaleMs()) {
+            BigDecimal depthTotal = latestDepth.bidDepth().add(latestDepth.askDepth());
+            if (depthTotal.signum() > 0) {
+                depthImbalance = latestDepth.bidDepth().subtract(latestDepth.askDepth()).divide(depthTotal, MC);
+            }
+        }
+        BigDecimal signedTradeQty = BigDecimal.ZERO;
+        BigDecimal totalTradeQty = BigDecimal.ZERO;
+        for (TradeFlow trade : trades) {
+            signedTradeQty = signedTradeQty.add(trade.signedQuantity());
+            totalTradeQty = totalTradeQty.add(trade.totalQuantity());
+        }
+        BigDecimal takerFlowImbalance = trades.size() < config.getMinTakerFlowSamples()
+                || totalTradeQty.signum() == 0
+                ? BigDecimal.ZERO : signedTradeQty.divide(totalTradeQty, MC);
+
+        selloff = null;
+        return set(new EntryDecision(true, "BEST_BID_MAKER", imbalance, depthImbalance,
+                takerFlowImbalance, returnBps, rangeBps));
+    }
+
     public EntryDecision markBestBidMakerReady() {
         return set(new EntryDecision(true, "BEST_BID_MAKER", BigDecimal.ZERO, BigDecimal.ZERO,
                 BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
@@ -120,6 +168,11 @@ public class MarketSignalEvaluator {
         while (!trades.isEmpty() && trades.peekFirst().timestampMs() < cutoff) trades.removeFirst();
     }
     private EntryDecision set(EntryDecision value) { lastDecision.set(value); return value; }
+
+    private BigDecimal minimumOrderBookNotional(BigDecimal orderAmount, double multiplier) {
+        if (orderAmount == null || orderAmount.signum() <= 0 || multiplier <= 0) return BigDecimal.ZERO;
+        return orderAmount.multiply(BigDecimal.valueOf(multiplier), MC);
+    }
 
     private record Quote(BigDecimal bid, BigDecimal bidQty, BigDecimal ask, BigDecimal askQty, long timestampMs) { }
     private record TradeFlow(BigDecimal signedQuantity, BigDecimal totalQuantity, long timestampMs) { }

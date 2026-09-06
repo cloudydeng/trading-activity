@@ -61,6 +61,9 @@ binance:
     market-data-stale-ms: 1000
     # 五档深度流可能短暂无变化；独立放宽，避免 1 秒边界抖动误撤 Maker 买单。
     depth-data-stale-ms: 2500
+    # 盘口太薄时不挂：买一/卖一与 5 档深度名义额至少覆盖单笔金额的倍数。
+    min-top-book-notional-multiplier: 1.0
+    min-depth-notional-multiplier: 1.0
     # 连接存活与下单行情新鲜度分离：Binance 约每 20 秒发 Ping，45 秒无任何入站帧才重连。
     market-stream-watchdog-ms: 45000
     # ENSO 买一经常小于卖一；允许轻度卖一占优，强卖压仍由成交流和跌幅保护拦截。

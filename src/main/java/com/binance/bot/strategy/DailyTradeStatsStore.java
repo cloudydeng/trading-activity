@@ -38,6 +38,8 @@ public class DailyTradeStatsStore {
     private static final MathContext MC = MathContext.DECIMAL64;
     private static final BigDecimal ONE_MILLION = new BigDecimal("1000000");
     private static final TypeReference<LinkedHashSet<String>> STRING_SET = new TypeReference<>() { };
+    private static final String STRATEGY_OVERRIDE_PREFIX = "strategy_override:";
+    private static final String RUNTIME_STATE_PREFIX = "runtime_state:";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Connection connection;
@@ -471,6 +473,38 @@ public class DailyTradeStatsStore {
                 grossPnl, grossPnl.subtract(economicFee), tradeCount, roundTrips, commissionComplete);
     }
 
+    /** Returns one ten-day volume row per account and symbol, excluding symbols with no fills. */
+    public synchronized List<AccountSymbolVolumeSummary> accountSymbolVolumeSummaries(String accountId,
+                                                                                        String accountAlias,
+                                                                                        int days) {
+        int safeDays = Math.max(1, Math.min(days, 90));
+        String normalizedAccountId = normalizeAccountId(accountId);
+        String normalizedAlias = normalizeAlias(accountAlias);
+        LocalDate end = LocalDate.now(ZoneOffset.UTC);
+        LocalDate start = end.minusDays(safeDays - 1L);
+        Map<String, MutableSymbolSummary> grouped = new LinkedHashMap<>();
+        String sql = "SELECT * FROM daily_trade_stats WHERE account_id=? AND trade_date>=? "
+                + "AND trade_date<=? ORDER BY symbol, trade_date DESC";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, normalizedAccountId);
+            statement.setString(2, start.toString());
+            statement.setString(3, end.toString());
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    MutableStats stats = fromRow(rows);
+                    MutableSymbolSummary summary = grouped.computeIfAbsent(stats.symbol,
+                            symbol -> new MutableSymbolSummary(normalizedAccountId, normalizedAlias,
+                                    start, end, symbol));
+                    summary.add(stats);
+                }
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("读取账户交易对成交量汇总失败", e);
+        }
+        return grouped.values().stream().filter(summary -> summary.total.signum() > 0)
+                .map(MutableSymbolSummary::snapshot).toList();
+    }
+
     public synchronized void saveActiveSymbol(String accountId, String symbol) {
         saveSetting("active_symbol:" + normalizeAccountId(accountId), symbol.toUpperCase(), "保存当前交易对失败");
     }
@@ -484,6 +518,100 @@ public class DailyTradeStatsStore {
         }
     }
 
+    /** Persists only the non-secret strategy profile for one account and symbol. */
+    public synchronized void saveStrategyOverride(String accountId, String symbol,
+                                                   BinanceProperties.SymbolStrategyProfile profile) {
+        if (profile == null) throw new IllegalArgumentException("策略配置不能为空");
+        String normalizedSymbol = normalizeSymbol(symbol);
+        try {
+            saveSetting(STRATEGY_OVERRIDE_PREFIX + normalizeAccountId(accountId) + ":" + normalizedSymbol,
+                    objectMapper.writeValueAsString(profile), "保存策略配置失败");
+        } catch (Exception e) {
+            if (e instanceof IllegalStateException state) throw state;
+            throw new IllegalStateException("保存策略配置失败", e);
+        }
+    }
+
+    /** Loads persisted strategy overrides without ever logging their JSON contents. */
+    public synchronized Map<String, BinanceProperties.SymbolStrategyProfile> loadStrategyOverrides(
+            String accountId) {
+        String prefix = STRATEGY_OVERRIDE_PREFIX + normalizeAccountId(accountId) + ":";
+        Map<String, BinanceProperties.SymbolStrategyProfile> result = new LinkedHashMap<>();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT setting_key, setting_value FROM runtime_setting WHERE setting_key LIKE ? ESCAPE '\\'")) {
+            String escapedPrefix = prefix.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%");
+            statement.setString(1, escapedPrefix + "%");
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    String key = rows.getString("setting_key");
+                    String symbol = key.substring(prefix.length()).toUpperCase();
+                    if (!symbol.matches("[A-Z0-9]{5,20}") || !symbol.endsWith("USDT")) continue;
+                    try {
+                        BinanceProperties.SymbolStrategyProfile profile = objectMapper.readValue(
+                                rows.getString("setting_value"), BinanceProperties.SymbolStrategyProfile.class);
+                        if (profile != null) result.put(symbol, profile);
+                    } catch (Exception invalid) {
+                        log.warn("忽略无效的持久化策略配置: accountId={} symbol={}",
+                                normalizeAccountId(accountId), symbol);
+                    }
+                }
+            }
+            return Map.copyOf(result);
+        } catch (SQLException e) {
+            throw new IllegalStateException("读取持久化策略配置失败", e);
+        }
+    }
+
+    /** Persists non-secret handoff state so a restarted process can resume its own active sell order. */
+    public synchronized void saveRuntimeState(String accountId, String symbol, RuntimeState state) {
+        if (state == null) throw new IllegalArgumentException("运行状态不能为空");
+        String normalizedAccountId = normalizeAccountId(accountId);
+        String normalizedSymbol = normalizeSymbol(symbol);
+        try {
+            saveSetting(RUNTIME_STATE_PREFIX + normalizedAccountId + ":" + normalizedSymbol,
+                    objectMapper.writeValueAsString(state), "保存运行状态失败");
+        } catch (Exception e) {
+            if (e instanceof IllegalStateException stateException) throw stateException;
+            throw new IllegalStateException("保存运行状态失败", e);
+        }
+    }
+
+    public synchronized java.util.Optional<RuntimeState> loadRuntimeState(String accountId, String symbol) {
+        String normalizedAccountId = normalizeAccountId(accountId);
+        String normalizedSymbol = normalizeSymbol(symbol);
+        try {
+            java.util.Optional<String> payload = loadSetting(
+                    RUNTIME_STATE_PREFIX + normalizedAccountId + ":" + normalizedSymbol);
+            if (payload.isEmpty()) return java.util.Optional.empty();
+            RuntimeState state = objectMapper.readValue(payload.get(), RuntimeState.class);
+            if (state == null || !normalizedAccountId.equals(normalizeAccountId(state.accountId()))
+                    || !normalizedSymbol.equals(normalizeSymbol(state.symbol()))) {
+                log.warn("忽略账号或交易对不匹配的运行状态快照: accountId={} symbol={}",
+                        normalizedAccountId, normalizedSymbol);
+                return java.util.Optional.empty();
+            }
+            return java.util.Optional.of(state);
+        } catch (Exception e) {
+            log.warn("忽略无效的运行状态快照: accountId={} symbol={}", normalizedAccountId, normalizedSymbol);
+            return java.util.Optional.empty();
+        }
+    }
+
+    public synchronized void clearRuntimeState(String accountId, String symbol) {
+        String normalizedAccountId = normalizeAccountId(accountId);
+        String normalizedSymbol = normalizeSymbol(symbol);
+        deleteSetting(RUNTIME_STATE_PREFIX + normalizedAccountId + ":" + normalizedSymbol,
+                "清除运行状态失败");
+    }
+
+    private String normalizeSymbol(String symbol) {
+        String normalized = symbol == null ? "" : symbol.trim().toUpperCase();
+        if (!normalized.matches("[A-Z0-9]{5,20}") || !normalized.endsWith("USDT")) {
+            throw new IllegalArgumentException("当前策略仅支持 USDT 现货交易对");
+        }
+        return normalized;
+    }
+
     private void saveSetting(String key, String value, String errorMessage) {
         try (PreparedStatement statement = connection.prepareStatement("""
                 INSERT INTO runtime_setting(setting_key, setting_value, updated_at) VALUES(?, ?, ?)
@@ -492,6 +620,16 @@ public class DailyTradeStatsStore {
             statement.setString(1, key);
             statement.setString(2, value);
             statement.setLong(3, System.currentTimeMillis());
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException(errorMessage, e);
+        }
+    }
+
+    private void deleteSetting(String key, String errorMessage) {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "DELETE FROM runtime_setting WHERE setting_key=?")) {
+            statement.setString(1, key);
             statement.executeUpdate();
         } catch (SQLException e) {
             throw new IllegalStateException(errorMessage, e);
@@ -637,6 +775,69 @@ public class DailyTradeStatsStore {
                                        BigDecimal totalCommissionQuoteEquivalent, BigDecimal costPerMillionVolume,
                                        BigDecimal realizedGrossPnlQuote, BigDecimal netRealizedPnlQuote,
                                        int tradeCount, int roundTrips, boolean commissionConversionComplete) { }
+
+    public record AccountSymbolVolumeSummary(String accountId, String accountAlias, String symbol,
+                                             LocalDate startDate, LocalDate endDate,
+                                             BigDecimal buyVolumeQuote, BigDecimal sellVolumeQuote,
+                                             BigDecimal totalVolumeQuote,
+                                             BigDecimal totalCommissionQuoteEquivalent,
+                                             BigDecimal costPerMillionVolume,
+                                             BigDecimal realizedGrossPnlQuote, BigDecimal netRealizedPnlQuote,
+                                             int tradeCount, int roundTrips,
+                                             boolean commissionConversionComplete) { }
+
+    public record RuntimeState(String accountId, String symbol, String status, Long orderId,
+                               String clientOrderId, String side, BigDecimal orderPrice,
+                               BigDecimal activeSellCoveredQty, BigDecimal feeAwareEntryPriceCeiling,
+                               long orderPlacedAtMs, long updatedAtMs,
+                               BigDecimal feeAwareInitialEntryAnchorPrice,
+                               List<BigDecimal> feeAwareRecentBuyPrices) { }
+
+    private static final class MutableSymbolSummary {
+        private final String accountId;
+        private final String accountAlias;
+        private final LocalDate startDate;
+        private final LocalDate endDate;
+        private final String symbol;
+        private BigDecimal buy = BigDecimal.ZERO;
+        private BigDecimal sell = BigDecimal.ZERO;
+        private BigDecimal total = BigDecimal.ZERO;
+        private BigDecimal commission = BigDecimal.ZERO;
+        private BigDecimal economicFee = BigDecimal.ZERO;
+        private BigDecimal grossPnl = BigDecimal.ZERO;
+        private int tradeCount;
+        private int roundTrips;
+        private boolean commissionComplete = true;
+
+        private MutableSymbolSummary(String accountId, String accountAlias, LocalDate startDate,
+                                     LocalDate endDate, String symbol) {
+            this.accountId = accountId;
+            this.accountAlias = accountAlias;
+            this.startDate = startDate;
+            this.endDate = endDate;
+            this.symbol = symbol;
+        }
+
+        private void add(MutableStats stats) {
+            buy = buy.add(stats.buyVolume);
+            sell = sell.add(stats.sellVolume);
+            total = total.add(stats.totalVolume);
+            commission = commission.add(stats.commissionQuote);
+            economicFee = economicFee.add(stats.economicFeeQuote);
+            grossPnl = grossPnl.add(stats.realizedGrossPnl);
+            tradeCount += stats.tradeCount;
+            roundTrips += stats.roundTrips;
+            commissionComplete &= stats.commissionComplete;
+        }
+
+        private AccountSymbolVolumeSummary snapshot() {
+            BigDecimal cost = commissionComplete && total.signum() > 0
+                    ? commission.multiply(ONE_MILLION).divide(total, MC) : null;
+            return new AccountSymbolVolumeSummary(accountId, accountAlias, symbol, startDate, endDate,
+                    buy, sell, total, commission, cost, grossPnl, grossPnl.subtract(economicFee),
+                    tradeCount, roundTrips, commissionComplete);
+        }
+    }
 
     private final class MutableStats {
         private final LocalDate date;

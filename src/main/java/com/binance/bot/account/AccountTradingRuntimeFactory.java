@@ -17,6 +17,8 @@ import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Component;
 
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 /** Builds fresh stateful objects for each account; only public symbol rules and durable storage are shared. */
@@ -45,7 +47,12 @@ public class AccountTradingRuntimeFactory {
     public AccountTradingRuntime create(AccountCredentials credentials) {
         BinanceProperties accountProperties = copyProperties();
         accountProperties.getStrategy().setOrderAmountsUsdt(credentials.orderAmountsUsdt());
-        accountProperties.getStrategy().setSymbolStrategies(credentials.symbolStrategies());
+        Map<String, BinanceProperties.SymbolStrategyProfile> strategies = new LinkedHashMap<>(
+                credentials.symbolStrategies());
+        Map<String, BinanceProperties.SymbolStrategyProfile> persistedStrategies =
+                dailyStatsStore.loadStrategyOverrides(credentials.accountId());
+        if (persistedStrategies != null) strategies.putAll(persistedStrategies);
+        accountProperties.getStrategy().setSymbolStrategies(strategies);
         dailyStatsStore.loadActiveSymbol(credentials.accountId())
                 .ifPresent(accountProperties.getStrategy()::setSymbol);
 

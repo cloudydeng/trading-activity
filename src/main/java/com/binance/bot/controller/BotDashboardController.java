@@ -34,12 +34,18 @@ public class BotDashboardController {
     public List<TradingAccountManager.AccountSummary> accounts() { return accountManager.summaries(); }
 
     @GetMapping("/api/accounts/stats/summary")
-    public List<DailyTradeStatsStore.AccountVolumeSummary> accountVolumeSummary(
+    public List<DailyTradeStatsStore.AccountSymbolVolumeSummary> accountVolumeSummary(
             @RequestParam(defaultValue = "10") int days) {
         int safeDays = Math.max(1, Math.min(90, days));
         return accountManager.runtimes().stream()
-                .map(runtime -> runtime.engine().getAccountVolumeSummary(safeDays))
-                .filter(summary -> summary.totalVolumeQuote().signum() > 0)
+                .flatMap(runtime -> runtime.engine().getAccountSymbolVolumeSummaries(safeDays).stream())
+                .sorted(Comparator
+                        .comparing(DailyTradeStatsStore.AccountSymbolVolumeSummary::symbol,
+                                String.CASE_INSENSITIVE_ORDER)
+                        .thenComparing(DailyTradeStatsStore.AccountSymbolVolumeSummary::accountAlias,
+                                String.CASE_INSENSITIVE_ORDER)
+                        .thenComparing(DailyTradeStatsStore.AccountSymbolVolumeSummary::accountId,
+                                String.CASE_INSENSITIVE_ORDER))
                 .toList();
     }
 
@@ -104,6 +110,23 @@ public class BotDashboardController {
         Optional<AccountTradingRuntime> runtime = runtime(accountId);
         if (runtime.isEmpty()) return ResponseEntity.notFound().build();
         HighFrequencyVolumeChurnEngine.SymbolSwitchResult result = runtime.get().engine().switchSymbol(request.symbol());
+        return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
+    }
+
+    @PostMapping("/api/accounts/{accountId}/strategy")
+    public ResponseEntity<?> switchStrategy(@PathVariable String accountId,
+                                             @RequestBody StrategySwitchRequest request) {
+        Optional<AccountTradingRuntime> runtime = runtime(accountId);
+        if (runtime.isEmpty()) return ResponseEntity.notFound().build();
+        if (request == null) {
+            return ResponseEntity.badRequest().body(Map.of("accepted", false, "message", "策略配置不能为空"));
+        }
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult result = runtime.get().engine().switchStrategy(
+                request.symbol(), request.mode(), request.orderAmountUsdt(), request.entryTimeoutMs(),
+                request.exitTimeoutMs(), request.makerFeeBps(), request.targetNetProfitBps(),
+                request.entryAnchorWaitMs(), request.maxEntryAnchorDriftBps(),
+                request.maxCumulativeEntryAnchorDriftBps(), request.manualEntryAnchorPrice(),
+                request.postSellEntryDelayMs());
         return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
     }
 
@@ -176,6 +199,12 @@ public class BotDashboardController {
         return runtime.isPresent() ? switchSymbol(runtime.get().accountId(), request) : noAccount();
     }
 
+    @PostMapping("/api/bot/strategy")
+    public ResponseEntity<?> legacyStrategy(@RequestBody StrategySwitchRequest request) {
+        Optional<AccountTradingRuntime> runtime = defaultRuntime();
+        return runtime.isPresent() ? switchStrategy(runtime.get().accountId(), request) : noAccount();
+    }
+
     @PostMapping("/api/bot/liquidate")
     public ResponseEntity<?> legacyLiquidate(@RequestBody LiquidationRequest request) {
         Optional<AccountTradingRuntime> runtime = defaultRuntime();
@@ -194,6 +223,9 @@ public class BotDashboardController {
                 Map.entry("accountStreamReady", engine.isAccountStreamReady()),
                 Map.entry("symbol", engine.getSymbol()),
                 Map.entry("strategyMode", engine.getStrategyMode()),
+                Map.entry("strategyProfile", engine.getStrategyProfile()),
+                Map.entry("feeAwareRecommendedEntryAnchorPrice", engine.getFeeAwareRecommendedEntryAnchorPrice()),
+                Map.entry("strategyChangePending", engine.hasPendingStrategyChange()),
                 Map.entry("orderAmountUsdt", engine.getOrderAmountUsdt()),
                 Map.entry("totalVolumeUsdt", engine.getTotalVolumeUsdt().get()),
                 Map.entry("roundTripsCompleted", engine.getRoundTripsCompleted().get()),
@@ -284,6 +316,13 @@ public class BotDashboardController {
 
     public record LiquidationRequest(String password, String confirmation) { }
     public record SymbolSwitchRequest(String symbol) { }
+    public record StrategySwitchRequest(String symbol, String mode, BigDecimal orderAmountUsdt,
+                                        Long entryTimeoutMs, Long exitTimeoutMs, BigDecimal makerFeeBps,
+                                        BigDecimal targetNetProfitBps, Long entryAnchorWaitMs,
+                                        BigDecimal maxEntryAnchorDriftBps,
+                                        BigDecimal maxCumulativeEntryAnchorDriftBps,
+                                        BigDecimal manualEntryAnchorPrice,
+                                        Long postSellEntryDelayMs) { }
     public record AccountSnapshot(String accountId, String symbol, String apiKeyAlias, String accountType,
                                   boolean canTrade, long accountUpdateTimeMs, List<BalanceView> balances,
                                   List<OrderView> filledOrders, List<OrderView> openOrders, int usedApiWeight1m) { }

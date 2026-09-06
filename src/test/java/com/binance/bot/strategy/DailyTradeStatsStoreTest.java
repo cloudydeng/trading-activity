@@ -10,6 +10,7 @@ import java.sql.DriverManager;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -144,6 +145,85 @@ class DailyTradeStatsStoreTest {
         assertDecimal("8.00", summary.sellVolumeQuote());
         assertEquals(2, summary.tradeCount());
         store.close();
+    }
+
+    @Test
+    void accountSymbolVolumeSummariesReturnOneRowPerSymbol() {
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
+        long now = System.currentTimeMillis();
+        store.recordTrade("account-a", "huaqin-bot", "ENSOUSDT", 61, 6101, "BUY",
+                new BigDecimal("10"), new BigDecimal("6.00"), BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, now);
+        store.recordTrade("account-a", "huaqin-bot", "BTCUSDT", 62, 6201, "BUY",
+                new BigDecimal("1"), new BigDecimal("8.00"), BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, now);
+
+        List<DailyTradeStatsStore.AccountSymbolVolumeSummary> rows = store.accountSymbolVolumeSummaries(
+                "account-a", "huaqin-bot", 10);
+
+        assertEquals(2, rows.size());
+        assertEquals(List.of("BTCUSDT", "ENSOUSDT"), rows.stream()
+                .map(DailyTradeStatsStore.AccountSymbolVolumeSummary::symbol).toList());
+        assertDecimal("8.00", rows.get(0).totalVolumeQuote());
+        assertDecimal("6.00", rows.get(1).totalVolumeQuote());
+        store.close();
+    }
+
+    @Test
+    void persistsAndLoadsRuntimeStrategyOverridesWithoutSecrets() {
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
+        BinanceProperties.SymbolStrategyProfile profile = new BinanceProperties.SymbolStrategyProfile();
+        profile.setMode("FEE_AWARE_MAKER");
+        profile.setOrderAmountUsdt(new BigDecimal("6"));
+        profile.setEntryTimeoutMs(20_000L);
+        profile.setExitTimeoutMs(120_000L);
+        profile.setMakerFeeBps(new BigDecimal("7.5"));
+        profile.setTargetNetProfitBps(new BigDecimal("10"));
+        profile.setEntryAnchorWaitMs(1_800_000L);
+        profile.setMaxEntryAnchorDriftBps(new BigDecimal("8"));
+        profile.setMaxCumulativeEntryAnchorDriftBps(new BigDecimal("5"));
+        profile.setManualEntryAnchorPrice(new BigDecimal("0.5900"));
+
+        store.saveStrategyOverride("account-a", "ensousdt", profile);
+
+        Map<String, BinanceProperties.SymbolStrategyProfile> loaded =
+                store.loadStrategyOverrides("account-a");
+        assertEquals("FEE_AWARE_MAKER", loaded.get("ENSOUSDT").getMode());
+        assertDecimal("6", loaded.get("ENSOUSDT").getOrderAmountUsdt());
+        assertEquals(20_000L, loaded.get("ENSOUSDT").getEntryTimeoutMs());
+        assertEquals(120_000L, loaded.get("ENSOUSDT").getExitTimeoutMs());
+        assertDecimal("7.5", loaded.get("ENSOUSDT").getMakerFeeBps());
+        assertDecimal("10", loaded.get("ENSOUSDT").getTargetNetProfitBps());
+        assertEquals(1_800_000L, loaded.get("ENSOUSDT").getEntryAnchorWaitMs());
+        assertDecimal("8", loaded.get("ENSOUSDT").getMaxEntryAnchorDriftBps());
+        assertDecimal("5", loaded.get("ENSOUSDT").getMaxCumulativeEntryAnchorDriftBps());
+        assertDecimal("0.5900", loaded.get("ENSOUSDT").getManualEntryAnchorPrice());
+        store.close();
+    }
+
+    @Test
+    void persistsLoadsAndClearsRuntimeStateAcrossRestart() {
+        BinanceProperties properties = properties();
+        DailyTradeStatsStore first = new DailyTradeStatsStore(properties);
+        first.saveRuntimeState("account-a", "ENSOUSDT", new DailyTradeStatsStore.RuntimeState(
+                "account-a", "ENSOUSDT", "SELLING", 77L, "ta-a-S-1", "SELL",
+                new BigDecimal("0.6013"), new BigDecimal("10"), new BigDecimal("0.6000"),
+                1234L, 5678L, new BigDecimal("0.5990"),
+                List.of(new BigDecimal("0.5980"), new BigDecimal("0.6000"))));
+        first.close();
+
+        DailyTradeStatsStore restarted = new DailyTradeStatsStore(properties);
+        DailyTradeStatsStore.RuntimeState state = restarted.loadRuntimeState("account-a", "ENSOUSDT").orElseThrow();
+        assertEquals(77L, state.orderId());
+        assertEquals("ta-a-S-1", state.clientOrderId());
+        assertDecimal("0.6013", state.orderPrice());
+        assertDecimal("0.6000", state.feeAwareEntryPriceCeiling());
+        assertDecimal("0.5990", state.feeAwareInitialEntryAnchorPrice());
+        assertEquals(2, state.feeAwareRecentBuyPrices().size());
+
+        restarted.clearRuntimeState("account-a", "ENSOUSDT");
+        assertEquals(true, restarted.loadRuntimeState("account-a", "ENSOUSDT").isEmpty());
+        restarted.close();
     }
 
     @Test

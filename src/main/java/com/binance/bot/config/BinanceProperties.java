@@ -50,13 +50,27 @@ public class BinanceProperties {
 
     @Data
     public static class SymbolStrategyProfile {
-        /** CURRENT keeps the existing fee-aware exit logic; BID_ASK_MAKER uses current bid/ask. */
-        private String mode = "CURRENT";
+        /** BID_ASK_MAKER uses bid/ask; FEE_AWARE_MAKER protects fees and is the default. */
+        private String mode = "FEE_AWARE_MAKER";
         private BigDecimal orderAmountUsdt;
         /** Entry timeout after which a stale bid is canceled; same bid remains working. */
         private Long entryTimeoutMs;
         /** Exit timeout before canceling and re-placing at the latest ask. */
         private Long exitTimeoutMs;
+        /** Optional manual maker fee override in bps; null reads the account/symbol rate from Binance. */
+        private BigDecimal makerFeeBps;
+        /** Legacy runtime field retained for API compatibility; FEE_AWARE_MAKER ignores profit targets. */
+        private BigDecimal targetNetProfitBps;
+        /** Wait before allowing a fee-aware entry above the previous buy anchor. */
+        private Long entryAnchorWaitMs = 1_800_000L;
+        /** Maximum allowed fee-aware entry drift above the previous buy anchor after waiting. */
+        private BigDecimal maxEntryAnchorDriftBps = BigDecimal.ZERO;
+        /** Total drift cap from the recent-five-buy average anchor. Null follows maxEntryAnchorDriftBps. */
+        private BigDecimal maxCumulativeEntryAnchorDriftBps;
+        /** Optional manual cumulative anchor price. Null lets the runtime derive it from recent buys. */
+        private BigDecimal manualEntryAnchorPrice;
+        /** BID_ASK_MAKER waits this long after a flat sell before opening the next buy. */
+        private Long postSellEntryDelayMs = 60_000L;
     }
 
     @Data
@@ -84,6 +98,10 @@ public class BinanceProperties {
         private long marketDataStaleMs = 1000;
         /** Partial-depth frames use an independent freshness window to avoid edge jitter. */
         private long depthDataStaleMs = 2500;
+        /** Minimum top-of-book quote notional as a multiple of the configured single order amount. */
+        private double minTopBookNotionalMultiplier = 1.0;
+        /** Minimum 5-level book quote notional as a multiple of the configured single order amount. */
+        private double minDepthNotionalMultiplier = 1.0;
         /**
          * Connection-liveness timeout. Binance sends WebSocket ping frames about every 20 seconds,
          * so this must be substantially longer than the trading-data freshness threshold.
