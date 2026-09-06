@@ -80,7 +80,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicReference<BigDecimal> feeAwareInitialEntryAnchorPrice = new AtomicReference<>();
     private final ArrayDeque<BigDecimal> feeAwareRecentBuyPrices = new ArrayDeque<>();
     private final AtomicLong feeAwareEntryCeilingBlockedSince = new AtomicLong(0);
-    private final AtomicLong bidAskNextEntryAllowedAtMs = new AtomicLong(0);
+    private final AtomicLong postSellNextEntryAllowedAtMs = new AtomicLong(0);
     private final AtomicReference<String> activeClientOrderId = new AtomicReference<>();
     private final AtomicReference<Long> replacingOrderId = new AtomicReference<>();
     @Getter private final AtomicReference<String> statusReason = new AtomicReference<>("等待启动");
@@ -709,7 +709,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     }
                     updateDustState(residual, "残余库存等待后续 BUY 合并");
                 }
-                if (bidAskPostSellEntryDelayActive(now)) return;
+                if (postSellEntryDelayActive(now)) return;
                 MarketSignalEvaluator.EntryDecision decision = entryDecisionForStrategy(now);
                 activeEntrySignalReason.set(decision.reason());
                 activeEntryContext.set(marketSignalEvaluator.getMarketContext(now));
@@ -1802,9 +1802,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         rememberFeeAwareEntryPriceCeiling(rule);
         resetEntryTarget();
         persistRuntimeState(false);
-        long postSellDelayMs = scheduleBidAskPostSellEntryDelay();
+        long postSellDelayMs = schedulePostSellEntryDelay();
         if (isRunning.get() && postSellDelayMs > 0) {
-            statusReason.set("BID_ASK_MAKER 卖单已成交，等待 "
+            statusReason.set(getStrategyMode() + " 卖单已成交，等待 "
                     + durationLabel(postSellDelayMs) + " 后再挂下一笔买单");
         } else {
             statusReason.set(isRunning.get() ? "运行中，等待入场信号"
@@ -1989,7 +1989,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             feeAwareRecentBuyPrices.clear();
         }
         feeAwareEntryCeilingBlockedSince.set(0);
-        bidAskNextEntryAllowedAtMs.set(0);
+        postSellNextEntryAllowedAtMs.set(0);
         commissionPriceCache.clear();
         makerSellFeeRateCache.clear();
         lastBestBid.set(null);
@@ -2394,35 +2394,35 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 ? profile.getExitTimeoutMs() : properties.getStrategy().getLimitSellTimeoutMs();
     }
 
-    private long bidAskPostSellEntryDelayMs() {
+    private long postSellEntryDelayMs() {
         var profile = symbolStrategy(properties.getStrategy().getSymbol());
         Long delayMs = profile == null ? null : profile.getPostSellEntryDelayMs();
         if (delayMs == null) delayMs = 60_000L;
         return Math.max(0, Math.min(86_400_000L, delayMs));
     }
 
-    private long scheduleBidAskPostSellEntryDelay() {
-        if (!usesBidAskMakerStrategy() || !isRunning.get()) {
-            bidAskNextEntryAllowedAtMs.set(0);
+    private long schedulePostSellEntryDelay() {
+        if (!usesBestBidEntryStrategy() || !isRunning.get()) {
+            postSellNextEntryAllowedAtMs.set(0);
             return 0;
         }
-        long delayMs = bidAskPostSellEntryDelayMs();
-        bidAskNextEntryAllowedAtMs.set(delayMs > 0 ? System.currentTimeMillis() + delayMs : 0);
+        long delayMs = postSellEntryDelayMs();
+        postSellNextEntryAllowedAtMs.set(delayMs > 0 ? System.currentTimeMillis() + delayMs : 0);
         return delayMs;
     }
 
-    private boolean bidAskPostSellEntryDelayActive(long nowMs) {
-        if (!usesBidAskMakerStrategy()) {
-            bidAskNextEntryAllowedAtMs.set(0);
+    private boolean postSellEntryDelayActive(long nowMs) {
+        if (!usesBestBidEntryStrategy()) {
+            postSellNextEntryAllowedAtMs.set(0);
             return false;
         }
-        long allowedAtMs = bidAskNextEntryAllowedAtMs.get();
+        long allowedAtMs = postSellNextEntryAllowedAtMs.get();
         if (allowedAtMs <= 0) return false;
         if (nowMs >= allowedAtMs) {
-            bidAskNextEntryAllowedAtMs.compareAndSet(allowedAtMs, 0);
+            postSellNextEntryAllowedAtMs.compareAndSet(allowedAtMs, 0);
             return false;
         }
-        statusReason.set("BID_ASK_MAKER 卖出后冷却中，剩余 "
+        statusReason.set(getStrategyMode() + " 卖出后冷却中，剩余 "
                 + durationLabel(allowedAtMs - nowMs) + " 再挂下一笔买单");
         return true;
     }

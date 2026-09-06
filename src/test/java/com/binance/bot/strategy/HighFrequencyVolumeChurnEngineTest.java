@@ -1006,7 +1006,42 @@ class HighFrequencyVolumeChurnEngineTest {
                 any(), any(), isNull(), anyString());
         assertTrue(engine.getStatusReason().get().contains("卖出后冷却中"));
 
-        ((AtomicLong) ReflectionTestUtils.getField(engine, "bidAskNextEntryAllowedAtMs"))
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "postSellNextEntryAllowedAtMs"))
+                .set(System.currentTimeMillis() - 1);
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                decimalEquals("0.6000"), decimalEquals("10"), isNull(), anyString()))
+                .thenReturn(mapper.readTree("{\"orderId\":101}"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+
+        verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                decimalEquals("0.6000"), decimalEquals("10"), isNull(), anyString());
+        assertEquals(101L, atomic("activeOrderId", Long.class).get());
+    }
+
+    @Test
+    void feeAwareMakerAlsoWaitsAfterFlatSellBeforeOpeningNextBuy() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO,
+                1_800_000L, BigDecimal.ZERO, BigDecimal.ZERO, null, 75_000L);
+        engine.getIsRunning().set(true);
+        engine.getLiveArmed().set(true);
+
+        ReflectionTestUtils.invokeMethod(engine, "completeFlatExit", false);
+
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+        assertTrue(engine.getStatusReason().get().contains("等待 75 秒"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+
+        verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                any(), any(), isNull(), anyString());
+        assertTrue(engine.getStatusReason().get().contains("卖出后冷却中"));
+
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "postSellNextEntryAllowedAtMs"))
                 .set(System.currentTimeMillis() - 1);
         when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
                 decimalEquals("0.6000"), decimalEquals("10"), isNull(), anyString()))
