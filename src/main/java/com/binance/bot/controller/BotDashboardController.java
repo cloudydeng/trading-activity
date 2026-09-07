@@ -33,6 +33,31 @@ public class BotDashboardController {
     @GetMapping("/api/accounts")
     public List<TradingAccountManager.AccountSummary> accounts() { return accountManager.summaries(); }
 
+    @GetMapping("/api/accounts/open-orders")
+    public Map<String, Object> allOpenOrders() {
+        List<OpenOrderView> orders = new ArrayList<>();
+        Map<String, String> errors = new LinkedHashMap<>();
+        accountManager.runtimes().stream()
+                .sorted(Comparator.comparing(AccountTradingRuntime::alias, String.CASE_INSENSITIVE_ORDER)
+                        .thenComparing(AccountTradingRuntime::accountId, String.CASE_INSENSITIVE_ORDER))
+                .forEach(runtime -> {
+                    JsonNode openOrders = runtime.tradeClient().getAllOpenOrders();
+                    if (openOrders == null) {
+                        errors.put(runtime.accountId(), "活动订单读取失败");
+                        return;
+                    }
+                    if (!openOrders.isArray()) return;
+                    for (JsonNode order : openOrders) {
+                        orders.add(openOrderView(runtime, order));
+                    }
+                });
+        orders.sort(Comparator.comparingLong(OpenOrderView::timeMs).reversed()
+                .thenComparing(OpenOrderView::accountAlias, String.CASE_INSENSITIVE_ORDER)
+                .thenComparing(OpenOrderView::symbol, String.CASE_INSENSITIVE_ORDER));
+        return Map.of("orders", List.copyOf(orders), "errors", Map.copyOf(errors),
+                "updatedAtMs", System.currentTimeMillis());
+    }
+
     @GetMapping("/api/accounts/stats/summary")
     public List<DailyTradeStatsStore.AccountSymbolVolumeSummary> accountVolumeSummary(
             @RequestParam(defaultValue = "10") int days) {
@@ -92,23 +117,11 @@ public class BotDashboardController {
     @PostMapping("/api/accounts/{accountId}/stop")
     public ResponseEntity<?> stop(@PathVariable String accountId) {
         return runtime(accountId).map(value -> value.stop()
-                        ? ResponseEntity.ok(Map.of("accepted", true, "message", "引擎已停止并解除 LIVE"))
+                        ? ResponseEntity.ok(Map.of("accepted", true, "message", "引擎已停止"))
                         : ResponseEntity.status(409).body(Map.of("accepted", false,
                         "message", value.engine().getStatusReason().get())))
                 .orElseGet(() -> ResponseEntity.notFound().build());
     }
-
-    @PostMapping({"/api/accounts/{accountId}/arm", "/api/accounts/{accountId}/live/arm"})
-    public ResponseEntity<?> arm(@PathVariable String accountId) {
-        return runtime(accountId).map(value -> value.arm()
-                        ? ResponseEntity.ok(Map.of("accepted", true, "message", "LIVE 已为当前账号临时解锁"))
-                        : ResponseEntity.status(409).body(Map.of("accepted", false,
-                        "message", "LIVE 双开关未配置或当前账号成交流未就绪")))
-                .orElseGet(() -> ResponseEntity.notFound().build());
-    }
-
-    @PostMapping({"/api/accounts/{accountId}/disarm", "/api/accounts/{accountId}/live/disarm"})
-    public ResponseEntity<?> disarm(@PathVariable String accountId) { return stop(accountId); }
 
     @PostMapping("/api/accounts/{accountId}/symbol")
     public ResponseEntity<?> switchSymbol(@PathVariable String accountId, @RequestBody SymbolSwitchRequest request) {
@@ -149,9 +162,6 @@ public class BotDashboardController {
     @PostMapping("/api/accounts/start-all")
     public Map<String, TradingAccountManager.OperationResult> startAll() { return accountManager.startAll(); }
 
-    @PostMapping("/api/accounts/arm-all")
-    public Map<String, TradingAccountManager.OperationResult> armAll() { return accountManager.armAll(); }
-
     @PostMapping("/api/accounts/stop-all")
     public Map<String, TradingAccountManager.OperationResult> stopAll() { return accountManager.stopAll(); }
 
@@ -189,15 +199,6 @@ public class BotDashboardController {
         return runtime.isPresent() ? stop(runtime.get().accountId()) : noAccount();
     }
 
-    @PostMapping("/api/bot/live/arm")
-    public ResponseEntity<?> legacyArm() {
-        Optional<AccountTradingRuntime> runtime = defaultRuntime();
-        return runtime.isPresent() ? arm(runtime.get().accountId()) : noAccount();
-    }
-
-    @PostMapping("/api/bot/live/disarm")
-    public ResponseEntity<?> legacyDisarm() { return legacyStop(); }
-
     @PostMapping("/api/bot/symbol")
     public ResponseEntity<?> legacySymbol(@RequestBody SymbolSwitchRequest request) {
         Optional<AccountTradingRuntime> runtime = defaultRuntime();
@@ -225,7 +226,6 @@ public class BotDashboardController {
                 Map.entry("status", engine.getCurrentStatus().get().name()),
                 Map.entry("statusReason", engine.getStatusReason().get()),
                 Map.entry("executionMode", engine.getExecutionMode()),
-                Map.entry("liveArmed", engine.getLiveArmed().get()),
                 Map.entry("accountStreamReady", engine.isAccountStreamReady()),
                 Map.entry("symbol", engine.getSymbol()),
                 Map.entry("strategyMode", engine.getStrategyMode()),
@@ -241,8 +241,6 @@ public class BotDashboardController {
                 Map.entry("marketData", engine.getMarketDataSnapshot()),
                 Map.entry("entrySignal", engine.getLastEntryDecision()),
                 Map.entry("sellability", engine.getSellabilitySnapshot()),
-                Map.entry("marketBaseline", engine.getBaselineOutcomes()),
-                Map.entry("qualifiedSignals", engine.getQualifiedSignalOutcomes()),
                 Map.entry("risk", remoteToday.risk()),
                 Map.entry("accounting", remoteToday.accounting()),
                 Map.entry("dailyStats", remoteToday.dailyStats()),
@@ -314,6 +312,14 @@ public class BotDashboardController {
                 order.path("time").asLong(order.path("updateTime").asLong(0)));
     }
 
+    private OpenOrderView openOrderView(AccountTradingRuntime runtime, JsonNode order) {
+        return new OpenOrderView(runtime.accountId(), runtime.alias(), order.path("symbol").asText(""),
+                order.path("side").asText(""), order.path("type").asText(""),
+                order.path("status").asText(""), order.path("price").asText("0"),
+                order.path("origQty").asText("0"), order.path("orderId").asLong(0),
+                order.path("time").asLong(order.path("updateTime").asLong(0)));
+    }
+
     private boolean passwordMatches(String provided) {
         String expected = properties.getSecurity().getAdminPassword();
         return expected != null && provided != null && MessageDigest.isEqual(
@@ -339,4 +345,6 @@ public class BotDashboardController {
     public record BalanceView(String asset, String free, String locked, String total) { }
     public record OrderView(long orderId, String clientOrderId, String side, String type, String status,
                             String price, String originalQty, String executedQty, String quoteQty, long timeMs) { }
+    public record OpenOrderView(String accountId, String accountAlias, String symbol, String side, String type,
+                                String status, String price, String originalQty, long orderId, long timeMs) { }
 }

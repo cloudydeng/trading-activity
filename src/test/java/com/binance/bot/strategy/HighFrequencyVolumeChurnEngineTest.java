@@ -67,7 +67,6 @@ class HighFrequencyVolumeChurnEngineTest {
         secondary.setApiKey("second-api-key");
         secondary.setSecretKey("second-secret-key");
         properties.getApi().getProfiles().put("secondary", secondary);
-        properties.getStrategy().setExecutionMode("LIVE");
         properties.getStrategy().setLiveTradingEnabled(true);
         properties.getStrategy().setSymbol("ENSOUSDT");
         properties.getStrategy().setOrderAmountUsdt(new BigDecimal("6"));
@@ -110,12 +109,10 @@ class HighFrequencyVolumeChurnEngineTest {
 
     @Test
     void refusesToStartWhenAccountStreamIsNotReady() {
-        engine.getLiveArmed().set(true);
         userDataStreamReady.set(false);
 
         assertFalse(engine.startTrading());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.HALTED, engine.getCurrentStatus().get());
-        assertFalse(engine.getLiveArmed().get());
         verify(tradeService, never()).getFreeAssetBalance(anyString());
     }
 
@@ -134,14 +131,12 @@ class HighFrequencyVolumeChurnEngineTest {
     @Test
     void streamLossStopsAndDisarmsWithoutAutomaticResume() {
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
         atomic("activeOrderId", Long.class).set(77L);
 
         ReflectionTestUtils.invokeMethod(engine, "handleUserStreamLoss", "socket closed");
 
         assertFalse(engine.getIsRunning().get());
-        assertFalse(engine.getLiveArmed().get());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.HALTED, engine.getCurrentStatus().get());
         verify(tradeService).cancelOrder("ENSOUSDT", 77L);
     }
@@ -154,16 +149,13 @@ class HighFrequencyVolumeChurnEngineTest {
                 new MarketSignalEvaluator(), new PostFillOutcomeTracker(), new TradingRiskGuard(),
                 dailyStatsStore, mock(TradeNotificationService.class));
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
         engineB.getIsRunning().set(true);
-        engineB.getLiveArmed().set(true);
 
         engine.handleUserStreamLoss("account A disconnected");
 
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.HALTED, engine.getCurrentStatus().get());
         assertFalse(engine.getIsRunning().get());
         assertTrue(engineB.getIsRunning().get());
-        assertTrue(engineB.getLiveArmed().get());
     }
 
     @Test
@@ -204,7 +196,6 @@ class HighFrequencyVolumeChurnEngineTest {
         assertTrue(result.accepted());
         assertEquals("BTCUSDT", engine.getSymbol());
         assertFalse(engine.getIsRunning().get());
-        assertFalse(engine.getLiveArmed().get());
         verify(dailyStatsStore).saveActiveSymbol("test-account", "BTCUSDT");
         verify(tradeService).getOpenOrders("ENSOUSDT");
         verify(tradeService).getOpenOrders("BTCUSDT");
@@ -214,8 +205,6 @@ class HighFrequencyVolumeChurnEngineTest {
     void startTradingIgnoresDurableLedgerPositionWhenExchangeIsFlat() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         long now = System.currentTimeMillis();
-        engine.getLiveArmed().set(true);
-        stubObservationSummaries();
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
                 .set(now);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
@@ -629,8 +618,6 @@ class HighFrequencyVolumeChurnEngineTest {
         long now = System.currentTimeMillis();
         engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO);
-        engine.getLiveArmed().set(true);
-        stubObservationSummaries();
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
                 .set(now);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
@@ -667,8 +654,6 @@ class HighFrequencyVolumeChurnEngineTest {
         long now = System.currentTimeMillis();
         engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L);
-        engine.getLiveArmed().set(true);
-        stubObservationSummaries();
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
                 .set(now);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
@@ -703,8 +688,6 @@ class HighFrequencyVolumeChurnEngineTest {
         long now = System.currentTimeMillis();
         engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO);
-        engine.getLiveArmed().set(true);
-        stubObservationSummaries();
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
                 .set(now);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
@@ -740,8 +723,6 @@ class HighFrequencyVolumeChurnEngineTest {
         long now = System.currentTimeMillis();
         engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L);
-        engine.getLiveArmed().set(true);
-        stubObservationSummaries();
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
                 .set(now);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
@@ -856,13 +837,11 @@ class HighFrequencyVolumeChurnEngineTest {
     @Test
     void unknownTradeEventFailsClosed() {
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
 
         orderUpdate(999L, "external-order", "BUY", "TRADE", "FILLED",
                 "10", "0.60", "0", "USDT");
 
         assertFalse(engine.getIsRunning().get());
-        assertFalse(engine.getLiveArmed().get());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.HALTED, engine.getCurrentStatus().get());
     }
 
@@ -1065,7 +1044,6 @@ class HighFrequencyVolumeChurnEngineTest {
     @Test
     void priceDropNeverTriggersAutomaticMarketSell() {
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
         atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
         atomic("activeOrderId", Long.class).set(77L);
@@ -1106,7 +1084,6 @@ class HighFrequencyVolumeChurnEngineTest {
         engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L);
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
         atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
         atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
@@ -1164,7 +1141,6 @@ class HighFrequencyVolumeChurnEngineTest {
         engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L, null, null, null, null, null, null, 90_000L);
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
 
         ReflectionTestUtils.invokeMethod(engine, "completeFlatExit", false);
 
@@ -1199,7 +1175,6 @@ class HighFrequencyVolumeChurnEngineTest {
                 20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO,
                 1_800_000L, BigDecimal.ZERO, BigDecimal.ZERO, null, 75_000L);
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
 
         ReflectionTestUtils.invokeMethod(engine, "completeFlatExit", false);
 
@@ -1233,7 +1208,6 @@ class HighFrequencyVolumeChurnEngineTest {
         engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L);
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
         atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
         atomic("activeOrderId", Long.class).set(77L);
@@ -1315,7 +1289,6 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(90L, result.orderId());
         assertEquals(0, new BigDecimal("7.0").compareTo(result.quantity()));
         assertFalse(engine.getIsRunning().get());
-        assertFalse(engine.getLiveArmed().get());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
         verify(tradeService).placeMarketSell(eq("ENSOUSDT"), decimalEquals("7.0"), anyString());
     }
@@ -1347,7 +1320,6 @@ class HighFrequencyVolumeChurnEngineTest {
     void delayedSellTradesContinueRunningAfterThreeRetriesWhenExchangeIsFlat() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
         atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
         ((TradingRiskGuard) ReflectionTestUtils.getField(engine, "riskGuard"))
@@ -1370,7 +1342,6 @@ class HighFrequencyVolumeChurnEngineTest {
         assertNull(atomic("activeOrderId", Long.class).get());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
         assertTrue(engine.getIsRunning().get());
-        assertTrue(engine.getLiveArmed().get());
         assertEquals(0, engine.getRiskSnapshot().positionQty().signum());
         assertEquals("运行中，等待入场信号", engine.getStatusReason().get());
     }
@@ -1434,9 +1405,8 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void staleMarketOnStartReconnectsWithoutDiscardingOperatorArm() {
+    void staleMarketOnStartReconnectsWithoutAutomaticStart() {
         WebSocket socket = mock(WebSocket.class);
-        engine.getLiveArmed().set(true);
         userDataStreamReady.set(true);
         atomic("activeMarketWebSocket", WebSocket.class).set(socket);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
@@ -1449,7 +1419,6 @@ class HighFrequencyVolumeChurnEngineTest {
         assertFalse(engine.startTrading());
 
         verify(socket).abort();
-        assertTrue(engine.getLiveArmed().get());
         assertTrue(engine.getStatusReason().get().contains("正在重连"));
     }
 
@@ -1511,7 +1480,6 @@ class HighFrequencyVolumeChurnEngineTest {
     @Test
     void makerEntryTimeoutCancelsWithoutIocFallback() throws Exception {
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
         atomic("activeOrderId", Long.class).set(42L);
         atomic("activeClientOrderId", String.class).set("churn-BUY-maker");
@@ -1539,7 +1507,6 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
         assertNull(atomic("activeOrderId", Long.class).get());
         assertTrue(engine.getIsRunning().get());
-        assertTrue(engine.getLiveArmed().get());
     }
 
     @Test
@@ -1705,10 +1672,4 @@ class HighFrequencyVolumeChurnEngineTest {
                 new BigDecimal(quantity), new BigDecimal(cost), 0, 0, true);
     }
 
-    private void stubObservationSummaries() {
-        PostFillOutcomeTracker tracker = (PostFillOutcomeTracker) ReflectionTestUtils.getField(
-                engine, "postFillOutcomeTracker");
-        when(tracker.getBaselineSummary()).thenReturn(PostFillOutcomeTracker.OutcomeSummary.empty(0));
-        when(tracker.getQualifiedSignalSummary()).thenReturn(PostFillOutcomeTracker.OutcomeSummary.empty(0));
-    }
 }

@@ -37,18 +37,6 @@ public class PostFillOutcomeTracker {
         recordEntry(entryPrice, entryReason, entryContext, "FILLED", timestampMs);
     }
 
-    /** A signal-only paper entry. It intentionally does not claim that a real limit order would have filled. */
-    public synchronized void recordPaperCandidate(BigDecimal entryPrice, String entryReason,
-                                                  MarketSignalEvaluator.MarketContext entryContext, long timestampMs) {
-        recordEntry(entryPrice, entryReason, entryContext, "PAPER_CANDIDATE", timestampMs);
-    }
-
-    /** Unconditional OBSERVE-only reference point for measuring the market, not an executable order. */
-    public synchronized void recordMarketBaseline(BigDecimal entryPrice, String decisionReason,
-                                                  MarketSignalEvaluator.MarketContext entryContext, long timestampMs) {
-        recordEntry(entryPrice, decisionReason, entryContext, "MARKET_BASELINE", timestampMs);
-    }
-
     private void recordEntry(BigDecimal entryPrice, String entryReason, MarketSignalEvaluator.MarketContext entryContext,
                              String entryType, long timestampMs) {
         if (entryPrice == null || entryPrice.signum() <= 0) return;
@@ -74,9 +62,6 @@ public class PostFillOutcomeTracker {
     public synchronized OutcomeSummary getSummary() {
         return summarize(null);
     }
-
-    public synchronized OutcomeSummary getBaselineSummary() { return summarize("MARKET_BASELINE"); }
-    public synchronized OutcomeSummary getQualifiedSignalSummary() { return summarize("PAPER_CANDIDATE"); }
 
     /** Prevents price observations from two symbols being combined after a hot switch. */
     public synchronized void reset() {

@@ -83,7 +83,7 @@ public class TradingAccountManager {
                 runtime.initialize();
                 added.add(accountId);
                 initializationErrors.remove(accountId);
-                log.info("[accountId={} alias={}] 热加载账户运行时完成（默认停止且 LIVE 锁定）",
+                log.info("[accountId={} alias={}] 热加载账户运行时完成（默认停止）",
                         accountId, candidates.get(accountId).alias());
             } catch (Exception e) {
                 if (runtime != null) runtimes.remove(accountId, runtime);
@@ -168,10 +168,10 @@ public class TradingAccountManager {
         List<AccountSummary> result = new ArrayList<>();
         runtimes().forEach(runtime -> result.add(new AccountSummary(runtime.accountId(), runtime.alias(),
                 runtime.initialized(), runtime.engine().getIsRunning().get(),
-                runtime.engine().getLiveArmed().get(), runtime.engine().getCurrentStatus().get().name(),
+                runtime.engine().getCurrentStatus().get().name(),
                 runtime.engine().getSymbol(), runtime.engine().isAccountStreamReady(), null)));
         initializationErrors.forEach((id, error) -> result.add(new AccountSummary(id, id, false, false,
-                false, "INITIALIZATION_FAILED", null, false, error)));
+                "INITIALIZATION_FAILED", null, false, error)));
         result.sort(Comparator.comparing(AccountSummary::accountId));
         return result;
     }
@@ -186,23 +186,6 @@ public class TradingAccountManager {
             } catch (Exception e) {
                 results.put(runtime.accountId(), new OperationResult(false, safeMessage(e)));
                 log.error("[accountId={}] 批量启动失败；继续处理其他账号: {}",
-                        runtime.accountId(), safeMessage(e));
-            }
-        });
-        initializationErrors.forEach((id, error) -> results.put(id, new OperationResult(false, error)));
-        return results;
-    }
-
-    public Map<String, OperationResult> armAll() {
-        Map<String, OperationResult> results = new LinkedHashMap<>();
-        runtimes().forEach(runtime -> {
-            try {
-                boolean accepted = runtime.arm();
-                results.put(runtime.accountId(), new OperationResult(accepted,
-                        accepted ? "LIVE armed" : "LIVE 双开关未配置或账号成交流未就绪"));
-            } catch (Exception e) {
-                results.put(runtime.accountId(), new OperationResult(false, safeMessage(e)));
-                log.error("[accountId={}] 批量解锁 LIVE 失败；继续处理其他账号: {}",
                         runtime.accountId(), safeMessage(e));
             }
         });
@@ -255,9 +238,6 @@ public class TradingAccountManager {
                     displayAlias(properties.getApi().getApiKeyAlias(), "default"),
                     properties.getApi().getApiKey(), properties.getApi().getSecretKey()));
         }
-        if (!profilesConfigured && result.isEmpty() && properties.getStrategy().isObserveMode()) {
-            result.put("default", new AccountCredentials("default", "default", "", ""));
-        }
         return result;
     }
 
@@ -296,7 +276,7 @@ public class TradingAccountManager {
     }
 
     public record AccountSummary(String accountId, String alias, boolean initialized, boolean running,
-                                 boolean liveArmed, String status, String symbol,
+                                 String status, String symbol,
                                  boolean accountStreamReady, String error) { }
     public record OperationResult(boolean success, String reason) { }
     public record ReloadResult(int added, List<String> addedAccounts, Map<String, String> errors) { }

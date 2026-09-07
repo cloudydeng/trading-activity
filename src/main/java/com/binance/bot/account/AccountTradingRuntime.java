@@ -39,9 +39,7 @@ public class AccountTradingRuntime {
     }
 
     public boolean start() { return engine.startTrading(); }
-    public boolean stop() { return engine.disarmLiveTrading(); }
-    public boolean arm() { return engine.armLiveTrading(); }
-    public boolean disarm() { return engine.disarmLiveTrading(); }
+    public boolean stop() { return engine.stopTrading(); }
 
     public synchronized void shutdown() {
         if (!initialized.get()) return;

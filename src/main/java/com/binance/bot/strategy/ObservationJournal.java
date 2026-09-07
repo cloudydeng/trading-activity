@@ -8,7 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 
-/** Appends completed paper observations as JSON Lines so a restart never discards the research sample. */
+/** Appends completed post-fill market outcomes as JSON Lines for optional diagnostics. */
 @Slf4j
 public class ObservationJournal {
     private final Path outputFile;

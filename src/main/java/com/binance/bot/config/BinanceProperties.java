@@ -75,9 +75,7 @@ public class BinanceProperties {
 
     @Data
     public static class Strategy {
-        /** OBSERVE never sends authenticated requests or orders; LIVE is an explicit opt-in. */
-        private String executionMode = "OBSERVE";
-        /** A second explicit switch is required even when executionMode is LIVE. */
+        /** The application only supports LIVE execution; this server-side switch must be enabled. */
         private boolean liveTradingEnabled = false;
         private String symbol;
         private BigDecimal orderAmountUsdt;
@@ -132,20 +130,10 @@ public class BinanceProperties {
         private BigDecimal sellMinNotionalBufferPercent = new BigDecimal("5");
         /** Stop accumulating residual base inventory if it grows beyond this notional value. */
         private BigDecimal maxDustNotionalUsdt = new BigDecimal("20");
-        /** Unconditional OBSERVE-only market baseline cadence; kept separate from qualified signal samples. */
-        private long benchmarkObservationIntervalMs = 2_000;
-        private long paperEntryIntervalMs = 1_500;
-        private int minPaperObservations = 500;
-        private int minQualifiedObservationsForLive = 0;
-        private int minBaselineObservationsForLive = 0;
+        /** Optional post-fill outcome collection for diagnostics; it never gates LIVE startup. */
         private boolean collectObservations = false;
         private String observationOutputFile = "data/paper-outcomes.jsonl";
 
-        public boolean isObserveMode() {
-            return "OBSERVE".equalsIgnoreCase(executionMode);
-        }
-
-        public boolean isLiveMode() { return "LIVE".equalsIgnoreCase(executionMode); }
     }
 
     @Data
