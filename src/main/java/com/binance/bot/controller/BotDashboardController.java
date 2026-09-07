@@ -150,7 +150,7 @@ public class BotDashboardController {
                 request.exitTimeoutMs(), request.makerFeeBps(), request.targetNetProfitBps(),
                 request.entryAnchorWaitMs(), request.maxEntryAnchorDriftBps(),
                 request.maxCumulativeEntryAnchorDriftBps(), request.manualEntryAnchorPrice(),
-                request.postSellEntryDelayMs());
+                request.postSellEntryDelayMs(), request.dailyVolumeLimitUsdt());
         return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
     }
 
@@ -244,6 +244,9 @@ public class BotDashboardController {
                 Map.entry("usedApiWeight1m", engine.getUsedApiWeight()),
                 Map.entry("apiWeightLimit1m", engine.getApiWeightLimit()),
                 Map.entry("apiWeightEntrySafeLimit1m", engine.getApiWeightEntrySafeLimit()),
+                Map.entry("bnbBalance", Optional.ofNullable(engine.getBnbBalanceSnapshot()).orElse(
+                        new HighFrequencyVolumeChurnEngine.BnbBalanceSnapshot(
+                                BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, false, 0L))),
                 Map.entry("marketData", engine.getMarketDataSnapshot()),
                 Map.entry("entrySignal", engine.getLastEntryDecision()),
                 Map.entry("sellability", engine.getSellabilitySnapshot()),
@@ -392,7 +395,8 @@ public class BotDashboardController {
                                         BigDecimal maxEntryAnchorDriftBps,
                                         BigDecimal maxCumulativeEntryAnchorDriftBps,
                                         BigDecimal manualEntryAnchorPrice,
-                                        Long postSellEntryDelayMs) { }
+                                        Long postSellEntryDelayMs,
+                                        BigDecimal dailyVolumeLimitUsdt) { }
     public record AccountSnapshot(String accountId, String symbol, String apiKeyAlias, String accountType,
                                   boolean canTrade, long accountUpdateTimeMs, List<BalanceView> balances,
                                   List<OrderView> filledOrders, List<OrderView> openOrders, int usedApiWeight1m) { }

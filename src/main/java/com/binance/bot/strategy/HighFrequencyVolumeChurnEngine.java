@@ -46,6 +46,8 @@ import java.util.concurrent.ConcurrentHashMap;
 public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private static final long COMMISSION_RATE_CACHE_MS = TimeUnit.MINUTES.toMillis(15);
     private static final long REMOTE_TODAY_ACCOUNTING_CACHE_MS = TimeUnit.SECONDS.toMillis(10);
+    private static final long BNB_BALANCE_CHECK_CACHE_MS = TimeUnit.SECONDS.toMillis(30);
+    private static final BigDecimal MIN_BNB_BALANCE_USDT = BigDecimal.ONE;
     private final String accountId;
     private final String accountAlias;
     private final String accountTag;
@@ -87,6 +89,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final ArrayDeque<BigDecimal> feeAwareRecentBuyPrices = new ArrayDeque<>();
     private final AtomicLong feeAwareEntryCeilingBlockedSince = new AtomicLong(0);
     private final AtomicLong postSellNextEntryAllowedAtMs = new AtomicLong(0);
+    private final AtomicBoolean dailyVolumeStopPending = new AtomicBoolean(false);
+    private final AtomicReference<LocalDate> dailyVolumeCounterDate = new AtomicReference<>();
+    private final AtomicBoolean bnbBalanceStopPending = new AtomicBoolean(false);
+    private final AtomicLong lastBnbBalanceCheckAtMs = new AtomicLong(0);
+    private final AtomicReference<BnbBalanceSnapshot> bnbBalanceSnapshot = new AtomicReference<>();
     private final AtomicReference<String> activeClientOrderId = new AtomicReference<>();
     private final AtomicReference<Long> replacingOrderId = new AtomicReference<>();
     @Getter private final AtomicReference<String> statusReason = new AtomicReference<>("等待启动");
@@ -315,6 +322,23 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             halt("无法确认账户余额，拒绝启动");
             return false;
         }
+        BnbBalanceSnapshot bnb = refreshBnbBalanceSnapshot(true);
+        if (bnb != null && bnb.belowMinimum() && holdingInventory.get().signum() <= 0) {
+            isRunning.set(false);
+            currentStatus.set(ChurnStatus.IDLE);
+            bnbBalanceStopPending.set(false);
+            statusReason.set(bnbBalanceMessage(bnb, "当前账户保持停止"));
+            return false;
+        }
+        bnbBalanceStopPending.set(bnb != null && bnb.belowMinimum());
+        syncDailyCounters();
+        if (dailyVolumeLimitReached() && holdingInventory.get().signum() <= 0) {
+            isRunning.set(false);
+            currentStatus.set(ChurnStatus.IDLE);
+            statusReason.set(dailyVolumeLimitMessage("当前账户保持停止"));
+            return false;
+        }
+        dailyVolumeStopPending.set(dailyVolumeLimitReached());
         DailyTradeStatsStore.RuntimeState runtimeState = loadRuntimeState();
         restoreFeeAwareEntryPriceCeiling(runtimeState);
         applyConfiguredManualAnchorToCurrentCeiling();
@@ -689,7 +713,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         applyPendingStrategyIfSafe();
         var rule = ruleManager.getRule(properties.getStrategy().getSymbol());
         if (rule == null || !isRunning.get()) return;
+        refreshDailyVolumeCounterDate();
         long now = System.currentTimeMillis();
+        if (enforceDailyVolumeLimit(rule)) return;
+        if (enforceBnbBalanceMinimum(rule)) return;
         if (now < nextOrderAttemptAt.get()) return;
         String symbol = properties.getStrategy().getSymbol();
         switch (currentStatus.get()) {
@@ -927,6 +954,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             subtractKnownFreeBase(inventoryQuantity);
         }
         syncDailyCounters();
+        if (dailyVolumeLimitReached() && dailyVolumeStopPending.compareAndSet(false, true)) {
+            log.warn("[accountId={} alias={}] 今日真实成交量 {} USDT 已达到上限 {} USDT；停止新买入，空仓后自动停止",
+                    accountId, accountAlias, totalVolumeUsdt.get(), dailyVolumeLimitUsdt());
+        }
         riskGuard.recordActualFill(side, inventoryQuantity, trade.quoteQuantity(), cashCommissionQuote,
                 tradeTimeMs > 0 ? tradeTimeMs : System.currentTimeMillis(), properties.getStrategy());
         if (riskGuard.getEntryBlockReason() != null) {
@@ -1793,9 +1824,27 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         syncDailyCounters();
         currentStatus.set(ChurnStatus.IDLE);
+        applyPendingStrategyIfSafe();
         rememberFeeAwareEntryPriceCeiling(rule);
         resetEntryTarget();
         persistRuntimeState(false);
+        if (dailyVolumeLimitReached()) {
+            dailyVolumeStopPending.set(false);
+            isRunning.set(false);
+            postSellNextEntryAllowedAtMs.set(0);
+            statusReason.set(dailyVolumeLimitMessage("已确认空仓并自动停止当前账户"));
+            log.warn("[accountId={} alias={}] {}", accountId, accountAlias, statusReason.get());
+            return;
+        }
+        BnbBalanceSnapshot bnb = bnbBalanceSnapshot.get();
+        if (bnbBalanceStopPending.get() && bnb != null && bnb.belowMinimum()) {
+            bnbBalanceStopPending.set(false);
+            isRunning.set(false);
+            postSellNextEntryAllowedAtMs.set(0);
+            statusReason.set(bnbBalanceMessage(bnb, "已确认空仓并自动停止当前账户"));
+            log.warn("[accountId={} alias={}] {}", accountId, accountAlias, statusReason.get());
+            return;
+        }
         long postSellDelayMs = schedulePostSellEntryDelay();
         if (isRunning.get() && postSellDelayMs > 0) {
             statusReason.set(getStrategyMode() + " 卖单已成交，等待 "
@@ -1993,9 +2042,128 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     accountId, accountAlias, properties.getStrategy().getSymbol());
             totalVolumeUsdt.set(today.totalVolumeQuote());
             roundTripsCompleted.set(today.roundTrips());
+            dailyVolumeCounterDate.set(today.date());
         } catch (RuntimeException e) {
             log.error("读取今日统计计数失败；成交写入结果不受影响", e);
         }
+    }
+
+    private void refreshDailyVolumeCounterDate() {
+        LocalDate today = LocalDate.now(ZoneOffset.UTC);
+        if (!today.equals(dailyVolumeCounterDate.get())) {
+            syncDailyCounters();
+            if (!dailyVolumeLimitReached()) dailyVolumeStopPending.set(false);
+        }
+    }
+
+    private BigDecimal dailyVolumeLimitUsdt() {
+        BinanceProperties.SymbolStrategyProfile profile = symbolStrategy(properties.getStrategy().getSymbol());
+        BigDecimal limit = profile == null ? null : profile.getDailyVolumeLimitUsdt();
+        return limit == null || limit.signum() <= 0 ? new BigDecimal("510") : limit;
+    }
+
+    private boolean dailyVolumeLimitReached() {
+        return totalVolumeUsdt.get().compareTo(dailyVolumeLimitUsdt()) >= 0;
+    }
+
+    private boolean enforceDailyVolumeLimit(SymbolRuleManager.SymbolRule rule) {
+        if (!dailyVolumeLimitReached()) return false;
+        dailyVolumeStopPending.set(true);
+        if (currentStatus.get() == ChurnStatus.SELLING) {
+            statusReason.set(dailyVolumeLimitMessage("停止新买入，等待当前卖单完成后自动停止"));
+            return false;
+        }
+        if (currentStatus.get() == ChurnStatus.BUYING && activeOrderId.get() != null) {
+            cancelActiveEntryOrder(dailyVolumeLimitMessage("撤销当前买单并对账"));
+            return true;
+        }
+        return stopAtDailyVolumeLimitIfFlat(rule);
+    }
+
+    private boolean stopAtDailyVolumeLimitIfFlat(SymbolRuleManager.SymbolRule rule) {
+        SellabilityResult sellability = currentSellability(rule, exitReferencePrice(rule));
+        if (holdingInventory.get().signum() > 0 && sellability.sellable()) {
+            currentStatus.set(ChurnStatus.SELLING);
+            statusReason.set(dailyVolumeLimitMessage("停止新买入，先卖出当前持仓"));
+            submitImmediateExit(rule);
+            return true;
+        }
+        isRunning.set(false);
+        dailyVolumeStopPending.set(false);
+        postSellNextEntryAllowedAtMs.set(0);
+        currentStatus.set(ChurnStatus.IDLE);
+        statusReason.set(dailyVolumeLimitMessage(holdingInventory.get().signum() > 0
+                ? "仅剩不可交易粉尘，已自动停止当前账户"
+                : "已自动停止当前账户"));
+        persistRuntimeState(false);
+        log.warn("[accountId={} alias={}] {}", accountId, accountAlias, statusReason.get());
+        return true;
+    }
+
+    private String dailyVolumeLimitMessage(String action) {
+        return "今日真实成交量 " + totalVolumeUsdt.get().stripTrailingZeros().toPlainString()
+                + " USDT 已达到每日上限 "
+                + dailyVolumeLimitUsdt().stripTrailingZeros().toPlainString() + " USDT；" + action;
+    }
+
+    private synchronized BnbBalanceSnapshot refreshBnbBalanceSnapshot(boolean force) {
+        long now = System.currentTimeMillis();
+        long checkedAt = lastBnbBalanceCheckAtMs.get();
+        if (!force && checkedAt > 0 && now - checkedAt < BNB_BALANCE_CHECK_CACHE_MS) {
+            return bnbBalanceSnapshot.get();
+        }
+        lastBnbBalanceCheckAtMs.set(now);
+        BinanceAccountTradeClient.AssetBalance balance = tradeService.getAssetBalance("BNB");
+        BigDecimal price = tradeService.getTickerPrice("BNBUSDT");
+        if (balance == null || balance.total() == null || price == null || price.signum() <= 0) {
+            log.warn("[accountId={} alias={}] 暂时无法刷新 BNB 余额价值，沿用上一份检查结果",
+                    accountId, accountAlias);
+            return bnbBalanceSnapshot.get();
+        }
+        BigDecimal valueUsdt = balance.total().multiply(price);
+        BnbBalanceSnapshot snapshot = new BnbBalanceSnapshot(balance.total(), price, valueUsdt,
+                valueUsdt.compareTo(MIN_BNB_BALANCE_USDT) < 0, now);
+        bnbBalanceSnapshot.set(snapshot);
+        return snapshot;
+    }
+
+    private boolean enforceBnbBalanceMinimum(SymbolRuleManager.SymbolRule rule) {
+        BnbBalanceSnapshot bnb = refreshBnbBalanceSnapshot(false);
+        if (bnb == null || !bnb.belowMinimum()) return false;
+        if (bnbBalanceStopPending.compareAndSet(false, true)) {
+            log.warn("[accountId={} alias={}] BNB 余额价值 {} USDT 低于最低要求 {} USDT；停止新买入，空仓后自动停止",
+                    accountId, accountAlias, bnb.valueUsdt(), MIN_BNB_BALANCE_USDT);
+        }
+        if (currentStatus.get() == ChurnStatus.SELLING) {
+            statusReason.set(bnbBalanceMessage(bnb, "停止新买入，等待当前卖单完成后自动停止"));
+            return false;
+        }
+        if (currentStatus.get() == ChurnStatus.BUYING && activeOrderId.get() != null) {
+            cancelActiveEntryOrder(bnbBalanceMessage(bnb, "撤销当前买单并对账"));
+            return true;
+        }
+        SellabilityResult sellability = currentSellability(rule, exitReferencePrice(rule));
+        if (holdingInventory.get().signum() > 0 && sellability.sellable()) {
+            currentStatus.set(ChurnStatus.SELLING);
+            statusReason.set(bnbBalanceMessage(bnb, "停止新买入，先卖出当前持仓"));
+            submitImmediateExit(rule);
+            return true;
+        }
+        isRunning.set(false);
+        bnbBalanceStopPending.set(false);
+        postSellNextEntryAllowedAtMs.set(0);
+        currentStatus.set(ChurnStatus.IDLE);
+        statusReason.set(bnbBalanceMessage(bnb, holdingInventory.get().signum() > 0
+                ? "仅剩不可交易粉尘，已自动停止当前账户"
+                : "已自动停止当前账户"));
+        persistRuntimeState(false);
+        log.warn("[accountId={} alias={}] {}", accountId, accountAlias, statusReason.get());
+        return true;
+    }
+
+    private String bnbBalanceMessage(BnbBalanceSnapshot bnb, String action) {
+        return "BNB 余额价值 " + bnb.valueUsdt().setScale(4, RoundingMode.HALF_UP).toPlainString()
+                + " USDT 低于 1 USDT；" + action;
     }
 
     private void restoreDailyRisk() {
@@ -2134,6 +2302,24 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                                               BigDecimal requestedMaxCumulativeEntryAnchorDriftBps,
                                                               BigDecimal requestedManualEntryAnchorPrice,
                                                               Long requestedPostSellEntryDelayMs) {
+        return switchStrategy(requestedSymbol, requestedMode, requestedAmount, requestedEntryTimeoutMs,
+                requestedExitTimeoutMs, requestedMakerFeeBps, requestedTargetNetProfitBps,
+                requestedEntryAnchorWaitMs, requestedMaxEntryAnchorDriftBps,
+                requestedMaxCumulativeEntryAnchorDriftBps, requestedManualEntryAnchorPrice,
+                requestedPostSellEntryDelayMs, null);
+    }
+
+    public synchronized StrategySwitchResult switchStrategy(String requestedSymbol, String requestedMode,
+                                                              BigDecimal requestedAmount, Long requestedEntryTimeoutMs,
+                                                              Long requestedExitTimeoutMs,
+                                                              BigDecimal requestedMakerFeeBps,
+                                                              BigDecimal requestedTargetNetProfitBps,
+                                                              Long requestedEntryAnchorWaitMs,
+                                                              BigDecimal requestedMaxEntryAnchorDriftBps,
+                                                              BigDecimal requestedMaxCumulativeEntryAnchorDriftBps,
+                                                              BigDecimal requestedManualEntryAnchorPrice,
+                                                              Long requestedPostSellEntryDelayMs,
+                                                              BigDecimal requestedDailyVolumeLimitUsdt) {
         String symbol = normalizeStrategySymbol(requestedSymbol);
         if (symbol.isBlank() || !symbol.endsWith("USDT")) {
             return StrategySwitchResult.rejected(properties.getStrategy().getSymbol(),
@@ -2165,6 +2351,14 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (postSellEntryDelayMs == null) postSellEntryDelayMs = 60_000L;
         if (!validPostSellEntryDelay(postSellEntryDelayMs)) {
             return StrategySwitchResult.rejected(symbol, "卖出后买入等待时间必须在 0 秒到 24 小时之间");
+        }
+        BigDecimal dailyVolumeLimitUsdt = requestedDailyVolumeLimitUsdt == null && existing != null
+                ? existing.getDailyVolumeLimitUsdt() : requestedDailyVolumeLimitUsdt;
+        if (dailyVolumeLimitUsdt == null) dailyVolumeLimitUsdt = new BigDecimal("510");
+        if (dailyVolumeLimitUsdt.signum() <= 0
+                || dailyVolumeLimitUsdt.compareTo(new BigDecimal("1000000000")) > 0) {
+            return StrategySwitchResult.rejected(symbol,
+                    "每日成交量上限必须大于 0 且不超过 1,000,000,000 USDT");
         }
         // Null deliberately clears a manual fee/profit override: the fee returns to automatic
         // account lookup and the profit target returns to the global default.
@@ -2219,6 +2413,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         profile.setMaxCumulativeEntryAnchorDriftBps(maxCumulativeEntryAnchorDriftBps);
         profile.setManualEntryAnchorPrice(manualEntryAnchorPrice);
         profile.setPostSellEntryDelayMs(postSellEntryDelayMs);
+        profile.setDailyVolumeLimitUsdt(dailyVolumeLimitUsdt);
 
         String currentSymbol = normalizeStrategySymbol(properties.getStrategy().getSymbol());
         if (symbol.equals(currentSymbol) && (activeOrderId.get() != null
@@ -2317,6 +2512,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         copy.setMaxCumulativeEntryAnchorDriftBps(source.getMaxCumulativeEntryAnchorDriftBps());
         copy.setManualEntryAnchorPrice(source.getManualEntryAnchorPrice());
         copy.setPostSellEntryDelayMs(source.getPostSellEntryDelayMs());
+        copy.setDailyVolumeLimitUsdt(source.getDailyVolumeLimitUsdt());
         return copy;
     }
 
@@ -2593,6 +2789,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public int getUsedApiWeight() { return tradeService.getUsedWeight1m(); }
     public int getApiWeightLimit() { return tradeService.getRequestWeightLimit1m(); }
     public int getApiWeightEntrySafeLimit() { return tradeService.getSafeRequestWeightLimit1m(); }
+    public BnbBalanceSnapshot getBnbBalanceSnapshot() { return refreshBnbBalanceSnapshot(false); }
     public MarketSignalEvaluator.EntryDecision getLastEntryDecision() { return marketSignalEvaluator.getLastDecision(); }
     public TradingRiskGuard.RiskSnapshot getRiskSnapshot() { return riskGuard.snapshot(); }
     public TradeAccountingLedger.AccountingSnapshot getAccountingSnapshot() { return accountingLedger.snapshot(); }
@@ -2666,6 +2863,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         TradeAccountingLedger.AccountingSnapshot accounting = accumulator.accountingSnapshot();
         totalVolumeUsdt.set(balanceAlignedDaily.totalVolumeQuote());
         roundTripsCompleted.set(balanceAlignedDaily.roundTrips());
+        dailyVolumeCounterDate.set(balanceAlignedDaily.date());
+        dailyVolumeStopPending.set(dailyVolumeLimitReached());
         return new RemoteTodayStatusSnapshot(risk, accounting, balanceAlignedDaily, true,
                 sortedTrades.size() >= 1000, nowMs);
     }
@@ -2912,6 +3111,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                             boolean remote,
                                             boolean truncated,
                                             long updatedAtMs) { }
+    public record BnbBalanceSnapshot(BigDecimal quantity, BigDecimal priceUsdt, BigDecimal valueUsdt,
+                                     boolean belowMinimum, long updatedAtMs) { }
     public enum DustReason {
         BELOW_MIN_QTY,
         BELOW_MIN_NOTIONAL,

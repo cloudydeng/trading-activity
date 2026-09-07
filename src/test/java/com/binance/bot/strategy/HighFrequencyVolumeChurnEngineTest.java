@@ -16,6 +16,7 @@ import org.mockito.ArgumentCaptor;
 import java.math.BigDecimal;
 import java.net.http.WebSocket;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -91,6 +92,9 @@ class HighFrequencyVolumeChurnEngineTest {
         when(ruleManager.getRule("ENSOUSDT")).thenReturn(new SymbolRuleManager.SymbolRule(
                 "ENSOUSDT", new BigDecimal("0.0001"), new BigDecimal("0.1"),
                 new BigDecimal("0.1"), new BigDecimal("5")));
+        when(tradeService.getAssetBalance("BNB")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "BNB", new BigDecimal("0.01"), BigDecimal.ZERO, new BigDecimal("0.01")));
+        when(tradeService.getTickerPrice("BNBUSDT")).thenReturn(new BigDecimal("1000"));
         when(marketSignalEvaluator.markBestBidMakerReady()).thenReturn(
                 new MarketSignalEvaluator.EntryDecision(true, "BEST_BID_MAKER", BigDecimal.ZERO,
                         BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
@@ -277,6 +281,88 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(0, new BigDecimal("8").compareTo(profile.getValue().getMaxEntryAnchorDriftBps()));
         assertEquals(0, new BigDecimal("8").compareTo(profile.getValue().getMaxCumulativeEntryAnchorDriftBps()));
         assertEquals(60_000L, profile.getValue().getPostSellEntryDelayMs());
+        assertEquals(0, new BigDecimal("510").compareTo(profile.getValue().getDailyVolumeLimitUsdt()));
+    }
+
+    @Test
+    void dailyVolumeLimitCanBeConfiguredPerAccountAndSymbol() {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
+                "ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("750"));
+
+        assertTrue(result.accepted());
+        assertEquals(0, new BigDecimal("750").compareTo(engine.getStrategyProfile().getDailyVolumeLimitUsdt()));
+    }
+
+    @Test
+    void flatAccountStopsBeforeAnotherBuyWhenDailyVolumeLimitIsReached() {
+        engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"), 20_000L, 120_000L);
+        when(dailyStatsStore.today(eq("test-account"), eq("test-bot"), eq("ENSOUSDT")))
+                .thenReturn(dailyStatsWithVolume("510"));
+        engine.getIsRunning().set(true);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+
+        assertFalse(engine.getIsRunning().get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+        assertTrue(engine.getStatusReason().get().contains("每日上限 510 USDT"));
+        verify(tradeService, never()).cancelAndReplaceOrder(anyString(), anyString(), any(), any(), any(), anyString());
+    }
+
+    @Test
+    void accountStopsOnlyAfterCurrentSellHasFlattenedAtDailyVolumeLimit() {
+        engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"), 20_000L, 120_000L);
+        when(dailyStatsStore.today(eq("test-account"), eq("test-bot"), eq("ENSOUSDT")))
+                .thenReturn(dailyStatsWithVolume("522"));
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+
+        ReflectionTestUtils.invokeMethod(engine, "completeFlatExit", true);
+
+        assertFalse(engine.getIsRunning().get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+        assertTrue(engine.getStatusReason().get().contains("已确认空仓并自动停止当前账户"));
+    }
+
+    @Test
+    void flatAccountStopsWhenBnbValueFallsBelowOneUsdt() {
+        engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"), 20_000L, 120_000L);
+        when(tradeService.getAssetBalance("BNB")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "BNB", new BigDecimal("0.0008"), BigDecimal.ZERO, new BigDecimal("0.0008")));
+        when(tradeService.getTickerPrice("BNBUSDT")).thenReturn(new BigDecimal("1000"));
+        engine.getIsRunning().set(true);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+
+        assertFalse(engine.getIsRunning().get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+        assertTrue(engine.getStatusReason().get().contains("BNB 余额价值 0.8000 USDT 低于 1 USDT"));
+        verify(tradeService, never()).cancelAndReplaceOrder(anyString(), anyString(), any(), any(), any(), anyString());
+    }
+
+    @Test
+    void lowBnbDoesNotCancelAnExistingSellOrder() {
+        engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"), 20_000L, 120_000L);
+        when(tradeService.getAssetBalance("BNB")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "BNB", new BigDecimal("0.0008"), BigDecimal.ZERO, new BigDecimal("0.0008")));
+        when(tradeService.getTickerPrice("BNBUSDT")).thenReturn(new BigDecimal("1000"));
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("activeOrderId", Long.class).set(42L);
+        atomic("activeOrderPrice", BigDecimal.class).set(new BigDecimal("0.6001"));
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis());
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+
+        assertTrue(engine.getIsRunning().get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
+        assertEquals(42L, atomic("activeOrderId", Long.class).get());
+        assertTrue(engine.getStatusReason().get().contains("等待当前卖单完成后自动停止"));
+        verify(tradeService, never()).cancelOrder("ENSOUSDT", 42L);
     }
 
     @Test
@@ -1727,6 +1813,14 @@ class HighFrequencyVolumeChurnEngineTest {
                 BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
                 BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
                 new BigDecimal(quantity), new BigDecimal(cost), 0, 0, true);
+    }
+
+    private DailyTradeStatsStore.DailyStatsSnapshot dailyStatsWithVolume(String totalVolume) {
+        return new DailyTradeStatsStore.DailyStatsSnapshot(
+                LocalDate.now(ZoneOffset.UTC), "test-account", "test-bot", "ENSOUSDT",
+                BigDecimal.ZERO, BigDecimal.ZERO, new BigDecimal(totalVolume),
+                BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, 0, 0, true);
     }
 
 }

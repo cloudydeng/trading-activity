@@ -71,6 +71,8 @@ public class BinanceProperties {
         private BigDecimal manualEntryAnchorPrice;
         /** BID_ASK_MAKER waits this long after a flat sell before opening the next buy. */
         private Long postSellEntryDelayMs = 60_000L;
+        /** UTC-day real fill volume cap in quote asset; the account stops safely after flattening. */
+        private BigDecimal dailyVolumeLimitUsdt = new BigDecimal("510");
     }
 
     @Data

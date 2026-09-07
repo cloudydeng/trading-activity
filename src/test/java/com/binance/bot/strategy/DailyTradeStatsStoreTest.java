@@ -183,6 +183,7 @@ class DailyTradeStatsStoreTest {
         profile.setMaxEntryAnchorDriftBps(new BigDecimal("8"));
         profile.setMaxCumulativeEntryAnchorDriftBps(new BigDecimal("5"));
         profile.setManualEntryAnchorPrice(new BigDecimal("0.5900"));
+        profile.setDailyVolumeLimitUsdt(new BigDecimal("750"));
 
         store.saveStrategyOverride("account-a", "ensousdt", profile);
 
@@ -198,6 +199,7 @@ class DailyTradeStatsStoreTest {
         assertDecimal("8", loaded.get("ENSOUSDT").getMaxEntryAnchorDriftBps());
         assertDecimal("5", loaded.get("ENSOUSDT").getMaxCumulativeEntryAnchorDriftBps());
         assertDecimal("0.5900", loaded.get("ENSOUSDT").getManualEntryAnchorPrice());
+        assertDecimal("750", loaded.get("ENSOUSDT").getDailyVolumeLimitUsdt());
         store.close();
     }
 
