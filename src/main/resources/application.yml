@@ -35,12 +35,10 @@ binance:
     api-key: "${BINANCE_API_API_KEY:}"
     secret-key: "${BINANCE_API_SECRET_KEY:}"
   strategy:
-    # OBSERVE: 只消费公开行情并记录虚拟入场结果，绝不发认证请求或订单。
-    # LIVE requires both of the environment switches below; defaults never trade.
-    execution-mode: "${BINANCE_STRATEGY_EXECUTION_MODE:OBSERVE}"
+    # 系统只有 LIVE 运行模式；服务器开关默认关闭，避免误启动真实交易。
     live-trading-enabled: "${BINANCE_LIVE_TRADING_ENABLED:false}"
     symbol: "${BINANCE_STRATEGY_SYMBOL:ENSOUSDT}"
-    # 观察及未来模拟的名义单笔金额；ENSOUSDT 的 Binance 最小名义额为 5 USDT。
+    # 单笔名义金额；ENSOUSDT 的 Binance 最小名义额为 5 USDT。
     order-amount-usdt: 12.0
     max-live-order-notional-usdt: 12.0
     # 买单挂在买一以提高 Maker 成交率；LIMIT_MAKER 仍会阻止意外 Taker 成交。
@@ -91,14 +89,9 @@ binance:
     sell-min-notional-buffer-percent: 5
     # 粉尘库存超过该 USDT 名义额说明异常，停止继续买入等待人工处理。
     max-dust-notional-usdt: 20
-    # Observation can be enabled for research; signal execution does not depend on it.
+    # 可选记录真实成交后的行情结果，仅用于诊断，不参与 LIVE 启动和下单判断。
     collect-observations: false
-    benchmark-observation-interval-ms: 2000
-    paper-entry-interval-ms: 1500
-    min-paper-observations: 500
-    min-qualified-observations-for-live: 0
-    min-baseline-observations-for-live: 0
-    # 每个交易对单独留存观察样本，防止切换交易对后混入旧样本。
+    # 每个交易对单独留存成交后结果，防止切换交易对后混入旧样本。
     observation-output-file: "data/enso-paper-outcomes.jsonl"
 
 logging:

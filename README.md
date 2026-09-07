@@ -1,15 +1,15 @@
 # Binance Spot Trading Activity Bot
 
-基于公开 WebSocket 行情信号执行小额 Binance 现货交易。系统默认 `OBSERVE`，真实交易必须同时启用服务器 `LIVE` 配置、从控制台临时解锁并手动启动。项目不做自成交。
+基于公开 WebSocket 行情信号执行小额 Binance 现货交易。系统只有 `LIVE` 运行模式；服务器端 `BINANCE_LIVE_TRADING_ENABLED=true` 后，从控制台手动启动才会真实下单。项目不做自成交。
 
 ## 安全边界
 
 - BUY 部分成交会立即进入 SELL 管理，成交以账户事件流和 REST 对账为准。
 - 买入只使用买一价 `LIMIT_MAKER`；每笔最多 `12 USDT`，20 秒后若订单仍是买一则继续挂，只有不再是买一时才撤单；不转 IOC、不因短线信号提前撤单。
 - BUY 一旦真实成交（包括达到最小可卖额的部分成交），立即撤销剩余买单并按实际加权买入均价（按 tick 向上取整）挂 `LIMIT GTC SELL`；例如买入均价 `0.862` 就先挂卖价 `0.862`。
-- 每张卖单有效管理窗口为 2 分钟；未完全成交时先撤单并完成成交与库存对账，再将剩余数量按最新卖一价挂新的 `LIMIT GTC SELL`，之后每 2 分钟重复，直至空仓。
+- 每张卖单按配置时间检查（默认 2 分钟）；超时先比较当前订单和最新卖一价，若仍在卖一则保留原 `LIMIT GTC SELL` 并重新计时，只有不在卖一时才撤单、完成成交与库存对账，再将剩余数量按最新卖一价重挂，之后按配置时间重复，直至空仓。
 - 自动交易流程没有价格止损、止损冷却或 MARKET 卖出；MARKET 只保留给人工授权清仓。库存对账与防重复卖出始终是强制保护。
-- 每个 API 账户拥有独立运行时、交易对、订单、持仓、风控和统计；交易对切换前必须停止该账户、锁定 LIVE，并确认无活动订单和当前标的持仓。
+- 每个 API 账户拥有独立运行时、交易对、订单、持仓、风控和统计；交易对切换前必须停止该账户，并确认无活动订单和当前标的持仓。
 - 所有账户共享服务器公网 IP 的 Binance 请求权重；系统动态读取每分钟上限，在 80% 处暂停新开仓并保留退出、撤单和对账余量。
 - API Key、Secret、管理密码仅从服务器环境变量加载，不通过浏览器提交或返回。
 - 每日成交量、手续费、净盈亏和成本按 `稳定账户 ID + UTC 日期 + 交易对` 写入 SQLite。
@@ -33,11 +33,12 @@ BOT_ACCOUNT_PROFILES_JSON='{
 `binance.strategy.order-amount-usdt`。单笔金额仍不能超过 `max-live-order-notional-usdt`，并会在控制台显示当前生效值。
 
 `symbolStrategies` 可为每个账户的每个交易对选择策略：`CURRENT` 保留旧版成本价退出；
-`BID_ASK_MAKER` 在买一挂买单、成交后按卖一挂普通限价卖单；`FEE_AWARE_MAKER` 在买一挂买单，
-卖出只使用 `LIMIT_MAKER`，并以“已记录买入成本 + 预计卖出手续费”为永久价格下限，只求把手续费赚回。
+`BID_ASK_MAKER` 在买一挂买单、成交后按卖一挂普通限价卖单；
+`FEE_AWARE_MAKER` 在买一挂买单，
+初始卖出只使用 `LIMIT_MAKER`，并以“已记录买入成本 + 预计卖出手续费”为价格下限，先尝试把手续费赚回。
 卖出完成后，下一轮买单价格不得高于上一轮 BUY 成交均价；如果当前买一高于该价格，策略会等待价格回落。
-手续费保护策略到达卖单检查时间后，若当前挂价仍正确则保留订单和队列位置；仅在安全目标价变化时撤换，
-且不会降到保本线以下。未配置的交易对回退到 `CURRENT`。
+手续费保护策略到达卖单检查时间仍未成交时，会撤单对账并按当前买一上方 1 个 tick 重新挂 `LIMIT_MAKER`，
+此阶段优先快速成交和释放仓位，不再强制手续费保护价。未配置的交易对回退到 `CURRENT`。
 
 控制台的“运行时策略切换”可在不重启的情况下修改当前账户/交易对的策略。切换请求会写入 SQLite
 `runtime_setting`，重启后优先于环境变量配置恢复；如果当前处于 BUYING 或 SELLING，修改会排队到订单完成并回到
@@ -68,19 +69,19 @@ java -jar target/binance-spot-competition-bot-3.0.0.jar
 控制接口均受浏览器登录会话或 `X-Bot-Admin-Token` 保护：
 
 - `GET /api/accounts`
+- `GET /api/accounts/open-orders`（所有账户当前活动买单/卖单）
 - `GET /api/accounts/stats/summary?days=10`（按账户 + 交易对分别汇总近 N 天成交）
 - `GET /api/accounts/{accountId}/status`
-- `POST /api/accounts/{accountId}/live/arm`
 - `POST /api/accounts/{accountId}/start`
 - `POST /api/accounts/{accountId}/stop`
 - `POST /api/accounts/{accountId}/symbol`
-- `POST /api/accounts/arm-all`
 - `POST /api/accounts/start-all`
 - `POST /api/accounts/stop-all`
 - `POST /api/accounts/reload`（从服务器受保护环境文件热加载新增账户；不会替换或停止已有账户）
 
 控制台的“API 账户10天汇总”页面展示上述汇总，只保留窗口内有真实成交的账户/交易对组合。
 
-账户热加载只读取 `BOT_ACCOUNT_PROFILES_ENV_FILE` 指向的服务器环境文件（默认 `/etc/trading-activity.env`）。
-它仅为清单中尚未运行的启用账户创建 User Data Stream；新账户始终以 `running=false`、`liveArmed=false` 加入，
-不会触碰已有账户的持仓、活动 SELL 订单或 LIVE 状态。修改环境文件后可从控制台点击“热加载账户”，无需重启 JVM。
+应用启动前会自动读取 `BOT_ACCOUNT_PROFILES_ENV_FILE` 指向的服务器环境文件（默认 `/etc/trading-activity.env`），
+将其中缺失的 `BOT_*`、`BINANCE_*` 配置加载到启动环境；已有进程环境变量优先。账户热加载也会重新读取同一文件。
+热加载仅为清单中尚未运行的启用账户创建 User Data Stream；新账户始终以 `running=false` 加入，
+不会触碰已有账户的持仓或活动 SELL 订单。修改环境文件后可从控制台点击“热加载账户”，无需重启 JVM。

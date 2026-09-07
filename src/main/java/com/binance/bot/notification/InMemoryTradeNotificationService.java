@@ -4,6 +4,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -38,5 +39,19 @@ public class InMemoryTradeNotificationService implements TradeNotificationServic
             }
             return List.copyOf(result);
         }
+    }
+
+    @Override
+    public List<FillNotification> recentFills(int limit) {
+        int safeLimit = Math.max(1, Math.min(limit, MAX_PER_ACCOUNT));
+        List<FillNotification> result = new ArrayList<>();
+        for (Deque<FillNotification> queue : fillsByAccount.values()) {
+            synchronized (queue) {
+                result.addAll(queue);
+            }
+        }
+        result.sort(Comparator.comparingLong(FillNotification::eventTime).reversed());
+        if (result.size() > safeLimit) result = result.subList(0, safeLimit);
+        return List.copyOf(result);
     }
 }

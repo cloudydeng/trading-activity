@@ -67,7 +67,6 @@ class HighFrequencyVolumeChurnEngineTest {
         secondary.setApiKey("second-api-key");
         secondary.setSecretKey("second-secret-key");
         properties.getApi().getProfiles().put("secondary", secondary);
-        properties.getStrategy().setExecutionMode("LIVE");
         properties.getStrategy().setLiveTradingEnabled(true);
         properties.getStrategy().setSymbol("ENSOUSDT");
         properties.getStrategy().setOrderAmountUsdt(new BigDecimal("6"));
@@ -110,12 +109,10 @@ class HighFrequencyVolumeChurnEngineTest {
 
     @Test
     void refusesToStartWhenAccountStreamIsNotReady() {
-        engine.getLiveArmed().set(true);
         userDataStreamReady.set(false);
 
         assertFalse(engine.startTrading());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.HALTED, engine.getCurrentStatus().get());
-        assertFalse(engine.getLiveArmed().get());
         verify(tradeService, never()).getFreeAssetBalance(anyString());
     }
 
@@ -134,14 +131,12 @@ class HighFrequencyVolumeChurnEngineTest {
     @Test
     void streamLossStopsAndDisarmsWithoutAutomaticResume() {
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
         atomic("activeOrderId", Long.class).set(77L);
 
         ReflectionTestUtils.invokeMethod(engine, "handleUserStreamLoss", "socket closed");
 
         assertFalse(engine.getIsRunning().get());
-        assertFalse(engine.getLiveArmed().get());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.HALTED, engine.getCurrentStatus().get());
         verify(tradeService).cancelOrder("ENSOUSDT", 77L);
     }
@@ -154,16 +149,13 @@ class HighFrequencyVolumeChurnEngineTest {
                 new MarketSignalEvaluator(), new PostFillOutcomeTracker(), new TradingRiskGuard(),
                 dailyStatsStore, mock(TradeNotificationService.class));
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
         engineB.getIsRunning().set(true);
-        engineB.getLiveArmed().set(true);
 
         engine.handleUserStreamLoss("account A disconnected");
 
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.HALTED, engine.getCurrentStatus().get());
         assertFalse(engine.getIsRunning().get());
         assertTrue(engineB.getIsRunning().get());
-        assertTrue(engineB.getLiveArmed().get());
     }
 
     @Test
@@ -204,7 +196,6 @@ class HighFrequencyVolumeChurnEngineTest {
         assertTrue(result.accepted());
         assertEquals("BTCUSDT", engine.getSymbol());
         assertFalse(engine.getIsRunning().get());
-        assertFalse(engine.getLiveArmed().get());
         verify(dailyStatsStore).saveActiveSymbol("test-account", "BTCUSDT");
         verify(tradeService).getOpenOrders("ENSOUSDT");
         verify(tradeService).getOpenOrders("BTCUSDT");
@@ -214,8 +205,6 @@ class HighFrequencyVolumeChurnEngineTest {
     void startTradingIgnoresDurableLedgerPositionWhenExchangeIsFlat() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         long now = System.currentTimeMillis();
-        engine.getLiveArmed().set(true);
-        stubObservationSummaries();
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
                 .set(now);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
@@ -326,7 +315,7 @@ class HighFrequencyVolumeChurnEngineTest {
     void bidAskMakerIgnoresSellPressureSignalGate() throws Exception {
         engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L);
-        when(marketSignalEvaluator.evaluateBestBidMaker(anyLong(), eq(properties.getStrategy()))).thenReturn(
+        when(marketSignalEvaluator.evaluate(anyLong(), eq(properties.getStrategy()))).thenReturn(
                 MarketSignalEvaluator.EntryDecision.block("SELL_TAKER_PRESSURE",
                         new BigDecimal("-0.1"), BigDecimal.ZERO, new BigDecimal("-0.8"),
                         BigDecimal.ZERO, BigDecimal.ZERO));
@@ -339,6 +328,7 @@ class HighFrequencyVolumeChurnEngineTest {
 
         verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
                 decimalEquals("0.6000"), any(), isNull(), anyString());
+        verify(marketSignalEvaluator, never()).evaluate(anyLong(), eq(properties.getStrategy()));
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING, engine.getCurrentStatus().get());
     }
 
@@ -365,7 +355,8 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void feeAwareMakerUsesFeeOnlyProtectedPostOnlyExitAndKeepsValidOrder() throws Exception {
+    void feeAwareMakerUsesProtectedInitialExitThenLatestAskAfterTimeout() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
         HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
                 "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
                 new BigDecimal("10"), new BigDecimal("10"));
@@ -399,13 +390,50 @@ class HighFrequencyVolumeChurnEngineTest {
 
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
                 .set(System.currentTimeMillis() - 121_000);
-        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
-                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+        when(tradeService.cancelOrder("ENSOUSDT", 77L))
+                .thenReturn(mapper.readTree("{\"orderId\":77,\"status\":\"CANCELED\"}"));
+        when(tradeService.getOrder("ENSOUSDT", 77L)).thenReturn(mapper.readTree(
+                "{\"orderId\":77,\"status\":\"CANCELED\",\"side\":\"SELL\",\"executedQty\":\"0\",\"cummulativeQuoteQty\":\"0\"}"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(
+                new BinanceAccountTradeClient.AssetBalance("ENSO", new BigDecimal("10"), BigDecimal.ZERO,
+                        new BigDecimal("10")));
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), decimalEquals("0.6020"),
+                decimalEquals("10"), isNull(), anyString()))
+                .thenReturn(mapper.readTree("{\"orderId\":88}"));
 
-        verify(tradeService, never()).cancelOrder("ENSOUSDT", 77L);
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.5990"), new BigDecimal("0.6020"));
+
+        verify(tradeService).cancelOrder("ENSOUSDT", 77L);
         verify(tradeService, times(1)).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
                 decimalEquals("0.6013"), decimalEquals("10"), isNull(), anyString());
-        assertTrue(engine.getStatusReason().get().contains("继续排队等待成交"));
+        verify(tradeService, times(1)).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
+                decimalEquals("0.6020"), decimalEquals("10"), isNull(), anyString());
+        assertEquals(88L, atomic("activeOrderId", Long.class).get());
+        assertTrue(engine.getStatusReason().get().contains("最新卖一价快速退出"));
+    }
+
+    @Test
+    void timedOutSellAtLatestAskIsKeptAndTimerIsRearmed() throws Exception {
+        engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L);
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("activeOrderId", Long.class).set(77L);
+        atomic("activeOrderPrice", BigDecimal.class).set(new BigDecimal("0.602000"));
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
+        AtomicLong placedAt = (AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp");
+        long expiredAt = System.currentTimeMillis() - 121_000L;
+        placedAt.set(expiredAt);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.601900"), new BigDecimal("0.602000"));
+
+        verify(tradeService, never()).cancelOrder("ENSOUSDT", 77L);
+        verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
+                any(), any(), isNull(), anyString());
+        assertTrue(placedAt.get() > expiredAt);
+        assertTrue(engine.getStatusReason().get().contains("仍在卖一，保留当前 LIMIT 卖单"));
     }
 
     @Test
@@ -613,12 +641,11 @@ class HighFrequencyVolumeChurnEngineTest {
         long now = System.currentTimeMillis();
         engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO);
-        engine.getLiveArmed().set(true);
-        stubObservationSummaries();
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
                 .set(now);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
                 .set(now);
+        atomic("lastBestAsk", BigDecimal.class).set(new BigDecimal("0.6001"));
         when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
                 "ENSO", new BigDecimal("10"), BigDecimal.ZERO, new BigDecimal("10")));
         when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("""
@@ -642,6 +669,155 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(0, new BigDecimal("0.6000").compareTo(
                 atomic("feeAwareEntryPriceCeiling", BigDecimal.class).get()));
         assertTrue(engine.getStatusReason().get().contains("重启后已恢复本进程卖单"));
+    }
+
+    @Test
+    void startTradingRestoresMatchingRemoteTodayInventoryWithoutOpenOrder() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        long now = System.currentTimeMillis();
+        engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L);
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
+                .set(now);
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
+                .set(now);
+        atomic("lastBestAsk", BigDecimal.class).set(new BigDecimal("0.6001"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "ENSO", new BigDecimal("10"), BigDecimal.ZERO, new BigDecimal("10")));
+        when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
+        when(tradeService.getMyTrades(eq("ENSOUSDT"), anyLong(), anyLong(), eq(1000)))
+                .thenReturn(mapper.readTree("""
+                        [{"id":11,"orderId":101,"price":"0.6000","qty":"10","quoteQty":"6.0000",
+                          "commission":"0","commissionAsset":"USDT","isBuyer":true,"time":%d}]
+                        """.formatted(now - 1000)));
+        when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.6001"), anyString()))
+                .thenReturn(mapper.readTree("{\"orderId\":88}"));
+
+        assertTrue(engine.startTrading());
+
+        assertTrue(engine.getIsRunning().get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
+        assertEquals(88L, atomic("activeOrderId", Long.class).get());
+        assertEquals(0, new BigDecimal("10").compareTo(engine.getRiskSnapshot().positionQty()));
+        assertEquals(0, new BigDecimal("6.0000").compareTo(engine.getRiskSnapshot().positionCostUsdt()));
+        verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.6001"), anyString());
+    }
+
+    @Test
+    void startTradingRestoresFeeAwareRemoteTodayInventoryWithoutOpenOrder() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        long now = System.currentTimeMillis();
+        engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO);
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
+                .set(now);
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
+                .set(now);
+        atomic("lastBestAsk", BigDecimal.class).set(new BigDecimal("0.6001"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "ENSO", new BigDecimal("10"), BigDecimal.ZERO, new BigDecimal("10")));
+        when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
+        when(tradeService.getMyTrades(eq("ENSOUSDT"), anyLong(), anyLong(), eq(1000)))
+                .thenReturn(mapper.readTree("""
+                        [{"id":11,"orderId":101,"price":"0.6000","qty":"10","quoteQty":"6.0000",
+                          "commission":"0","commissionAsset":"USDT","isBuyer":true,"time":%d}]
+                        """.formatted(now - 1000)));
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
+                decimalEquals("0.6007"), decimalEquals("10"), isNull(), anyString()))
+                .thenReturn(mapper.readTree("{\"orderId\":88}"));
+
+        assertTrue(engine.startTrading());
+
+        assertTrue(engine.getIsRunning().get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
+        assertEquals(88L, atomic("activeOrderId", Long.class).get());
+        assertEquals(0, new BigDecimal("10").compareTo(engine.getRiskSnapshot().positionQty()));
+        assertEquals(0, new BigDecimal("6.0000").compareTo(engine.getRiskSnapshot().positionCostUsdt()));
+        verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
+                decimalEquals("0.6007"), decimalEquals("10"), isNull(), anyString());
+        verify(tradeService, never()).placeLimitGtcSell(anyString(), any(), any(), anyString());
+    }
+
+    @Test
+    void startTradingRejectsRemoteTodayInventoryWhenExchangeBalanceDoesNotMatchTrades() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        long now = System.currentTimeMillis();
+        engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L);
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
+                .set(now);
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp"))
+                .set(now);
+        atomic("lastBestAsk", BigDecimal.class).set(new BigDecimal("0.6001"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "ENSO", new BigDecimal("11"), BigDecimal.ZERO, new BigDecimal("11")));
+        when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
+        when(tradeService.getMyTrades(eq("ENSOUSDT"), anyLong(), anyLong(), eq(1000)))
+                .thenReturn(mapper.readTree("""
+                        [{"id":11,"orderId":101,"price":"0.6000","qty":"10","quoteQty":"6.0000",
+                          "commission":"0","commissionAsset":"USDT","isBuyer":true,"time":%d}]
+                        """.formatted(now - 1000)));
+
+        assertFalse(engine.startTrading());
+
+        assertFalse(engine.getIsRunning().get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.HALTED, engine.getCurrentStatus().get());
+        assertTrue(engine.getStatusReason().get().contains("今日远程成交无法还原成本或与交易所余额不一致"));
+        verify(tradeService, never()).placeLimitGtcSell(anyString(), any(), any(), anyString());
+        verify(tradeService, never()).cancelAndReplaceOrder(anyString(), eq("SELL"), any(), any(), any(), anyString());
+    }
+
+    @Test
+    void remoteTodayStatusClearsStaleLocalInventoryWhenExchangeIsFlat() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        TradingRiskGuard guard = (TradingRiskGuard) ReflectionTestUtils.getField(engine, "riskGuard");
+        guard.restoreOpenPosition(new BigDecimal("1298"), new BigDecimal("12.0025"),
+                new BigDecimal("0.0092"), System.currentTimeMillis(), properties.getStrategy());
+        guard.trip("MAX_INVENTORY_AGE");
+        when(tradeService.getMyTrades(eq("ENSOUSDT"), anyLong(), anyLong(), eq(1000)))
+                .thenReturn(mapper.readTree("[]"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "ENSO", BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
+        when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
+
+        HighFrequencyVolumeChurnEngine.RemoteTodayStatusSnapshot snapshot = engine.getRemoteTodayStatusSnapshot();
+
+        assertTrue(snapshot.remote());
+        assertEquals(0, snapshot.risk().positionQty().signum());
+        assertEquals(0, snapshot.dailyStats().positionQty().signum());
+        assertNull(snapshot.risk().entryBlockReason());
+        assertEquals(0, engine.getRiskSnapshot().positionQty().signum());
+        assertNull(engine.getRiskSnapshot().entryBlockReason());
+    }
+
+    @Test
+    void remoteTodayStatusComputesTodayFeeAndProfitFromExchangeTrades() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        long now = System.currentTimeMillis();
+        when(tradeService.getMyTrades(eq("ENSOUSDT"), anyLong(), anyLong(), eq(1000)))
+                .thenReturn(mapper.readTree("""
+                        [
+                          {"id":11,"orderId":101,"price":"0.6000","qty":"10","quoteQty":"6.0000",
+                           "commission":"0.0060","commissionAsset":"USDT","isBuyer":true,"time":%d},
+                          {"id":12,"orderId":102,"price":"0.6010","qty":"10","quoteQty":"6.0100",
+                           "commission":"0.00601","commissionAsset":"USDT","isBuyer":false,"time":%d}
+                        ]
+                        """.formatted(now - 2000, now - 1000)));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "ENSO", BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
+        when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
+
+        HighFrequencyVolumeChurnEngine.RemoteTodayStatusSnapshot snapshot = engine.getRemoteTodayStatusSnapshot();
+
+        assertTrue(snapshot.remote());
+        assertEquals(0, new BigDecimal("12.0100").compareTo(snapshot.dailyStats().totalVolumeQuote()));
+        assertEquals(0, new BigDecimal("0.01201").compareTo(snapshot.dailyStats().totalCommissionQuoteEquivalent()));
+        assertEquals(0, new BigDecimal("0.0100").compareTo(snapshot.dailyStats().realizedGrossPnlQuote()));
+        assertEquals(0, new BigDecimal("-0.00201").compareTo(snapshot.dailyStats().netRealizedPnlQuote()));
+        assertEquals(0, new BigDecimal("-0.00201").compareTo(snapshot.risk().realizedPnlUsdt()));
+        assertEquals(0, new BigDecimal("0.01201").compareTo(snapshot.risk().estimatedFeesUsdt()));
     }
 
     @Test
@@ -684,13 +860,11 @@ class HighFrequencyVolumeChurnEngineTest {
     @Test
     void unknownTradeEventFailsClosed() {
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
 
         orderUpdate(999L, "external-order", "BUY", "TRADE", "FILLED",
                 "10", "0.60", "0", "USDT");
 
         assertFalse(engine.getIsRunning().get());
-        assertFalse(engine.getLiveArmed().get());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.HALTED, engine.getCurrentStatus().get());
     }
 
@@ -893,7 +1067,6 @@ class HighFrequencyVolumeChurnEngineTest {
     @Test
     void priceDropNeverTriggersAutomaticMarketSell() {
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
         atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
         atomic("activeOrderId", Long.class).set(77L);
@@ -934,7 +1107,6 @@ class HighFrequencyVolumeChurnEngineTest {
         engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L);
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
         atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
         atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
@@ -992,7 +1164,6 @@ class HighFrequencyVolumeChurnEngineTest {
         engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L, null, null, null, null, null, null, 90_000L);
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
 
         ReflectionTestUtils.invokeMethod(engine, "completeFlatExit", false);
 
@@ -1027,7 +1198,6 @@ class HighFrequencyVolumeChurnEngineTest {
                 20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO,
                 1_800_000L, BigDecimal.ZERO, BigDecimal.ZERO, null, 75_000L);
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
 
         ReflectionTestUtils.invokeMethod(engine, "completeFlatExit", false);
 
@@ -1061,7 +1231,6 @@ class HighFrequencyVolumeChurnEngineTest {
         engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L);
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
         atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
         atomic("activeOrderId", Long.class).set(77L);
@@ -1143,7 +1312,6 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(90L, result.orderId());
         assertEquals(0, new BigDecimal("7.0").compareTo(result.quantity()));
         assertFalse(engine.getIsRunning().get());
-        assertFalse(engine.getLiveArmed().get());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
         verify(tradeService).placeMarketSell(eq("ENSOUSDT"), decimalEquals("7.0"), anyString());
     }
@@ -1175,7 +1343,6 @@ class HighFrequencyVolumeChurnEngineTest {
     void delayedSellTradesContinueRunningAfterThreeRetriesWhenExchangeIsFlat() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
         atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
         ((TradingRiskGuard) ReflectionTestUtils.getField(engine, "riskGuard"))
@@ -1198,7 +1365,6 @@ class HighFrequencyVolumeChurnEngineTest {
         assertNull(atomic("activeOrderId", Long.class).get());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
         assertTrue(engine.getIsRunning().get());
-        assertTrue(engine.getLiveArmed().get());
         assertEquals(0, engine.getRiskSnapshot().positionQty().signum());
         assertEquals("运行中，等待入场信号", engine.getStatusReason().get());
     }
@@ -1262,9 +1428,8 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void staleMarketOnStartReconnectsWithoutDiscardingOperatorArm() {
+    void staleMarketOnStartReconnectsWithoutAutomaticStart() {
         WebSocket socket = mock(WebSocket.class);
-        engine.getLiveArmed().set(true);
         userDataStreamReady.set(true);
         atomic("activeMarketWebSocket", WebSocket.class).set(socket);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
@@ -1277,20 +1442,7 @@ class HighFrequencyVolumeChurnEngineTest {
         assertFalse(engine.startTrading());
 
         verify(socket).abort();
-        assertTrue(engine.getLiveArmed().get());
         assertTrue(engine.getStatusReason().get().contains("正在重连"));
-    }
-
-    @Test
-    void classifiesOnlyImmediateSafetyConditionsAsHardEntryRisk() {
-        assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("STALE_MARKET_DATA"));
-        assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("THIN_DEPTH_BOOK"));
-        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("SELL_TAKER_PRESSURE"));
-        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("SHORT_TERM_DOWNMOVE"));
-        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("WAIT_FOR_PRICE_RECLAIM"));
-        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("WEAK_TOP_OF_BOOK"));
-        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("WEAK_MULTI_LEVEL_BIDS"));
-        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("MICROPRICE_NOT_SUPPORTIVE"));
     }
 
     @Test
@@ -1351,7 +1503,6 @@ class HighFrequencyVolumeChurnEngineTest {
     @Test
     void makerEntryTimeoutCancelsWithoutIocFallback() throws Exception {
         engine.getIsRunning().set(true);
-        engine.getLiveArmed().set(true);
         engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
         atomic("activeOrderId", Long.class).set(42L);
         atomic("activeClientOrderId", String.class).set("churn-BUY-maker");
@@ -1379,7 +1530,6 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
         assertNull(atomic("activeOrderId", Long.class).get());
         assertTrue(engine.getIsRunning().get());
-        assertTrue(engine.getLiveArmed().get());
     }
 
     @Test
@@ -1545,10 +1695,4 @@ class HighFrequencyVolumeChurnEngineTest {
                 new BigDecimal(quantity), new BigDecimal(cost), 0, 0, true);
     }
 
-    private void stubObservationSummaries() {
-        PostFillOutcomeTracker tracker = (PostFillOutcomeTracker) ReflectionTestUtils.getField(
-                engine, "postFillOutcomeTracker");
-        when(tracker.getBaselineSummary()).thenReturn(PostFillOutcomeTracker.OutcomeSummary.empty(0));
-        when(tracker.getQualifiedSignalSummary()).thenReturn(PostFillOutcomeTracker.OutcomeSummary.empty(0));
-    }
 }

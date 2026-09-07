@@ -76,11 +76,6 @@ public class AccountUserDataStream implements WebSocket.Listener {
     }
 
     public void start() {
-        if (properties.getStrategy().isObserveMode()) {
-            log.info("[accountId={} alias={}] OBSERVE 模式：不连接账户 User Data Stream",
-                    credentials.accountId(), credentials.alias());
-            return;
-        }
         connect();
         watchdog.scheduleWithFixedDelay(this::checkStreamHealth, 10, 10, TimeUnit.SECONDS);
     }
@@ -302,7 +297,6 @@ public class AccountUserDataStream implements WebSocket.Listener {
 
     /** Reconnects this account only and waits for a fresh signed subscription. */
     public boolean reconnectNow(long timeoutMs) {
-        if (properties.getStrategy().isObserveMode()) return true;
         CompletableFuture<Boolean> future = new CompletableFuture<>();
         readinessFuture.set(future);
         terminalAuthenticationFailure.set(false);

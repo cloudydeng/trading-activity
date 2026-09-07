@@ -21,7 +21,7 @@ class AccountTradingRuntimeTest {
         HighFrequencyVolumeChurnEngine engineB = mock(HighFrequencyVolumeChurnEngine.class);
         when(engineA.startTrading()).thenReturn(true);
         when(engineB.startTrading()).thenReturn(true);
-        when(engineA.disarmLiveTrading()).thenReturn(true);
+        when(engineA.stopTrading()).thenReturn(true);
         AccountTradingRuntime accountA = runtime("account-a", engineA);
         AccountTradingRuntime accountB = runtime("account-b", engineB);
 
@@ -33,8 +33,8 @@ class AccountTradingRuntimeTest {
 
         verify(engineA).startTrading();
         verify(engineB).startTrading();
-        verify(engineA).disarmLiveTrading();
-        verify(engineB, never()).disarmLiveTrading();
+        verify(engineA).stopTrading();
+        verify(engineB, never()).stopTrading();
     }
 
     @Test

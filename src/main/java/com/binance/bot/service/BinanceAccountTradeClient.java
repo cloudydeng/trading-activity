@@ -331,6 +331,17 @@ public class BinanceAccountTradeClient {
         return getSignedJson("/api/v3/myTrades", params, "查询订单成交明细失败");
     }
 
+    /** Authoritative fills in a UTC time window, used for remote-first same-day accounting. */
+    public JsonNode getMyTrades(String symbol, long startTimeMs, long endTimeMs, int limit) {
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("symbol", symbol.toUpperCase());
+        params.put("startTime", String.valueOf(startTimeMs));
+        params.put("endTime", String.valueOf(endTimeMs));
+        params.put("limit", String.valueOf(Math.max(1, Math.min(limit, 1000))));
+        params.put("timestamp", String.valueOf(System.currentTimeMillis()));
+        return getSignedJson("/api/v3/myTrades", params, "查询今日成交明细失败");
+    }
+
     /** Public conversion price used only to value commissions charged in a third asset such as BNB. */
     public BigDecimal getTickerPrice(String symbol) {
         try {
