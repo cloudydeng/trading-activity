@@ -762,7 +762,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 Long activeId = activeOrderId.get();
                 if (activeId != null) {
                     if (now - orderPlacedTimestamp.get() >= exitOrderTimeoutMs()) {
-                        rollTimedOutExitToBestAsk(symbol, bestBid, bestAsk, rule, activeId);
+                        BigDecimal currentBestAsk = positiveOrZero(bestAsk);
+                        if (currentBestAsk.signum() <= 0) currentBestAsk = lastBestAskOrZero();
+                        if (deferTimedOutExitIfStillBestAsk(rule, currentBestAsk, now)) return;
+                        if (currentBestAsk.signum() <= 0) return;
+                        rollTimedOutExitToBestAsk(symbol, bestBid, currentBestAsk, rule, activeId);
                     }
                     return;
                 }
@@ -1084,12 +1088,39 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     /**
-     * Every sell order has a configurable working window. Once it expires, cancel
-     * and reconcile the old order before placing the remaining inventory back on a
-     * repriced LIMIT order. Both strategies use the latest best ask after timeout
-     * to prioritize a faster flat exit. FEE_AWARE_MAKER only enforces the fee
-     * floor on the initial exit order. Neither path falls back to MARKET.
+     * Every sell order has a configurable working window. Once it expires, keep
+     * the order when it is still at the latest best ask and re-arm the timer.
+     * Only an order that is no longer at the best ask is canceled, reconciled,
+     * and repriced. Both strategies use the latest best ask when repricing;
+     * FEE_AWARE_MAKER only enforces the fee floor on the initial exit order.
+     * Neither path falls back to MARKET.
      */
+    private boolean deferTimedOutExitIfStillBestAsk(SymbolRuleManager.SymbolRule rule,
+                                                    BigDecimal bestAsk, long now) {
+        BigDecimal normalizedAsk = positiveOrZero(bestAsk);
+        if (normalizedAsk.signum() <= 0) {
+            orderPlacedTimestamp.set(now);
+            persistRuntimeState(true);
+            statusReason.set("卖单已超时但暂时无法确认最新卖一，保留当前 LIMIT 卖单；下次按配置时间复查");
+            log.info("[accountId={} alias={}] 卖单超时但最新卖一暂不可用，保留订单 {}，下次按 {} 复查",
+                    accountId, accountAlias, activeOrderId.get(), durationLabel(exitOrderTimeoutMs()));
+            return true;
+        }
+        normalizedAsk = PrecisionUtil.roundDownToStep(normalizedAsk, rule.tickSize());
+        BigDecimal orderPrice = activeOrderPrice.get();
+        if (orderPrice == null || orderPrice.signum() <= 0) return false;
+        BigDecimal normalizedOrderPrice = PrecisionUtil.roundDownToStep(orderPrice, rule.tickSize());
+        if (normalizedOrderPrice.compareTo(normalizedAsk) != 0) return false;
+
+        orderPlacedTimestamp.set(now);
+        persistRuntimeState(true);
+        statusReason.set("卖单已超时但仍在卖一，保留当前 LIMIT 卖单 @ "
+                + normalizedAsk.toPlainString() + "；下次按配置时间复查");
+        log.info("[accountId={} alias={}] 卖单 {} 满 {} 仍在卖一 @ {}，保留原单并重新计时",
+                accountId, accountAlias, activeOrderId.get(), durationLabel(exitOrderTimeoutMs()), normalizedAsk);
+        return true;
+    }
+
     private void rollTimedOutExitToBestAsk(String symbol, BigDecimal bestBid, BigDecimal bestAsk,
                                            SymbolRuleManager.SymbolRule rule, long orderId) {
         if (!exitSubmissionInFlight.compareAndSet(false, true)) return;

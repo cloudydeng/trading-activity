@@ -414,6 +414,29 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void timedOutSellAtLatestAskIsKeptAndTimerIsRearmed() throws Exception {
+        engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L);
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("activeOrderId", Long.class).set(77L);
+        atomic("activeOrderPrice", BigDecimal.class).set(new BigDecimal("0.602000"));
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
+        AtomicLong placedAt = (AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp");
+        long expiredAt = System.currentTimeMillis() - 121_000L;
+        placedAt.set(expiredAt);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.601900"), new BigDecimal("0.602000"));
+
+        verify(tradeService, never()).cancelOrder("ENSOUSDT", 77L);
+        verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
+                any(), any(), isNull(), anyString());
+        assertTrue(placedAt.get() > expiredAt);
+        assertTrue(engine.getStatusReason().get().contains("仍在卖一，保留当前 LIMIT 卖单"));
+    }
+
+    @Test
     void feeAwareMakerWaitsWhenNextEntryWouldExceedFirstBuyAnchor() throws Exception {
         engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO);
