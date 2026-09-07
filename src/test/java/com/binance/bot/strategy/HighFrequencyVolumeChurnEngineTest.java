@@ -437,6 +437,40 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void timedOutBidAskSellDropsEntryFloorAndRepricesToLatestAsk() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L);
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("activeOrderId", Long.class).set(77L);
+        atomic("activeOrderPrice", BigDecimal.class).set(new BigDecimal("0.600100"));
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6.0000"));
+        AtomicLong placedAt = (AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp");
+        long expiredAt = System.currentTimeMillis() - 121_000L;
+        placedAt.set(expiredAt);
+        when(tradeService.cancelOrder("ENSOUSDT", 77L))
+                .thenReturn(mapper.readTree("{\"orderId\":77,\"status\":\"CANCELED\"}"));
+        when(tradeService.getOrder("ENSOUSDT", 77L)).thenReturn(mapper.readTree(
+                "{\"orderId\":77,\"status\":\"CANCELED\",\"side\":\"SELL\",\"executedQty\":\"0\",\"cummulativeQuoteQty\":\"0\"}"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(
+                new BinanceAccountTradeClient.AssetBalance("ENSO", new BigDecimal("10"), BigDecimal.ZERO,
+                        new BigDecimal("10")));
+        when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.5990"), anyString())).thenReturn(mapper.readTree("{\"orderId\":88}"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.598900"), new BigDecimal("0.599000"));
+
+        verify(tradeService).cancelOrder("ENSOUSDT", 77L);
+        verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.5990"), anyString());
+        assertEquals(88L, atomic("activeOrderId", Long.class).get());
+    }
+
+    @Test
     void feeAwareMakerWaitsWhenNextEntryWouldExceedFirstBuyAnchor() throws Exception {
         engine.switchStrategy("ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L, new BigDecimal("10"), BigDecimal.ZERO);
@@ -1102,7 +1136,7 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void bidAskMakerEverySellTimeoutRollsRemainingPositionToBestAskOrAboveBuyAverage() throws Exception {
+    void bidAskMakerEverySellTimeoutRollsRemainingPositionToBestAsk() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L);
@@ -1137,7 +1171,7 @@ class HighFrequencyVolumeChurnEngineTest {
                 decimalEquals("0.6001"), anyString());
         verify(tradeService, never()).placeMarketSell(anyString(), any(), anyString());
         assertEquals(88L, atomic("activeOrderId", Long.class).get());
-        assertTrue(engine.getStatusReason().get().contains("买入价上方"));
+        assertTrue(engine.getStatusReason().get().contains("最新卖一"));
 
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
                 .set(System.currentTimeMillis() - 121_000);
@@ -1146,15 +1180,15 @@ class HighFrequencyVolumeChurnEngineTest {
         when(tradeService.getOrder("ENSOUSDT", 88L)).thenReturn(mapper.readTree(
                 "{\"orderId\":88,\"status\":\"CANCELED\",\"side\":\"SELL\",\"executedQty\":\"0\",\"cummulativeQuoteQty\":\"0\"}"));
         when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
-                decimalEquals("0.6001"), anyString()))
+                decimalEquals("0.5991"), anyString()))
                 .thenReturn(mapper.readTree("{\"orderId\":99}"));
 
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
                 new BigDecimal("0.5990"), new BigDecimal("0.5991"));
 
         verify(tradeService).cancelOrder("ENSOUSDT", 88L);
-        verify(tradeService, times(2)).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
-                decimalEquals("0.6001"), anyString());
+        verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.5991"), anyString());
         assertEquals(99L, atomic("activeOrderId", Long.class).get());
     }
 
@@ -1226,7 +1260,7 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void bidAskMakerTimedSellRollKeepsPriceAboveRestoredBuyAverageWhenBestAskFalls() throws Exception {
+    void bidAskMakerTimedSellRollUsesBestAskBelowRestoredBuyAverage() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L);
@@ -1248,7 +1282,7 @@ class HighFrequencyVolumeChurnEngineTest {
                 new BinanceAccountTradeClient.AssetBalance("ENSO", new BigDecimal("10"), BigDecimal.ZERO,
                         new BigDecimal("10")));
         when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
-                decimalEquals("0.6007"), anyString()))
+                decimalEquals("0.5991"), anyString()))
                 .thenReturn(mapper.readTree("{\"orderId\":88}"));
 
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
@@ -1256,9 +1290,9 @@ class HighFrequencyVolumeChurnEngineTest {
 
         verify(tradeService).cancelOrder("ENSOUSDT", 77L);
         verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
-                decimalEquals("0.6007"), anyString());
+                decimalEquals("0.5991"), anyString());
         assertEquals(88L, atomic("activeOrderId", Long.class).get());
-        assertTrue(engine.getStatusReason().get().contains("买入价上方"));
+        assertTrue(engine.getStatusReason().get().contains("最新卖一"));
     }
 
     @Test

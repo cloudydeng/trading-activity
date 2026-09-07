@@ -331,6 +331,15 @@ public class BinanceAccountTradeClient {
         return getSignedJson("/api/v3/myTrades", params, "查询订单成交明细失败");
     }
 
+    /** Most recent authoritative fills for one symbol, used by the global dashboard feed. */
+    public JsonNode getRecentMyTrades(String symbol, int limit) {
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("symbol", symbol.toUpperCase());
+        params.put("limit", String.valueOf(Math.max(1, Math.min(limit, 1000))));
+        params.put("timestamp", String.valueOf(System.currentTimeMillis()));
+        return getSignedJson("/api/v3/myTrades", params, "查询最近成交明细失败");
+    }
+
     /** Authoritative fills in a UTC time window, used for remote-first same-day accounting. */
     public JsonNode getMyTrades(String symbol, long startTimeMs, long endTimeMs, int limit) {
         Map<String, String> params = new LinkedHashMap<>();

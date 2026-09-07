@@ -766,7 +766,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                         if (currentBestAsk.signum() <= 0) currentBestAsk = lastBestAskOrZero();
                         if (deferTimedOutExitIfStillBestAsk(rule, currentBestAsk, now)) return;
                         if (currentBestAsk.signum() <= 0) return;
-                        rollTimedOutExitToBestAsk(symbol, bestBid, currentBestAsk, rule, activeId);
+                        rollTimedOutExitToBestAsk(symbol, currentBestAsk, rule, activeId);
                     }
                     return;
                 }
@@ -1115,13 +1115,14 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         orderPlacedTimestamp.set(now);
         persistRuntimeState(true);
         statusReason.set("卖单已超时但仍在卖一，保留当前 LIMIT 卖单 @ "
-                + normalizedAsk.toPlainString() + "；下次按配置时间复查");
+                + normalizedOrderPrice.toPlainString() + "；下次按配置时间复查");
         log.info("[accountId={} alias={}] 卖单 {} 满 {} 仍在卖一 @ {}，保留原单并重新计时",
-                accountId, accountAlias, activeOrderId.get(), durationLabel(exitOrderTimeoutMs()), normalizedAsk);
+                accountId, accountAlias, activeOrderId.get(), durationLabel(exitOrderTimeoutMs()),
+                normalizedOrderPrice);
         return true;
     }
 
-    private void rollTimedOutExitToBestAsk(String symbol, BigDecimal bestBid, BigDecimal bestAsk,
+    private void rollTimedOutExitToBestAsk(String symbol, BigDecimal bestAsk,
                                            SymbolRuleManager.SymbolRule rule, long orderId) {
         if (!exitSubmissionInFlight.compareAndSet(false, true)) return;
         try {
@@ -1153,9 +1154,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             }
             if (currentStatus.get() != ChurnStatus.SELLING) currentStatus.set(ChurnStatus.SELLING);
 
-            BigDecimal price = usesFeeAwareMakerStrategy()
-                    ? feeAwareTimedOutExitPrice(rule, bestBid, bestAsk)
-                    : bidAskMakerExitPrice(rule, bestAsk);
+            BigDecimal price = timedOutExitPrice(rule, bestAsk);
             SellabilityResult sellability = currentSellability(rule, price);
             if (!sellability.sellable()) {
                 if (!verifyDustWithinLimit(sellability)) return;
@@ -1182,9 +1181,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 activeOrderPrice.set(price);
                 persistRuntimeState(true);
                 statusReason.set("上一张卖单满 " + durationLabel(exitOrderTimeoutMs())
-                        + "，剩余持仓已按卖一/买入价上方挂 LIMIT @ "
+                        + "，剩余持仓已按最新卖一挂 LIMIT @ "
                         + price.toPlainString());
-                log.info("[accountId={} alias={}] 卖单满 {}，已按卖一/买入价上方重新挂 LIMIT {} {} @ {}",
+                log.info("[accountId={} alias={}] 卖单满 {}，已按最新卖一重新挂 LIMIT {} {} @ {}",
                         accountId, accountAlias, durationLabel(exitOrderTimeoutMs()),
                         quantity, baseAsset(), price);
             } else {
@@ -1381,17 +1380,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return price.signum() > 0 ? price : aboveEntry;
     }
 
-    private BigDecimal feeAwareTimedOutExitPrice(SymbolRuleManager.SymbolRule rule,
-                                                 BigDecimal bestBid, BigDecimal bestAsk) {
+    private BigDecimal timedOutExitPrice(SymbolRuleManager.SymbolRule rule, BigDecimal bestAsk) {
         BigDecimal ask = positiveOrZero(bestAsk);
-        if (ask.signum() > 0) {
-            return PrecisionUtil.roundDownToStep(ask, rule.tickSize());
-        }
-        BigDecimal bid = positiveOrZero(bestBid);
-        if (bid.signum() > 0) {
-            return PrecisionUtil.roundUpToStep(bid.add(rule.tickSize()), rule.tickSize());
-        }
-        return feeProtectedExitPrice(rule, bestAsk);
+        return ask.signum() > 0 ? PrecisionUtil.roundDownToStep(ask, rule.tickSize()) : BigDecimal.ZERO;
     }
 
     private BigDecimal exitReferencePrice(SymbolRuleManager.SymbolRule rule) {
