@@ -355,7 +355,7 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void feeAwareMakerUsesProtectedInitialExitThenBestBidPlusTickAfterTimeout() throws Exception {
+    void feeAwareMakerUsesProtectedInitialExitThenLatestAskAfterTimeout() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
                 "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
@@ -397,20 +397,20 @@ class HighFrequencyVolumeChurnEngineTest {
         when(tradeService.getAssetBalance("ENSO")).thenReturn(
                 new BinanceAccountTradeClient.AssetBalance("ENSO", new BigDecimal("10"), BigDecimal.ZERO,
                         new BigDecimal("10")));
-        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), decimalEquals("0.6001"),
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), decimalEquals("0.6020"),
                 decimalEquals("10"), isNull(), anyString()))
                 .thenReturn(mapper.readTree("{\"orderId\":88}"));
 
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
-                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+                new BigDecimal("0.5990"), new BigDecimal("0.6020"));
 
         verify(tradeService).cancelOrder("ENSOUSDT", 77L);
         verify(tradeService, times(1)).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
                 decimalEquals("0.6013"), decimalEquals("10"), isNull(), anyString());
         verify(tradeService, times(1)).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
-                decimalEquals("0.6001"), decimalEquals("10"), isNull(), anyString());
+                decimalEquals("0.6020"), decimalEquals("10"), isNull(), anyString());
         assertEquals(88L, atomic("activeOrderId", Long.class).get());
-        assertTrue(engine.getStatusReason().get().contains("买一上方一档快速退出"));
+        assertTrue(engine.getStatusReason().get().contains("最新卖一价快速退出"));
     }
 
     @Test
