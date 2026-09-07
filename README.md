@@ -2,11 +2,13 @@
 
 基于公开 WebSocket 行情信号执行小额 Binance 现货交易。系统只有 `LIVE` 运行模式；服务器端 `BINANCE_LIVE_TRADING_ENABLED=true` 后，从控制台手动启动才会真实下单。项目不做自成交。
 
+产品、运营和测试请先阅读 [两种 Maker 策略产品说明](docs/strategy-behavior.md)。
+
 ## 安全边界
 
 - BUY 部分成交会立即进入 SELL 管理，成交以账户事件流和 REST 对账为准。
 - 买入只使用买一价 `LIMIT_MAKER`；每笔最多 `12 USDT`，20 秒后若订单仍是买一则继续挂，只有不再是买一时才撤单；不转 IOC、不因短线信号提前撤单。
-- BUY 一旦真实成交（包括达到最小可卖额的部分成交），立即撤销剩余买单并按实际加权买入均价（按 tick 向上取整）挂 `LIMIT GTC SELL`；例如买入均价 `0.862` 就先挂卖价 `0.862`。
+- BUY 一旦真实成交（包括达到最小可卖额的部分成交），立即撤销剩余买单并对账，再按当前策略挂第一张卖单：`BID_ASK_MAKER` 使用卖一/买入价上方底线，`FEE_AWARE_MAKER` 使用手续费保护价。
 - 每张卖单按配置时间检查（默认 2 分钟）；若原单仍在卖一，则保留原单并重新计时；若不在卖一，则撤单、对账并直接按最新卖一重挂。超时重挂不再使用买入价或手续费保护价底线。
 - 自动交易流程没有价格止损、止损冷却或 MARKET 卖出；MARKET 只保留给人工授权清仓。库存对账与防重复卖出始终是强制保护。
 - 每个 API 账户拥有独立运行时、交易对、订单、持仓、风控和统计；交易对切换前必须停止该账户，并确认无活动订单和当前标的持仓。
@@ -25,7 +27,7 @@ BOT_ACCOUNT_PROFILES_JSON='{
   "account-a":{"alias":"bot-a","apiKey":"...","secretKey":"...","enabled":true},
   "account-b":{"alias":"bot-b","apiKey":"...","secretKey":"...","enabled":true,
                 "orderAmountsUsdt":{"ENSOUSDT":6,"BTCUSDT":12},
-                "symbolStrategies":{"ENSOUSDT":{"mode":"CURRENT"},
+                "symbolStrategies":{"ENSOUSDT":{"mode":"BID_ASK_MAKER"},
                                      "BTCUSDT":{"mode":"FEE_AWARE_MAKER","orderAmountUsdt":6,
                                                  "entryTimeoutMs":180000,"exitTimeoutMs":600000}}}
 }'
@@ -34,13 +36,11 @@ BOT_ACCOUNT_PROFILES_JSON='{
 `orderAmountsUsdt` 可为每个账户按交易对设置单笔 USDT 名义金额；未配置的交易对回退到全局
 `binance.strategy.order-amount-usdt`。单笔金额仍不能超过 `max-live-order-notional-usdt`，并会在控制台显示当前生效值。
 
-`symbolStrategies` 可为每个账户的每个交易对选择策略：`CURRENT` 保留旧版成本价退出；
-`BID_ASK_MAKER` 在买一挂买单、成交后按卖一挂普通限价卖单；
-`FEE_AWARE_MAKER` 在买一挂买单，
-初始卖出只使用 `LIMIT_MAKER`，并以“已记录买入成本 + 预计卖出手续费”为价格下限，先尝试把手续费赚回。
-卖出完成后，下一轮买单价格不得高于上一轮 BUY 成交均价；如果当前买一高于该价格，策略会等待价格回落。
+`symbolStrategies` 可为每个账户的每个交易对选择两种策略：
+`BID_ASK_MAKER` 在买一挂买单，初始卖价取卖一和买入价上方 1 tick 的较高值；
+`FEE_AWARE_MAKER` 同样在买一挂买单，但增加买入锚点，并让初始卖价不低于手续费保护价。
 卖单到达检查时间时，如果仍在卖一就保留并重新计时；如果不在卖一，则撤单对账并直接按最新卖一重挂。
-此阶段优先快速成交和释放仓位，不再强制买入价或手续费保护价底线。未配置的交易对回退到 `CURRENT`。
+超时阶段优先释放仓位，不再强制买入价或手续费保护价底线。未配置时默认使用 `FEE_AWARE_MAKER`。
 
 控制台的“运行时策略切换”可在不重启的情况下修改当前账户/交易对的策略。切换请求会写入 SQLite
 `runtime_setting`，重启后优先于环境变量配置恢复；如果当前处于 BUYING 或 SELLING，修改会排队到订单完成并回到
@@ -48,7 +48,8 @@ BOT_ACCOUNT_PROFILES_JSON='{
 
 对应接口为 `POST /api/accounts/{accountId}/strategy`（旧版默认账户也支持
 `POST /api/bot/strategy`），请求体字段为 `symbol`、`mode`、`orderAmountUsdt`、`entryTimeoutMs`、
-`exitTimeoutMs`、`makerFeeBps` 和兼容旧请求的 `targetNetProfitBps`。`makerFeeBps` 留空时按账户和交易对从币安读取
+`exitTimeoutMs`、`postSellEntryDelayMs`、`dailyVolumeLimitUsdt`、`makerFeeBps`、锚点相关字段和兼容旧请求的
+`targetNetProfitBps`。`makerFeeBps` 留空时按账户和交易对从币安读取
 实际 Maker 卖出费率，读取失败才回退到全局保守估值；金额不能超过生产上限，超时时间限制为 1 秒至 30 分钟。
 
 单账户旧配置仍作为兼容回退，仅在未配置 `BOT_ACCOUNT_PROFILES_JSON` 时生效：
