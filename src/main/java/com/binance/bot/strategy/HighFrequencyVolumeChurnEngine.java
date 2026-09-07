@@ -15,13 +15,19 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.nio.ByteBuffer;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
@@ -39,6 +45,7 @@ import java.util.concurrent.ConcurrentHashMap;
 @Slf4j
 public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private static final long COMMISSION_RATE_CACHE_MS = TimeUnit.MINUTES.toMillis(15);
+    private static final long REMOTE_TODAY_ACCOUNTING_CACHE_MS = TimeUnit.SECONDS.toMillis(10);
     private final String accountId;
     private final String accountAlias;
     private final String accountTag;
@@ -92,6 +99,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final ConcurrentHashMap<String, CachedCommissionRate> makerSellFeeRateCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, Integer> orderReconcileFailures = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, Integer> tradeReconcileFailures = new ConcurrentHashMap<>();
+    private final AtomicReference<RemoteTodayStatusSnapshot> remoteTodayAccountingCache = new AtomicReference<>();
+    private final Object remoteTodayAccountingLock = new Object();
     /** Active profiles are replaced atomically so a runtime switch never mutates a profile in use. */
     private final ConcurrentHashMap<String, BinanceProperties.SymbolStrategyProfile> strategyProfiles =
             new ConcurrentHashMap<>();
@@ -338,10 +347,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             halt("发现未由本进程恢复的活动订单，需先人工对账");
             return false;
         }
-        SellabilityResult startupSellability = currentSellability(ruleManager.getRule(properties.getStrategy().getSymbol()),
-                lastBestAsk.get());
+        SymbolRuleManager.SymbolRule startupRule = ruleManager.getRule(properties.getStrategy().getSymbol());
+        SellabilityResult startupSellability = currentSellability(startupRule, lastBestAsk.get());
         if (holdingInventory.get().signum() > 0 && startupSellability.sellable()) {
-            halt("发现既有可交易标的持仓，成本未知；拒绝自动接管");
+            if (restoreRemoteTodayInventoryWithoutActiveOrder(startupRule, startupSellability)) return true;
+            halt("发现既有可交易标的持仓，但今日远程成交无法还原成本或与交易所余额不一致；拒绝自动接管");
             return false;
         }
         if (holdingInventory.get().signum() > 0 && !verifyDustWithinLimit(startupSellability)) {
@@ -361,6 +371,35 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         log.info("[accountId={} alias={}] 引擎启动，当前标的持仓: {}", accountId, accountAlias,
                 holdingInventory.get());
         return true;
+    }
+
+    private boolean restoreRemoteTodayInventoryWithoutActiveOrder(SymbolRuleManager.SymbolRule rule,
+                                                                  SellabilityResult sellability) {
+        if (rule == null || sellability == null || !sellability.sellable()) return false;
+        RemoteTodayStatusSnapshot remote = getRemoteTodayStatusSnapshot();
+        if (remote == null || !remote.remote()) return false;
+        DailyTradeStatsStore.DailyStatsSnapshot today = remote.dailyStats();
+        if (today.positionQty().signum() <= 0 || today.positionCostQuote().signum() <= 0) return false;
+        if (holdingInventory.get().subtract(today.positionQty()).abs().compareTo(rule.stepSize()) >= 0) {
+            log.warn("[accountId={} alias={}] 启动发现可卖持仓，但交易所余额 {} 与今日远程成交持仓 {} 不一致，拒绝自动接管",
+                    accountId, accountAlias, holdingInventory.get(), today.positionQty());
+            return false;
+        }
+
+        clearTrackedOrders();
+        resetEntryTarget();
+        riskGuard.restoreOpenPosition(today.positionQty(), today.positionCostQuote(),
+                lastBestAskOrZero(), remote.risk().positionOpenedAtMs(), properties.getStrategy());
+        isRunning.set(true);
+        currentStatus.set(ChurnStatus.SELLING);
+        statusReason.set("启动时按今日远程成交恢复持仓，重新挂卖单");
+        submitImmediateExit(rule);
+        boolean accepted = activeOrderId.get() != null && currentStatus.get() == ChurnStatus.SELLING;
+        if (accepted) {
+            log.warn("[accountId={} alias={}] 启动按今日远程成交恢复无活动订单持仓: qty={} cost={}，已重新挂 SELL",
+                    accountId, accountAlias, today.positionQty(), today.positionCostQuote());
+        }
+        return accepted;
     }
 
     private DailyTradeStatsStore.RuntimeState loadRuntimeState() {
@@ -2646,6 +2685,293 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public DailyTradeStatsStore.DailyStatsSnapshot getDailyStatsSnapshot() {
         return dailyStatsStore.today(accountId, accountAlias, properties.getStrategy().getSymbol());
     }
+
+    public RemoteTodayStatusSnapshot getRemoteTodayStatusSnapshot() {
+        long now = System.currentTimeMillis();
+        RemoteTodayStatusSnapshot cached = remoteTodayAccountingCache.get();
+        if (cached != null && now - cached.updatedAtMs() < REMOTE_TODAY_ACCOUNTING_CACHE_MS) return cached;
+        synchronized (remoteTodayAccountingLock) {
+            cached = remoteTodayAccountingCache.get();
+            if (cached != null && now - cached.updatedAtMs() < REMOTE_TODAY_ACCOUNTING_CACHE_MS) return cached;
+            RemoteTodayStatusSnapshot refreshed = fetchRemoteTodayStatusSnapshot(now);
+            if (refreshed != null) {
+                remoteTodayAccountingCache.set(refreshed);
+                return refreshed;
+            }
+            return cached == null ? localTodayStatusSnapshot(now) : cached;
+        }
+    }
+
+    private RemoteTodayStatusSnapshot fetchRemoteTodayStatusSnapshot(long nowMs) {
+        String symbol = properties.getStrategy().getSymbol();
+        LocalDate today = LocalDate.now(ZoneOffset.UTC);
+        long startMs = today.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
+        JsonNode trades = tradeService.getMyTrades(symbol, startMs, nowMs, 1000);
+        BinanceAccountTradeClient.AssetBalance balance = tradeService.getAssetBalance(baseAsset());
+        JsonNode openOrders = tradeService.getOpenOrders(symbol);
+        if (trades == null || !trades.isArray() || balance == null || openOrders == null || !openOrders.isArray()) {
+            log.warn("[accountId={} alias={}] 今日远程成交/余额快照暂不可用，继续使用上一份状态缓存", accountId, accountAlias);
+            return null;
+        }
+        RemoteTodayAccumulator accumulator = new RemoteTodayAccumulator(today, accountId, accountAlias, symbol);
+        List<JsonNode> sortedTrades = new ArrayList<>();
+        trades.forEach(sortedTrades::add);
+        sortedTrades.sort(Comparator
+                .comparingLong((JsonNode trade) -> trade.path("time").asLong(0))
+                .thenComparingLong(trade -> trade.path("id").asLong(0)));
+        for (JsonNode trade : sortedTrades) {
+            long tradeTime = trade.path("time").asLong(0);
+            if (tradeTime < startMs || tradeTime > nowMs) continue;
+            BigDecimal quantity = decimalOrZero(trade.path("qty").asText("0"));
+            BigDecimal price = decimalOrZero(trade.path("price").asText("0"));
+            BigDecimal quote = decimalOrZero(trade.path("quoteQty").asText(quantity.multiply(price).toPlainString()));
+            BigDecimal commission = decimalOrZero(trade.path("commission").asText("0"));
+            String commissionAsset = trade.path("commissionAsset").asText("");
+            BigDecimal commissionQuote = commissionQuoteEquivalent(commission, commissionAsset, price);
+            String side = trade.path("isBuyer").asBoolean(false) ? "BUY" : "SELL";
+            boolean baseCommission = baseAsset().equalsIgnoreCase(commissionAsset);
+            BigDecimal inventoryQuantity = quantity;
+            if (baseCommission) {
+                inventoryQuantity = "BUY".equals(side)
+                        ? inventoryQuantity.subtract(commission).max(BigDecimal.ZERO)
+                        : inventoryQuantity.add(commission);
+            }
+            BigDecimal economicFeeQuote = baseCommission ? BigDecimal.ZERO : commissionQuote;
+            accumulator.record(side, trade.path("orderId").asLong(-1), trade.path("id").asLong(-1),
+                    inventoryQuantity, quantity, price, quote, commission, commissionAsset,
+                    commissionQuote, economicFeeQuote, tradeTime);
+        }
+
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule(symbol);
+        DailyTradeStatsStore.DailyStatsSnapshot daily = accumulator.dailySnapshot();
+        DailyTradeStatsStore.DailyStatsSnapshot balanceAlignedDaily = alignRemoteDailyWithBalance(daily, balance, rule);
+        applyRemoteTodayToRuntime(balanceAlignedDaily, balance, rule, noOpenOrders(openOrders),
+                accumulator.positionOpenedAtMs(), nowMs);
+        TradingRiskGuard.RiskSnapshot risk = remoteRiskSnapshot(balanceAlignedDaily, balance, rule,
+                accumulator.positionOpenedAtMs());
+        TradeAccountingLedger.AccountingSnapshot accounting = accumulator.accountingSnapshot();
+        totalVolumeUsdt.set(balanceAlignedDaily.totalVolumeQuote());
+        roundTripsCompleted.set(balanceAlignedDaily.roundTrips());
+        return new RemoteTodayStatusSnapshot(risk, accounting, balanceAlignedDaily, true,
+                sortedTrades.size() >= 1000, nowMs);
+    }
+
+    private RemoteTodayStatusSnapshot localTodayStatusSnapshot(long nowMs) {
+        return new RemoteTodayStatusSnapshot(getRiskSnapshot(), getAccountingSnapshot(), getDailyStatsSnapshot(),
+                false, false, nowMs);
+    }
+
+    private DailyTradeStatsStore.DailyStatsSnapshot alignRemoteDailyWithBalance(
+            DailyTradeStatsStore.DailyStatsSnapshot daily,
+            BinanceAccountTradeClient.AssetBalance balance,
+            SymbolRuleManager.SymbolRule rule) {
+        if (daily == null || balance == null) return daily;
+        BigDecimal remoteQty = balance.total() == null ? BigDecimal.ZERO : balance.total();
+        BigDecimal step = rule == null ? BigDecimal.ZERO : rule.stepSize();
+        if (isEffectivelyFlat(remoteQty, step) && daily.positionQty().signum() > 0) {
+            return new DailyTradeStatsStore.DailyStatsSnapshot(daily.date(), daily.accountId(), daily.accountAlias(),
+                    daily.symbol(), daily.buyVolumeQuote(), daily.sellVolumeQuote(), daily.totalVolumeQuote(),
+                    daily.totalCommissionQuoteEquivalent(), daily.costPerMillionVolume(),
+                    daily.realizedGrossPnlQuote(), daily.netRealizedPnlQuote(), BigDecimal.ZERO,
+                    BigDecimal.ZERO, daily.tradeCount(), daily.roundTrips(), daily.commissionConversionComplete());
+        }
+        return daily;
+    }
+
+    private void applyRemoteTodayToRuntime(DailyTradeStatsStore.DailyStatsSnapshot daily,
+                                           BinanceAccountTradeClient.AssetBalance balance,
+                                           SymbolRuleManager.SymbolRule rule,
+                                           boolean noOpenOrders,
+                                           long positionOpenedAtMs,
+                                           long nowMs) {
+        BigDecimal remoteQty = balance.total() == null ? BigDecimal.ZERO : balance.total();
+        holdingInventory.set(remoteQty);
+        lastKnownFreeBaseBalance.set(balance.free());
+        BigDecimal step = rule == null ? BigDecimal.ZERO : rule.stepSize();
+        if (isEffectivelyFlat(remoteQty, step) && noOpenOrders) {
+            activeSellCoveredQty.set(BigDecimal.ZERO);
+            riskGuard.restoreFlatDaily(daily.netRealizedPnlQuote(), daily.totalCommissionQuoteEquivalent(),
+                    daily.date(), properties.getStrategy());
+            if ("MAX_INVENTORY_AGE".equals(getRiskBlockReason())) {
+                riskGuard.reconcileExchangeFlat(nowMs, properties.getStrategy());
+            }
+            return;
+        }
+        if (daily.positionQty().signum() > 0 && daily.positionCostQuote().signum() > 0
+                && remoteQty.subtract(daily.positionQty()).abs().compareTo(step.max(BigDecimal.ZERO)) <= 0) {
+            riskGuard.restoreFlatDaily(daily.netRealizedPnlQuote(), daily.totalCommissionQuoteEquivalent(),
+                    daily.date(), properties.getStrategy());
+            riskGuard.restoreOpenPosition(daily.positionQty(), daily.positionCostQuote(), lastBestAskOrZero(),
+                    positionOpenedAtMs, properties.getStrategy());
+            return;
+        }
+        if (!isEffectivelyFlat(remoteQty, step) && activeOrderId.get() == null) {
+            riskGuard.trip("POSITION_NOT_FLAT");
+            if (isRunning.get()) {
+                liveArmed.set(false);
+                halt("交易所发现持仓，但今日远程成交无法还原成本；需人工对账");
+            } else {
+                statusReason.set("交易所发现持仓，但今日远程成交无法还原成本；需人工对账");
+            }
+        }
+    }
+
+    private TradingRiskGuard.RiskSnapshot remoteRiskSnapshot(DailyTradeStatsStore.DailyStatsSnapshot daily,
+                                                            BinanceAccountTradeClient.AssetBalance balance,
+                                                            SymbolRuleManager.SymbolRule rule,
+                                                            long positionOpenedAtMs) {
+        BigDecimal mark = lastBestAsk.get();
+        if (mark == null || mark.signum() <= 0) mark = lastMidPrice.get();
+        BigDecimal remoteQty = balance == null || balance.total() == null ? BigDecimal.ZERO : balance.total();
+        BigDecimal step = rule == null ? BigDecimal.ZERO : rule.stepSize();
+        boolean remoteFlat = isEffectivelyFlat(remoteQty, step);
+        boolean reconstructedOpenPosition = !remoteFlat
+                && daily.positionQty().subtract(remoteQty).abs().compareTo(step.max(BigDecimal.ZERO)) <= 0
+                && daily.positionCostQuote().signum() > 0;
+        BigDecimal positionQty = remoteFlat ? BigDecimal.ZERO
+                : (reconstructedOpenPosition ? daily.positionQty() : remoteQty);
+        BigDecimal positionCost = reconstructedOpenPosition ? daily.positionCostQuote() : BigDecimal.ZERO;
+        BigDecimal unrealized = positionQty.signum() > 0 && positionCost.signum() > 0
+                && mark != null && mark.signum() > 0
+                ? positionQty.multiply(mark).subtract(positionCost)
+                : BigDecimal.ZERO;
+        String blockReason = getRiskBlockReason();
+        if (remoteFlat && "MAX_INVENTORY_AGE".equals(blockReason)) blockReason = null;
+        if (!remoteFlat && !reconstructedOpenPosition && blockReason == null) blockReason = "POSITION_NOT_FLAT";
+        return new TradingRiskGuard.RiskSnapshot(blockReason, positionQty, positionCost,
+                mark, daily.netRealizedPnlQuote(), unrealized, daily.netRealizedPnlQuote().add(unrealized),
+                daily.totalCommissionQuoteEquivalent(), positionQty.signum() > 0 ? positionOpenedAtMs : -1,
+                daily.date());
+    }
+
+    private boolean noOpenOrders(JsonNode openOrders) {
+        return openOrders != null && openOrders.isArray() && openOrders.isEmpty();
+    }
+
+    private boolean isEffectivelyFlat(BigDecimal quantity, BigDecimal stepSize) {
+        BigDecimal safeQuantity = quantity == null ? BigDecimal.ZERO : quantity;
+        BigDecimal safeStep = stepSize == null ? BigDecimal.ZERO : stepSize;
+        return safeQuantity.signum() == 0 || (safeStep.signum() > 0 && safeQuantity.compareTo(safeStep) < 0);
+    }
+
+    private BigDecimal decimalOrZero(String value) {
+        try {
+            if (value == null || value.isBlank()) return BigDecimal.ZERO;
+            return new BigDecimal(value);
+        } catch (NumberFormatException e) {
+            return BigDecimal.ZERO;
+        }
+    }
+
+    private final class RemoteTodayAccumulator {
+        private static final BigDecimal ONE_MILLION = new BigDecimal("1000000");
+        private final LocalDate date;
+        private final String accountId;
+        private final String accountAlias;
+        private final String symbol;
+        private final Set<String> processedTradeIds = new LinkedHashSet<>();
+        private final Map<String, BigDecimal> commissionByAsset = new LinkedHashMap<>();
+        private final Set<String> unconvertedCommissionAssets = new LinkedHashSet<>();
+        private BigDecimal buyVolume = BigDecimal.ZERO;
+        private BigDecimal sellVolume = BigDecimal.ZERO;
+        private BigDecimal totalVolume = BigDecimal.ZERO;
+        private BigDecimal commissionQuote = BigDecimal.ZERO;
+        private BigDecimal economicFeeQuote = BigDecimal.ZERO;
+        private BigDecimal realizedGrossPnl = BigDecimal.ZERO;
+        private BigDecimal positionQty = BigDecimal.ZERO;
+        private BigDecimal positionCostQuote = BigDecimal.ZERO;
+        private int tradeCount;
+        private int roundTrips;
+        private long positionOpenedAtMs = -1;
+        private boolean commissionComplete = true;
+
+        private RemoteTodayAccumulator(LocalDate date, String accountId, String accountAlias, String symbol) {
+            this.date = date;
+            this.accountId = accountId;
+            this.accountAlias = accountAlias;
+            this.symbol = symbol;
+        }
+
+        private void record(String side, long orderId, long tradeId, BigDecimal inventoryQuantity,
+                            BigDecimal rawQuantity, BigDecimal price, BigDecimal quoteQuantity,
+                            BigDecimal commission, String commissionAsset, BigDecimal commissionQuoteEquivalent,
+                            BigDecimal economicFeeQuote, long tradeTimeMs) {
+            if (inventoryQuantity == null || inventoryQuantity.signum() <= 0
+                    || quoteQuantity == null || quoteQuantity.signum() <= 0) return;
+            String identity = orderId + ":" + (tradeId >= 0 ? tradeId
+                    : side + ":" + inventoryQuantity.toPlainString() + ":" + quoteQuantity.toPlainString());
+            if (!processedTradeIds.add(identity)) return;
+            tradeCount++;
+            totalVolume = totalVolume.add(quoteQuantity);
+            if ("BUY".equalsIgnoreCase(side)) buyVolume = buyVolume.add(quoteQuantity);
+            else sellVolume = sellVolume.add(quoteQuantity);
+
+            BigDecimal normalizedCommission = commission == null ? BigDecimal.ZERO : commission.max(BigDecimal.ZERO);
+            String normalizedCommissionAsset = normalizeAsset(commissionAsset);
+            if (normalizedCommission.signum() > 0) {
+                commissionByAsset.merge(normalizedCommissionAsset, normalizedCommission, BigDecimal::add);
+                if (commissionQuoteEquivalent == null) {
+                    commissionComplete = false;
+                    unconvertedCommissionAssets.add(normalizedCommissionAsset);
+                } else {
+                    commissionQuote = commissionQuote.add(commissionQuoteEquivalent.max(BigDecimal.ZERO));
+                }
+            }
+            if (economicFeeQuote == null) commissionComplete = false;
+            else this.economicFeeQuote = this.economicFeeQuote.add(economicFeeQuote.max(BigDecimal.ZERO));
+
+            if ("BUY".equalsIgnoreCase(side)) {
+                if (positionQty.signum() == 0) positionOpenedAtMs = tradeTimeMs;
+                positionQty = positionQty.add(inventoryQuantity);
+                positionCostQuote = positionCostQuote.add(quoteQuantity);
+                return;
+            }
+            if (positionQty.signum() <= 0) {
+                commissionComplete = false;
+                return;
+            }
+            BigDecimal closedQty = inventoryQuantity.min(positionQty);
+            BigDecimal averageCost = positionCostQuote.divide(positionQty, java.math.MathContext.DECIMAL64);
+            BigDecimal allocatedCost = averageCost.multiply(closedQty);
+            BigDecimal proceedsShare = inventoryQuantity.compareTo(closedQty) == 0 ? quoteQuantity
+                    : quoteQuantity.multiply(closedQty).divide(inventoryQuantity, java.math.MathContext.DECIMAL64);
+            realizedGrossPnl = realizedGrossPnl.add(proceedsShare.subtract(allocatedCost));
+            positionQty = positionQty.subtract(closedQty);
+            positionCostQuote = positionCostQuote.subtract(allocatedCost);
+            if (positionQty.signum() == 0) {
+                positionQty = BigDecimal.ZERO;
+                positionCostQuote = BigDecimal.ZERO;
+                positionOpenedAtMs = -1;
+                roundTrips++;
+            }
+        }
+
+        private DailyTradeStatsStore.DailyStatsSnapshot dailySnapshot() {
+            BigDecimal costPerMillion = commissionComplete && totalVolume.signum() > 0
+                    ? commissionQuote.multiply(ONE_MILLION).divide(totalVolume, java.math.MathContext.DECIMAL64)
+                    : null;
+            return new DailyTradeStatsStore.DailyStatsSnapshot(date, accountId, accountAlias, symbol,
+                    buyVolume, sellVolume, totalVolume, commissionQuote, costPerMillion, realizedGrossPnl,
+                    realizedGrossPnl.subtract(economicFeeQuote), positionQty, positionCostQuote,
+                    tradeCount, roundTrips, commissionComplete);
+        }
+
+        private TradeAccountingLedger.AccountingSnapshot accountingSnapshot() {
+            BigDecimal costPerMillion = commissionComplete && totalVolume.signum() > 0
+                    ? commissionQuote.multiply(ONE_MILLION).divide(totalVolume, java.math.MathContext.DECIMAL64)
+                    : null;
+            return new TradeAccountingLedger.AccountingSnapshot(totalVolume, Map.copyOf(commissionByAsset),
+                    commissionQuote, costPerMillion, commissionComplete, Set.copyOf(unconvertedCommissionAssets),
+                    processedTradeIds.size());
+        }
+
+        private long positionOpenedAtMs() { return positionOpenedAtMs; }
+
+        private String normalizeAsset(String asset) {
+            return asset == null || asset.isBlank() ? "UNKNOWN" : asset.toUpperCase();
+        }
+    }
+
     public DailyTradeStatsStore.AccountVolumeSummary getAccountVolumeSummary(int days) {
         return dailyStatsStore.accountVolumeSummary(accountId, accountAlias, days);
     }
@@ -2668,6 +2994,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     public record MarketDataSnapshot(BigDecimal bestBid, BigDecimal bestAsk, BigDecimal midPrice,
                                      long updatedAtMs, long lastFrameAtMs) { }
+    public record RemoteTodayStatusSnapshot(TradingRiskGuard.RiskSnapshot risk,
+                                            TradeAccountingLedger.AccountingSnapshot accounting,
+                                            DailyTradeStatsStore.DailyStatsSnapshot dailyStats,
+                                            boolean remote,
+                                            boolean truncated,
+                                            long updatedAtMs) { }
     public enum DustReason {
         BELOW_MIN_QTY,
         BELOW_MIN_NOTIONAL,

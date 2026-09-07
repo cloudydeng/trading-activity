@@ -218,6 +218,7 @@ public class BotDashboardController {
 
     private Map<String, Object> statusOf(AccountTradingRuntime runtime) {
         HighFrequencyVolumeChurnEngine engine = runtime.engine();
+        HighFrequencyVolumeChurnEngine.RemoteTodayStatusSnapshot remoteToday = engine.getRemoteTodayStatusSnapshot();
         return Map.ofEntries(
                 Map.entry("accountId", runtime.accountId()), Map.entry("apiKeyAlias", runtime.alias()),
                 Map.entry("running", engine.getIsRunning().get()),
@@ -242,9 +243,13 @@ public class BotDashboardController {
                 Map.entry("sellability", engine.getSellabilitySnapshot()),
                 Map.entry("marketBaseline", engine.getBaselineOutcomes()),
                 Map.entry("qualifiedSignals", engine.getQualifiedSignalOutcomes()),
-                Map.entry("risk", engine.getRiskSnapshot()),
-                Map.entry("accounting", engine.getAccountingSnapshot()),
-                Map.entry("dailyStats", engine.getDailyStatsSnapshot()));
+                Map.entry("risk", remoteToday.risk()),
+                Map.entry("accounting", remoteToday.accounting()),
+                Map.entry("dailyStats", remoteToday.dailyStats()),
+                Map.entry("remoteTodayStats", Map.of(
+                        "enabled", remoteToday.remote(),
+                        "truncated", remoteToday.truncated(),
+                        "updatedAtMs", remoteToday.updatedAtMs())));
     }
 
     private ResponseEntity<?> accountSnapshot(AccountTradingRuntime runtime) {
