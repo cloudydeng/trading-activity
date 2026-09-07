@@ -8,6 +8,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableScheduling
 public class BinanceBotApplication {
     public static void main(String[] args) {
+        ServerEnvironmentFileLoader.loadAtStartup();
         SpringApplication.run(BinanceBotApplication.class, args);
     }
 }

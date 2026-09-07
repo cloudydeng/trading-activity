@@ -81,6 +81,7 @@ java -jar target/binance-spot-competition-bot-3.0.0.jar
 
 控制台的“API 账户10天汇总”页面展示上述汇总，只保留窗口内有真实成交的账户/交易对组合。
 
-账户热加载只读取 `BOT_ACCOUNT_PROFILES_ENV_FILE` 指向的服务器环境文件（默认 `/etc/trading-activity.env`）。
-它仅为清单中尚未运行的启用账户创建 User Data Stream；新账户始终以 `running=false` 加入，
+应用启动前会自动读取 `BOT_ACCOUNT_PROFILES_ENV_FILE` 指向的服务器环境文件（默认 `/etc/trading-activity.env`），
+将其中缺失的 `BOT_*`、`BINANCE_*` 配置加载到启动环境；已有进程环境变量优先。账户热加载也会重新读取同一文件。
+热加载仅为清单中尚未运行的启用账户创建 User Data Stream；新账户始终以 `running=false` 加入，
 不会触碰已有账户的持仓或活动 SELL 订单。修改环境文件后可从控制台点击“热加载账户”，无需重启 JVM。
