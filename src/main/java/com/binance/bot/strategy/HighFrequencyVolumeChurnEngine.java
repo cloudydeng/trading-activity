@@ -1542,14 +1542,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 && price != null && price.signum() > 0 && qty.multiply(price).compareTo(rule.minNotional()) >= 0;
     }
 
-    static boolean isHardEntryRisk(String reason) {
-        return switch (reason) {
-            case "STALE_MARKET_DATA", "STALE_DEPTH_DATA", "EMPTY_TOP_OF_BOOK", "EMPTY_DEPTH_BOOK",
-                    "THIN_TOP_OF_BOOK", "THIN_DEPTH_BOOK", "EXCESS_SHORT_TERM_VOLATILITY" -> true;
-            default -> false;
-        };
-    }
-
     private void submitMakerOrder(String symbol, String side, BigDecimal price, BigDecimal qty,
                                   Long cancelOrderId, ChurnStatus status) {
         String clientOrderId = nextClientOrderId(side);
@@ -2407,23 +2399,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     private MarketSignalEvaluator.EntryDecision entryDecisionForStrategy(long now) {
-        MarketSignalEvaluator.EntryDecision decision = usesFeeAwareMakerStrategy()
-                ? marketSignalEvaluator.evaluate(now, properties.getStrategy())
-                : marketSignalEvaluator.evaluateBestBidMaker(now, properties.getStrategy());
-        if (decision != null && !decision.allowed() && isIgnoredFlowEntryReason(decision.reason())) {
-            return new MarketSignalEvaluator.EntryDecision(true, "IGNORED_" + decision.reason(),
-                    decision.bookImbalance(), decision.depthImbalance(), decision.takerFlowImbalance(),
-                    decision.returnBps(), decision.rangeBps());
-        }
-        return decision;
-    }
-
-    private static boolean isIgnoredFlowEntryReason(String reason) {
-        return switch (reason) {
-            case "SELL_TAKER_PRESSURE", "SHORT_TERM_DOWNMOVE", "POST_SELLOFF_COOLDOWN",
-                    "WAIT_FOR_PRICE_RECLAIM" -> true;
-            default -> false;
-        };
+        return marketSignalEvaluator.evaluateBestBidMaker(now, properties.getStrategy());
     }
 
     private long entryOrderTimeoutMs() {

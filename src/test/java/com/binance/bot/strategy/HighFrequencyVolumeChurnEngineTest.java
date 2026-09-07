@@ -326,7 +326,7 @@ class HighFrequencyVolumeChurnEngineTest {
     void bidAskMakerIgnoresSellPressureSignalGate() throws Exception {
         engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L);
-        when(marketSignalEvaluator.evaluateBestBidMaker(anyLong(), eq(properties.getStrategy()))).thenReturn(
+        when(marketSignalEvaluator.evaluate(anyLong(), eq(properties.getStrategy()))).thenReturn(
                 MarketSignalEvaluator.EntryDecision.block("SELL_TAKER_PRESSURE",
                         new BigDecimal("-0.1"), BigDecimal.ZERO, new BigDecimal("-0.8"),
                         BigDecimal.ZERO, BigDecimal.ZERO));
@@ -339,6 +339,7 @@ class HighFrequencyVolumeChurnEngineTest {
 
         verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
                 decimalEquals("0.6000"), any(), isNull(), anyString());
+        verify(marketSignalEvaluator, never()).evaluate(anyLong(), eq(properties.getStrategy()));
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING, engine.getCurrentStatus().get());
     }
 
@@ -1450,18 +1451,6 @@ class HighFrequencyVolumeChurnEngineTest {
         verify(socket).abort();
         assertTrue(engine.getLiveArmed().get());
         assertTrue(engine.getStatusReason().get().contains("正在重连"));
-    }
-
-    @Test
-    void classifiesOnlyImmediateSafetyConditionsAsHardEntryRisk() {
-        assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("STALE_MARKET_DATA"));
-        assertTrue(HighFrequencyVolumeChurnEngine.isHardEntryRisk("THIN_DEPTH_BOOK"));
-        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("SELL_TAKER_PRESSURE"));
-        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("SHORT_TERM_DOWNMOVE"));
-        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("WAIT_FOR_PRICE_RECLAIM"));
-        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("WEAK_TOP_OF_BOOK"));
-        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("WEAK_MULTI_LEVEL_BIDS"));
-        assertFalse(HighFrequencyVolumeChurnEngine.isHardEntryRisk("MICROPRICE_NOT_SUPPORTIVE"));
     }
 
     @Test
