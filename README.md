@@ -33,7 +33,8 @@ BOT_ACCOUNT_PROFILES_JSON='{
 `binance.strategy.order-amount-usdt`。单笔金额仍不能超过 `max-live-order-notional-usdt`，并会在控制台显示当前生效值。
 
 `symbolStrategies` 可为每个账户的每个交易对选择策略：`CURRENT` 保留旧版成本价退出；
-`BID_ASK_MAKER` 在买一挂买单、成交后按卖一挂普通限价卖单；`FEE_AWARE_MAKER` 在买一挂买单，
+`BID_ASK_MAKER` 在买一挂买单、成交后按卖一挂普通限价卖单；
+`FEE_AWARE_MAKER` 在买一挂买单，
 初始卖出只使用 `LIMIT_MAKER`，并以“已记录买入成本 + 预计卖出手续费”为价格下限，先尝试把手续费赚回。
 卖出完成后，下一轮买单价格不得高于上一轮 BUY 成交均价；如果当前买一高于该价格，策略会等待价格回落。
 手续费保护策略到达卖单检查时间仍未成交时，会撤单对账并按当前买一上方 1 个 tick 重新挂 `LIMIT_MAKER`，
