@@ -770,17 +770,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 Long activeId = activeOrderId.get();
                 if (activeId != null) {
                     if (now - orderPlacedTimestamp.get() >= exitOrderTimeoutMs()) {
-                        if (usesFeeAwareMakerStrategy()) {
-                            BigDecimal safePrice = feeProtectedExitPrice(rule, bestAsk);
-                            BigDecimal workingPrice = activeOrderPrice.get();
-                            if (workingPrice != null && workingPrice.compareTo(safePrice) == 0) {
-                                orderPlacedTimestamp.set(now);
-                                statusReason.set("手续费保护卖单价格仍有效，继续排队等待成交 @ "
-                                        + workingPrice.toPlainString());
-                                return;
-                            }
-                        }
-                        rollTimedOutExitToBestAsk(symbol, bestAsk, rule, activeId);
+                        rollTimedOutExitToBestAsk(symbol, bestBid, bestAsk, rule, activeId);
                     }
                     return;
                 }
@@ -1109,10 +1099,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     /**
      * Every sell order has a configurable working window. Once it expires, cancel
      * and reconcile the old order before placing the remaining inventory back on a
-     * protected LIMIT price. BID_ASK_MAKER follows the latest best ask only when it
-     * stays above the actual buy average; it never falls back to MARKET.
+     * repriced LIMIT order. BID_ASK_MAKER follows the latest best ask only when it
+     * stays above the actual buy average; FEE_AWARE_MAKER only enforces the fee
+     * floor on the initial exit order, then moves to best-bid-plus-one-tick after
+     * timeout to prioritize a faster flat exit. Neither path falls back to MARKET.
      */
-    private void rollTimedOutExitToBestAsk(String symbol, BigDecimal bestAsk,
+    private void rollTimedOutExitToBestAsk(String symbol, BigDecimal bestBid, BigDecimal bestAsk,
                                            SymbolRuleManager.SymbolRule rule, long orderId) {
         if (!exitSubmissionInFlight.compareAndSet(false, true)) return;
         try {
@@ -1146,7 +1138,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             if (currentStatus.get() != ChurnStatus.SELLING) currentStatus.set(ChurnStatus.SELLING);
 
             BigDecimal price = usesFeeAwareMakerStrategy()
-                    ? feeProtectedExitPrice(rule, bestAsk)
+                    ? feeAwareTimedOutExitPrice(rule, bestBid, bestAsk)
                     : bidAskMakerExitPrice(rule, bestAsk);
             SellabilityResult sellability = currentSellability(rule, price);
             if (!sellability.sellable()) {
@@ -1160,7 +1152,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 reserveActiveSellQuantity(quantity);
                 submitMakerOrder(symbol, "SELL", price, quantity, null, ChurnStatus.SELLING);
                 if (activeOrderId.get() != null) {
-                    statusReason.set("卖单检查后按手续费保护价继续排队 @ " + price.toPlainString());
+                    statusReason.set("卖单超时后按买一上方一档快速退出 @ " + price.toPlainString());
                 }
                 return;
             }
@@ -1372,6 +1364,19 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         BigDecimal aboveEntry = entryAverageStrictlyHigherPrice(rule);
         BigDecimal price = aboveEntry.signum() > 0 ? ask.max(aboveEntry) : ask;
         return price.signum() > 0 ? price : aboveEntry;
+    }
+
+    private BigDecimal feeAwareTimedOutExitPrice(SymbolRuleManager.SymbolRule rule,
+                                                 BigDecimal bestBid, BigDecimal bestAsk) {
+        BigDecimal bid = positiveOrZero(bestBid);
+        if (bid.signum() > 0) {
+            return PrecisionUtil.roundUpToStep(bid.add(rule.tickSize()), rule.tickSize());
+        }
+        BigDecimal ask = positiveOrZero(bestAsk);
+        if (ask.signum() > 0) {
+            return PrecisionUtil.roundDownToStep(ask, rule.tickSize());
+        }
+        return feeProtectedExitPrice(rule, bestAsk);
     }
 
     private BigDecimal exitReferencePrice(SymbolRuleManager.SymbolRule rule) {

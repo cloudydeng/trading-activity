@@ -365,7 +365,8 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void feeAwareMakerUsesFeeOnlyProtectedPostOnlyExitAndKeepsValidOrder() throws Exception {
+    void feeAwareMakerUsesProtectedInitialExitThenBestBidPlusTickAfterTimeout() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
         HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
                 "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
                 new BigDecimal("10"), new BigDecimal("10"));
@@ -399,13 +400,27 @@ class HighFrequencyVolumeChurnEngineTest {
 
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
                 .set(System.currentTimeMillis() - 121_000);
+        when(tradeService.cancelOrder("ENSOUSDT", 77L))
+                .thenReturn(mapper.readTree("{\"orderId\":77,\"status\":\"CANCELED\"}"));
+        when(tradeService.getOrder("ENSOUSDT", 77L)).thenReturn(mapper.readTree(
+                "{\"orderId\":77,\"status\":\"CANCELED\",\"side\":\"SELL\",\"executedQty\":\"0\",\"cummulativeQuoteQty\":\"0\"}"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(
+                new BinanceAccountTradeClient.AssetBalance("ENSO", new BigDecimal("10"), BigDecimal.ZERO,
+                        new BigDecimal("10")));
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), decimalEquals("0.6001"),
+                decimalEquals("10"), isNull(), anyString()))
+                .thenReturn(mapper.readTree("{\"orderId\":88}"));
+
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
                 new BigDecimal("0.6000"), new BigDecimal("0.6001"));
 
-        verify(tradeService, never()).cancelOrder("ENSOUSDT", 77L);
+        verify(tradeService).cancelOrder("ENSOUSDT", 77L);
         verify(tradeService, times(1)).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
                 decimalEquals("0.6013"), decimalEquals("10"), isNull(), anyString());
-        assertTrue(engine.getStatusReason().get().contains("继续排队等待成交"));
+        verify(tradeService, times(1)).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"),
+                decimalEquals("0.6001"), decimalEquals("10"), isNull(), anyString());
+        assertEquals(88L, atomic("activeOrderId", Long.class).get());
+        assertTrue(engine.getStatusReason().get().contains("买一上方一档快速退出"));
     }
 
     @Test
