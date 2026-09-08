@@ -1,13 +1,20 @@
 package com.binance.bot.controller;
 
+import com.binance.bot.account.AccountTradingRuntime;
 import com.binance.bot.account.TradingAccountManager;
 import com.binance.bot.config.BinanceProperties;
 import com.binance.bot.notification.FillNotification;
 import com.binance.bot.notification.TradeNotificationService;
+import com.binance.bot.service.BinanceAccountTradeClient;
+import com.binance.bot.strategy.HighFrequencyVolumeChurnEngine;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
@@ -30,5 +37,45 @@ class BotDashboardControllerTest {
 
         assertEquals(List.of(fill), result);
         verifyNoInteractions(accountManager);
+    }
+
+    @Test
+    void allOpenOrdersSkipsStoppedStrategies() {
+        TradingAccountManager accountManager = mock(TradingAccountManager.class);
+        TradeNotificationService notificationService = mock(TradeNotificationService.class);
+        AccountTradingRuntime runtime = mock(AccountTradingRuntime.class);
+        HighFrequencyVolumeChurnEngine engine = mock(HighFrequencyVolumeChurnEngine.class);
+        BinanceAccountTradeClient tradeClient = mock(BinanceAccountTradeClient.class);
+        when(accountManager.runtimes()).thenReturn(List.of(runtime));
+        when(runtime.engine()).thenReturn(engine);
+        when(runtime.tradeClient()).thenReturn(tradeClient);
+        when(engine.getIsRunning()).thenReturn(new AtomicBoolean(false));
+        BotDashboardController controller = new BotDashboardController(
+                accountManager, new BinanceProperties(), notificationService);
+
+        var result = controller.allOpenOrders();
+
+        assertEquals(List.of(), result.get("orders"));
+        verifyNoInteractions(tradeClient);
+    }
+
+    @Test
+    void accountDetailsDoNotQueryExchangeWhileStrategyIsStopped() {
+        TradingAccountManager accountManager = mock(TradingAccountManager.class);
+        TradeNotificationService notificationService = mock(TradeNotificationService.class);
+        AccountTradingRuntime runtime = mock(AccountTradingRuntime.class);
+        HighFrequencyVolumeChurnEngine engine = mock(HighFrequencyVolumeChurnEngine.class);
+        BinanceAccountTradeClient tradeClient = mock(BinanceAccountTradeClient.class);
+        when(accountManager.find("account-a")).thenReturn(Optional.of(runtime));
+        when(runtime.engine()).thenReturn(engine);
+        when(runtime.tradeClient()).thenReturn(tradeClient);
+        when(engine.getIsRunning()).thenReturn(new AtomicBoolean(false));
+        BotDashboardController controller = new BotDashboardController(
+                accountManager, new BinanceProperties(), notificationService);
+
+        ResponseEntity<?> response = controller.account("account-a");
+
+        assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
+        verifyNoInteractions(tradeClient);
     }
 }

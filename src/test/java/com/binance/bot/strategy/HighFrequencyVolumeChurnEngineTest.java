@@ -31,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -1013,6 +1014,20 @@ class HighFrequencyVolumeChurnEngineTest {
         assertNull(snapshot.risk().entryBlockReason());
         assertEquals(0, engine.getRiskSnapshot().positionQty().signum());
         assertNull(engine.getRiskSnapshot().entryBlockReason());
+    }
+
+    @Test
+    void stoppedStrategyMonitoringUsesLocalSnapshotsWithoutExchangeQueries() {
+        HighFrequencyVolumeChurnEngine.RemoteTodayStatusSnapshot snapshot =
+                engine.getRemoteTodayStatusSnapshotForMonitoring();
+        HighFrequencyVolumeChurnEngine.BnbBalanceSnapshot bnb =
+                engine.getBnbBalanceSnapshotForMonitoring();
+
+        assertFalse(snapshot.remote());
+        assertNull(bnb);
+        verify(tradeService, never()).getMyTrades(anyString(), anyLong(), anyLong(), anyInt());
+        verify(tradeService, never()).getAssetBalance("BNB");
+        verify(tradeService, never()).getOpenOrders(anyString());
     }
 
     @Test

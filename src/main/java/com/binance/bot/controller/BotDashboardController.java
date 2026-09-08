@@ -39,6 +39,7 @@ public class BotDashboardController {
         List<OpenOrderView> orders = new ArrayList<>();
         Map<String, String> errors = new LinkedHashMap<>();
         accountManager.runtimes().stream()
+                .filter(runtime -> runtime.engine().getIsRunning().get())
                 .sorted(Comparator.comparing(AccountTradingRuntime::alias, String.CASE_INSENSITIVE_ORDER)
                         .thenComparing(AccountTradingRuntime::accountId, String.CASE_INSENSITIVE_ORDER))
                 .forEach(runtime -> {
@@ -222,7 +223,8 @@ public class BotDashboardController {
 
     private Map<String, Object> statusOf(AccountTradingRuntime runtime) {
         HighFrequencyVolumeChurnEngine engine = runtime.engine();
-        HighFrequencyVolumeChurnEngine.RemoteTodayStatusSnapshot remoteToday = engine.getRemoteTodayStatusSnapshot();
+        HighFrequencyVolumeChurnEngine.RemoteTodayStatusSnapshot remoteToday =
+                engine.getRemoteTodayStatusSnapshotForMonitoring();
         return Map.ofEntries(
                 Map.entry("accountId", runtime.accountId()), Map.entry("apiKeyAlias", runtime.alias()),
                 Map.entry("running", engine.getIsRunning().get()),
@@ -242,7 +244,7 @@ public class BotDashboardController {
                 Map.entry("usedApiWeight1m", engine.getUsedApiWeight()),
                 Map.entry("apiWeightLimit1m", engine.getApiWeightLimit()),
                 Map.entry("apiWeightEntrySafeLimit1m", engine.getApiWeightEntrySafeLimit()),
-                Map.entry("bnbBalance", Optional.ofNullable(engine.getBnbBalanceSnapshot()).orElse(
+                Map.entry("bnbBalance", Optional.ofNullable(engine.getBnbBalanceSnapshotForMonitoring()).orElse(
                         new HighFrequencyVolumeChurnEngine.BnbBalanceSnapshot(
                                 BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, false, 0L))),
                 Map.entry("marketData", engine.getMarketDataSnapshot()),
@@ -259,6 +261,10 @@ public class BotDashboardController {
 
     private ResponseEntity<?> accountSnapshot(AccountTradingRuntime runtime) {
         HighFrequencyVolumeChurnEngine engine = runtime.engine();
+        if (!engine.getIsRunning().get()) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "message", "策略未运行，未向交易所查询账户详情；启动策略后将自动刷新"));
+        }
         BinanceAccountTradeClient tradeService = runtime.tradeClient();
         JsonNode account = tradeService.getAccountInfo();
         JsonNode allOrders = tradeService.getAllOrders(engine.getSymbol(), 100);

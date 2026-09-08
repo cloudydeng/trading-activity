@@ -2851,6 +2851,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public int getApiWeightLimit() { return tradeService.getRequestWeightLimit1m(); }
     public int getApiWeightEntrySafeLimit() { return tradeService.getSafeRequestWeightLimit1m(); }
     public BnbBalanceSnapshot getBnbBalanceSnapshot() { return refreshBnbBalanceSnapshot(false); }
+    /** Monitoring must not make Binance REST calls for a stopped strategy. */
+    public BnbBalanceSnapshot getBnbBalanceSnapshotForMonitoring() {
+        return isRunning.get() ? refreshBnbBalanceSnapshot(false) : bnbBalanceSnapshot.get();
+    }
     public MarketSignalEvaluator.EntryDecision getLastEntryDecision() { return marketSignalEvaluator.getLastDecision(); }
     public TradingRiskGuard.RiskSnapshot getRiskSnapshot() { return riskGuard.snapshot(); }
     public TradeAccountingLedger.AccountingSnapshot getAccountingSnapshot() { return accountingLedger.snapshot(); }
@@ -2872,6 +2876,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             }
             return cached == null ? localTodayStatusSnapshot(now) : cached;
         }
+    }
+
+    /** Returns cached/local values while stopped so dashboard polling consumes no Binance REST weight. */
+    public RemoteTodayStatusSnapshot getRemoteTodayStatusSnapshotForMonitoring() {
+        if (isRunning.get()) return getRemoteTodayStatusSnapshot();
+        RemoteTodayStatusSnapshot cached = remoteTodayAccountingCache.get();
+        return cached == null ? localTodayStatusSnapshot(System.currentTimeMillis()) : cached;
     }
 
     private RemoteTodayStatusSnapshot fetchRemoteTodayStatusSnapshot(long nowMs) {
