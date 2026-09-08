@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.ScheduledExecutorService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -145,6 +146,13 @@ class HighFrequencyVolumeChurnEngineTest {
         assertFalse(engine.getIsRunning().get());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.HALTED, engine.getCurrentStatus().get());
         verify(tradeService).cancelOrder("ENSOUSDT", 77L);
+    }
+
+    @Test
+    void oneAccountOrderSnapshotFailureDoesNotEscapeIntoBatchStart() {
+        when(tradeService.getAllOpenOrders()).thenThrow(new IllegalStateException("account unavailable"));
+
+        assertDoesNotThrow(engine::refreshDashboardOpenOrderSnapshot);
     }
 
     @Test

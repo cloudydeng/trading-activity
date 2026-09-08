@@ -705,7 +705,14 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     /** One account-wide REST snapshot at strategy start or after account-stream recovery. */
     public void refreshDashboardOpenOrderSnapshot() {
-        JsonNode openOrders = tradeService.getAllOpenOrders();
+        JsonNode openOrders;
+        try {
+            openOrders = tradeService.getAllOpenOrders();
+        } catch (RuntimeException e) {
+            log.warn("[accountId={} alias={}] 控制台活动订单快照读取异常，保留其他账户和本账户上一份数据: {}",
+                    accountId, accountAlias, e.getMessage());
+            return;
+        }
         if (openOrders == null || !openOrders.isArray()) {
             log.warn("[accountId={} alias={}] 控制台活动订单快照刷新失败，保留上一份 WebSocket 状态",
                     accountId, accountAlias);

@@ -2,6 +2,7 @@ package com.binance.bot.notification;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
@@ -19,6 +20,7 @@ import java.util.concurrent.RejectedExecutionException;
 
 /** Pushes exchange WebSocket fill and current-order events to authenticated dashboard sessions. */
 @Component
+@Slf4j
 public class RecentFillWebSocketHandler extends TextWebSocketHandler {
     private static final int SNAPSHOT_LIMIT = 10;
     private final TradeNotificationService notificationService;
@@ -40,9 +42,27 @@ public class RecentFillWebSocketHandler extends TextWebSocketHandler {
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
         WebSocketSession safeSession = new ConcurrentWebSocketSessionDecorator(session, 5_000, 64 * 1024);
         sessions.put(session.getId(), safeSession);
+        // Fills and orders are independent. An invalid order snapshot must not prevent the
+        // dashboard connection (and therefore recent fills) from coming online.
         send(safeSession, Map.of("type", "snapshot",
-                "fills", notificationService.recentFills(SNAPSHOT_LIMIT),
-                "openOrders", notificationService.currentOpenOrders()));
+                "fills", notificationService.recentFills(SNAPSHOT_LIMIT)));
+        try {
+            send(safeSession, Map.of("type", "openOrders",
+                    "orders", notificationService.currentOpenOrders()));
+        } catch (Exception e) {
+            log.warn("控制台活动订单初始快照发送失败，成交流保持连接: {}", e.getMessage());
+            try {
+                send(safeSession, Map.of("type", "openOrdersError",
+                        "message", "部分订单数据异常，等待下一次账户更新"));
+            } catch (Exception sendError) {
+                sessions.remove(session.getId(), safeSession);
+                try {
+                    safeSession.close(CloseStatus.SERVER_ERROR);
+                } catch (IOException ignored) {
+                    // The transport is already unusable.
+                }
+            }
+        }
     }
 
     @Override
@@ -85,7 +105,7 @@ public class RecentFillWebSocketHandler extends TextWebSocketHandler {
             }
             try {
                 send(session, payload);
-            } catch (IOException e) {
+            } catch (Exception e) {
                 sessions.remove(entry.getKey(), session);
                 try {
                     session.close(CloseStatus.SERVER_ERROR);

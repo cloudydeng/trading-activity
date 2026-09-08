@@ -94,4 +94,50 @@ class InMemoryTradeNotificationServiceTest {
 
         assertEquals(List.of(List.of(order)), received);
     }
+
+    @Test
+    void malformedAccountOrderCannotHideValidOrdersFromOtherAccounts() {
+        InMemoryTradeNotificationService service = new InMemoryTradeNotificationService();
+        OpenOrderNotification valid = new OpenOrderNotification(
+                "account-a", "A", "ENSOUSDT", "BUY", "LIMIT_MAKER", "NEW",
+                "0.600000", "10", "0", 42, 100);
+        service.notifyOrderUpdate(valid);
+
+        service.notifyOrderUpdate(new OpenOrderNotification(
+                null, null, null, null, null, "NEW",
+                null, null, null, 0, 200));
+
+        assertEquals(List.of(valid), service.currentOpenOrders());
+    }
+
+    @Test
+    void nullableDisplayFieldsAreNormalizedBeforeSnapshotSorting() {
+        InMemoryTradeNotificationService service = new InMemoryTradeNotificationService();
+        OpenOrderNotification order = new OpenOrderNotification(
+                "account-a", null, null, null, null, "NEW",
+                null, null, null, 42, 100);
+
+        service.notifyOrderUpdate(order);
+
+        assertEquals("account-a", service.currentOpenOrders().getFirst().accountAlias());
+        assertEquals("0", service.currentOpenOrders().getFirst().price());
+    }
+
+    @Test
+    void invalidReplacementForOneAccountPreservesItsOldSnapshotAndOtherAccounts() {
+        InMemoryTradeNotificationService service = new InMemoryTradeNotificationService();
+        OpenOrderNotification accountA = new OpenOrderNotification(
+                "account-a", "A", "ENSOUSDT", "BUY", "LIMIT_MAKER", "NEW",
+                "0.600000", "10", "0", 42, 100);
+        OpenOrderNotification accountB = new OpenOrderNotification(
+                "account-b", "B", "ZKCUSDT", "SELL", "LIMIT", "NEW",
+                "0.050000", "100", "0", 43, 200);
+        service.replaceOpenOrders("account-a", List.of(accountA));
+        service.replaceOpenOrders("account-b", List.of(accountB));
+
+        service.replaceOpenOrders("account-a", List.of(new OpenOrderNotification(
+                "", "", "", "", "", "NEW", "0", "0", "0", 0, 300)));
+
+        assertEquals(List.of(accountB, accountA), service.currentOpenOrders());
+    }
 }
