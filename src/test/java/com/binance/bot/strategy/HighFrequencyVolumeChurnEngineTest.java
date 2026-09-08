@@ -24,6 +24,7 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.ScheduledExecutorService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -1677,6 +1678,35 @@ class HighFrequencyVolumeChurnEngineTest {
 
         verify(socket, never()).abort();
         assertEquals(socket, atomic("activeMarketWebSocket", WebSocket.class).get());
+    }
+
+    @Test
+    void marketClose1001KeepsStrategyRunningUntilReconnectFails() {
+        WebSocket firstSocket = mock(WebSocket.class);
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE);
+        engine.getStatusReason().set("运行中，等待入场信号");
+        atomic("activeMarketWebSocket", WebSocket.class).set(firstSocket);
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "nextOrderAttemptAt"))
+                .set(System.currentTimeMillis() + 60_000);
+
+        engine.onClose(firstSocket, 1001, "going away");
+
+        assertTrue(engine.getIsRunning().get());
+        assertTrue(engine.getStatusReason().get().contains("正在自动重连"));
+
+        WebSocket reconnectedSocket = mock(WebSocket.class);
+        atomic("activeMarketWebSocket", WebSocket.class).set(reconnectedSocket);
+        engine.onText(reconnectedSocket,
+                "{\"b\":\"0.6000\",\"B\":\"100\",\"a\":\"0.6001\",\"A\":\"100\"}", true);
+
+        assertTrue(engine.getIsRunning().get());
+        assertEquals("运行中，等待入场信号", engine.getStatusReason().get());
+        assertFalse(((AtomicBoolean) ReflectionTestUtils.getField(
+                engine, "transientMarketRecoveryPending")).get());
+
+        ((AtomicBoolean) ReflectionTestUtils.getField(engine, "acceptingMarketConnections")).set(false);
+        ((ScheduledExecutorService) ReflectionTestUtils.getField(engine, "marketWatchdog")).shutdownNow();
     }
 
     @Test

@@ -3,6 +3,7 @@ package com.binance.bot.service;
 import com.binance.bot.account.AccountCredentials;
 import com.binance.bot.account.AccountExecutionEvent;
 import com.binance.bot.config.BinanceProperties;
+import com.binance.bot.notification.OpenOrderNotification;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -109,6 +110,56 @@ class AccountUserDataStreamTest {
         assertFalse(atomicBoolean(service, "reconnectScheduled").get());
         assertEquals(0, lifecycleCallbacks.get());
         assertNull(activeSocket(service).get());
+        service.shutdown();
+    }
+
+    @Test
+    void subscriptionAndExecutionReportsDriveReadyAndOpenOrderCallbacks() {
+        BinanceProperties properties = properties();
+        AtomicInteger readyCallbacks = new AtomicInteger();
+        AtomicReference<OpenOrderNotification> orderUpdate = new AtomicReference<>();
+        AccountCredentials credentials = new AccountCredentials(
+                "account-a", "A", "key-a", "secret-a");
+        AccountUserDataStream service = new AccountUserDataStream(
+                properties, mock(BinanceSigner.class), credentials, event -> { }, reason -> { },
+                readyCallbacks::incrementAndGet, orderUpdate::set);
+        WebSocket webSocket = mock(WebSocket.class);
+        activeSocket(service).set(webSocket);
+
+        service.onText(webSocket, "{\"id\":\"account-events\",\"status\":200,\"result\":{}}", true);
+        service.onText(webSocket, """
+                {"event":{"e":"executionReport","E":123,"O":100,"s":"ENSOUSDT","S":"BUY",
+                "o":"LIMIT_MAKER","x":"NEW","X":"NEW","i":42,"t":-1,"c":"ta-a-B-1",
+                "p":"0.600000","q":"10","l":"0","L":"0","z":"0","Z":"0","n":"0"}}
+                """, true);
+
+        assertEquals(1, readyCallbacks.get());
+        assertEquals(42, orderUpdate.get().orderId());
+        assertEquals("LIMIT_MAKER", orderUpdate.get().type());
+        assertTrue(orderUpdate.get().active());
+        service.shutdown();
+    }
+
+    @Test
+    void close1001ReconnectsBeforeInvokingStopCallback() {
+        BinanceProperties properties = properties();
+        AtomicInteger stopCallbacks = new AtomicInteger();
+        AccountUserDataStream service = service(
+                "account-a", properties, event -> { }, reason -> stopCallbacks.incrementAndGet());
+        WebSocket firstSocket = mock(WebSocket.class);
+        activeSocket(service).set(firstSocket);
+        atomicBoolean(service, "ready").set(true);
+
+        service.onClose(firstSocket, 1001, "going away");
+
+        assertEquals(0, stopCallbacks.get());
+        assertTrue(atomicBoolean(service, "transientCloseRecoveryPending").get());
+
+        WebSocket failedReconnectSocket = mock(WebSocket.class);
+        activeSocket(service).set(failedReconnectSocket);
+        service.onClose(failedReconnectSocket, 1001, "going away again");
+
+        assertEquals(1, stopCallbacks.get());
         service.shutdown();
     }
 

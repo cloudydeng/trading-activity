@@ -40,23 +40,17 @@ class BotDashboardControllerTest {
     }
 
     @Test
-    void allOpenOrdersSkipsStoppedStrategies() {
+    void allOpenOrdersComesOnlyFromWebSocketMemory() {
         TradingAccountManager accountManager = mock(TradingAccountManager.class);
         TradeNotificationService notificationService = mock(TradeNotificationService.class);
-        AccountTradingRuntime runtime = mock(AccountTradingRuntime.class);
-        HighFrequencyVolumeChurnEngine engine = mock(HighFrequencyVolumeChurnEngine.class);
-        BinanceAccountTradeClient tradeClient = mock(BinanceAccountTradeClient.class);
-        when(accountManager.runtimes()).thenReturn(List.of(runtime));
-        when(runtime.engine()).thenReturn(engine);
-        when(runtime.tradeClient()).thenReturn(tradeClient);
-        when(engine.getIsRunning()).thenReturn(new AtomicBoolean(false));
+        when(notificationService.currentOpenOrders()).thenReturn(List.of());
         BotDashboardController controller = new BotDashboardController(
                 accountManager, new BinanceProperties(), notificationService);
 
         var result = controller.allOpenOrders();
 
         assertEquals(List.of(), result.get("orders"));
-        verifyNoInteractions(tradeClient);
+        verifyNoInteractions(accountManager);
     }
 
     @Test

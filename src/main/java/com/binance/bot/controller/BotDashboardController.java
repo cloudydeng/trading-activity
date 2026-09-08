@@ -36,27 +36,7 @@ public class BotDashboardController {
 
     @GetMapping("/api/accounts/open-orders")
     public Map<String, Object> allOpenOrders() {
-        List<OpenOrderView> orders = new ArrayList<>();
-        Map<String, String> errors = new LinkedHashMap<>();
-        accountManager.runtimes().stream()
-                .filter(runtime -> runtime.engine().getIsRunning().get())
-                .sorted(Comparator.comparing(AccountTradingRuntime::alias, String.CASE_INSENSITIVE_ORDER)
-                        .thenComparing(AccountTradingRuntime::accountId, String.CASE_INSENSITIVE_ORDER))
-                .forEach(runtime -> {
-                    JsonNode openOrders = runtime.tradeClient().getAllOpenOrders();
-                    if (openOrders == null) {
-                        errors.put(runtime.accountId(), "活动订单读取失败");
-                        return;
-                    }
-                    if (!openOrders.isArray()) return;
-                    for (JsonNode order : openOrders) {
-                        orders.add(openOrderView(runtime, order));
-                    }
-                });
-        orders.sort(Comparator.comparingLong(OpenOrderView::timeMs).reversed()
-                .thenComparing(OpenOrderView::accountAlias, String.CASE_INSENSITIVE_ORDER)
-                .thenComparing(OpenOrderView::symbol, String.CASE_INSENSITIVE_ORDER));
-        return Map.of("orders", List.copyOf(orders), "errors", Map.copyOf(errors),
+        return Map.of("orders", notificationService.currentOpenOrders(), "errors", Map.of(),
                 "updatedAtMs", System.currentTimeMillis());
     }
 
@@ -325,14 +305,6 @@ public class BotDashboardController {
                 order.path("time").asLong(order.path("updateTime").asLong(0)));
     }
 
-    private OpenOrderView openOrderView(AccountTradingRuntime runtime, JsonNode order) {
-        return new OpenOrderView(runtime.accountId(), runtime.alias(), order.path("symbol").asText(""),
-                order.path("side").asText(""), order.path("type").asText(""),
-                order.path("status").asText(""), order.path("price").asText("0"),
-                order.path("origQty").asText("0"), order.path("orderId").asLong(0),
-                order.path("time").asLong(order.path("updateTime").asLong(0)));
-    }
-
     private boolean passwordMatches(String provided) {
         String expected = properties.getSecurity().getAdminPassword();
         return expected != null && provided != null && MessageDigest.isEqual(
@@ -360,6 +332,4 @@ public class BotDashboardController {
     public record BalanceView(String asset, String free, String locked, String total) { }
     public record OrderView(long orderId, String clientOrderId, String side, String type, String status,
                             String price, String originalQty, String executedQty, String quoteQty, long timeMs) { }
-    public record OpenOrderView(String accountId, String accountAlias, String symbol, String side, String type,
-                                String status, String price, String originalQty, long orderId, long timeMs) { }
 }

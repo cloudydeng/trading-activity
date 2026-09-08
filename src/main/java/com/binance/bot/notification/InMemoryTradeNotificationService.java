@@ -1,5 +1,6 @@
 package com.binance.bot.notification;
 
+import com.binance.bot.account.AccountOrderKey;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayDeque;
@@ -18,6 +19,9 @@ public class InMemoryTradeNotificationService implements TradeNotificationServic
     private static final int MAX_PER_ACCOUNT = 200;
     private final ConcurrentMap<String, Deque<FillNotification>> fillsByAccount = new ConcurrentHashMap<>();
     private final CopyOnWriteArrayList<Consumer<FillNotification>> listeners = new CopyOnWriteArrayList<>();
+    private final ConcurrentMap<AccountOrderKey, OpenOrderNotification> openOrders = new ConcurrentHashMap<>();
+    private final CopyOnWriteArrayList<Consumer<List<OpenOrderNotification>>> openOrderListeners =
+            new CopyOnWriteArrayList<>();
 
     @Override
     public void notifyFill(FillNotification notification) {
@@ -69,5 +73,53 @@ public class InMemoryTradeNotificationService implements TradeNotificationServic
     public AutoCloseable addFillListener(Consumer<FillNotification> listener) {
         listeners.add(listener);
         return () -> listeners.remove(listener);
+    }
+
+    @Override
+    public void replaceOpenOrders(String accountId, List<OpenOrderNotification> orders) {
+        openOrders.keySet().removeIf(key -> key.accountId().equals(accountId));
+        if (orders != null) {
+            for (OpenOrderNotification order : orders) {
+                if (order != null && accountId.equals(order.accountId()) && order.active()) {
+                    openOrders.put(new AccountOrderKey(order.accountId(), order.orderId()), order);
+                }
+            }
+        }
+        publishOpenOrders();
+    }
+
+    @Override
+    public void notifyOrderUpdate(OpenOrderNotification order) {
+        if (order == null) return;
+        AccountOrderKey key = new AccountOrderKey(order.accountId(), order.orderId());
+        if (order.active()) openOrders.put(key, order);
+        else openOrders.remove(key);
+        publishOpenOrders();
+    }
+
+    @Override
+    public List<OpenOrderNotification> currentOpenOrders() {
+        return openOrders.values().stream()
+                .sorted(Comparator.comparingLong(OpenOrderNotification::timeMs).reversed()
+                        .thenComparing(OpenOrderNotification::accountAlias, String.CASE_INSENSITIVE_ORDER)
+                        .thenComparing(OpenOrderNotification::symbol, String.CASE_INSENSITIVE_ORDER))
+                .toList();
+    }
+
+    @Override
+    public AutoCloseable addOpenOrderListener(Consumer<List<OpenOrderNotification>> listener) {
+        openOrderListeners.add(listener);
+        return () -> openOrderListeners.remove(listener);
+    }
+
+    private void publishOpenOrders() {
+        List<OpenOrderNotification> snapshot = currentOpenOrders();
+        for (Consumer<List<OpenOrderNotification>> listener : openOrderListeners) {
+            try {
+                listener.accept(snapshot);
+            } catch (RuntimeException ignored) {
+                // Dashboard listeners must never interfere with order handling.
+            }
+        }
     }
 }

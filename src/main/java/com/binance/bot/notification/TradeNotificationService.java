@@ -8,4 +8,8 @@ public interface TradeNotificationService {
     List<FillNotification> recentFills(String accountId, int limit);
     List<FillNotification> recentFills(int limit);
     AutoCloseable addFillListener(Consumer<FillNotification> listener);
+    void replaceOpenOrders(String accountId, List<OpenOrderNotification> orders);
+    void notifyOrderUpdate(OpenOrderNotification order);
+    List<OpenOrderNotification> currentOpenOrders();
+    AutoCloseable addOpenOrderListener(Consumer<List<OpenOrderNotification>> listener);
 }

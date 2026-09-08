@@ -17,7 +17,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 
-/** Pushes exchange WebSocket fill events to authenticated dashboard sessions without REST backfill. */
+/** Pushes exchange WebSocket fill and current-order events to authenticated dashboard sessions. */
 @Component
 public class RecentFillWebSocketHandler extends TextWebSocketHandler {
     private static final int SNAPSHOT_LIMIT = 10;
@@ -26,12 +26,14 @@ public class RecentFillWebSocketHandler extends TextWebSocketHandler {
     private final ConcurrentMap<String, WebSocketSession> sessions = new ConcurrentHashMap<>();
     private final ExecutorService broadcaster = Executors.newSingleThreadExecutor(
             Thread.ofVirtual().name("dashboard-fill-push-", 0).factory());
-    private final AutoCloseable listenerRegistration;
+    private final AutoCloseable fillListenerRegistration;
+    private final AutoCloseable openOrderListenerRegistration;
 
     public RecentFillWebSocketHandler(TradeNotificationService notificationService, ObjectMapper objectMapper) {
         this.notificationService = notificationService;
         this.objectMapper = objectMapper;
-        this.listenerRegistration = notificationService.addFillListener(this::queueBroadcast);
+        this.fillListenerRegistration = notificationService.addFillListener(this::queueFillBroadcast);
+        this.openOrderListenerRegistration = notificationService.addOpenOrderListener(this::queueOpenOrderBroadcast);
     }
 
     @Override
@@ -39,7 +41,8 @@ public class RecentFillWebSocketHandler extends TextWebSocketHandler {
         WebSocketSession safeSession = new ConcurrentWebSocketSessionDecorator(session, 5_000, 64 * 1024);
         sessions.put(session.getId(), safeSession);
         send(safeSession, Map.of("type", "snapshot",
-                "fills", notificationService.recentFills(SNAPSHOT_LIMIT)));
+                "fills", notificationService.recentFills(SNAPSHOT_LIMIT),
+                "openOrders", notificationService.currentOpenOrders()));
     }
 
     @Override
@@ -53,15 +56,27 @@ public class RecentFillWebSocketHandler extends TextWebSocketHandler {
         if (session.isOpen()) session.close(CloseStatus.SERVER_ERROR);
     }
 
-    private void queueBroadcast(FillNotification fill) {
+    private void queueFillBroadcast(FillNotification fill) {
         try {
-            broadcaster.execute(() -> broadcast(fill));
+            broadcaster.execute(() -> broadcastFill(fill));
         } catch (RejectedExecutionException ignored) {
             // Application is shutting down.
         }
     }
 
-    private void broadcast(FillNotification fill) {
+    private void queueOpenOrderBroadcast(java.util.List<OpenOrderNotification> orders) {
+        try {
+            broadcaster.execute(() -> broadcastPayload(Map.of("type", "openOrders", "orders", orders)));
+        } catch (RejectedExecutionException ignored) {
+            // Application is shutting down.
+        }
+    }
+
+    private void broadcastFill(FillNotification fill) {
+        broadcastPayload(Map.of("type", "fill", "fill", fill));
+    }
+
+    private void broadcastPayload(Object payload) {
         for (Map.Entry<String, WebSocketSession> entry : sessions.entrySet()) {
             WebSocketSession session = entry.getValue();
             if (!session.isOpen()) {
@@ -69,7 +84,7 @@ public class RecentFillWebSocketHandler extends TextWebSocketHandler {
                 continue;
             }
             try {
-                send(session, Map.of("type", "fill", "fill", fill));
+                send(session, payload);
             } catch (IOException e) {
                 sessions.remove(entry.getKey(), session);
                 try {
@@ -87,7 +102,8 @@ public class RecentFillWebSocketHandler extends TextWebSocketHandler {
 
     @PreDestroy
     void close() throws Exception {
-        listenerRegistration.close();
+        fillListenerRegistration.close();
+        openOrderListenerRegistration.close();
         broadcaster.shutdownNow();
         for (WebSocketSession session : sessions.values()) {
             try {

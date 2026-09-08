@@ -5,6 +5,7 @@ import com.binance.bot.account.AccountExecutionEvent;
 import com.binance.bot.config.BinanceProperties;
 import com.binance.bot.manager.SymbolRuleManager;
 import com.binance.bot.notification.FillNotification;
+import com.binance.bot.notification.OpenOrderNotification;
 import com.binance.bot.notification.TradeNotificationService;
 import com.binance.bot.service.BinanceAccountTradeClient;
 import com.binance.bot.util.PrecisionUtil;
@@ -123,6 +124,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicInteger marketReconnectAttempts = new AtomicInteger(0);
     private final AtomicBoolean acceptingMarketConnections = new AtomicBoolean(true);
     private final AtomicReference<WebSocket> activeMarketWebSocket = new AtomicReference<>();
+    private final AtomicBoolean transientMarketRecoveryPending = new AtomicBoolean(false);
+    private final AtomicReference<String> preMarketRecoveryStatusReason = new AtomicReference<>();
+    private final AtomicBoolean userStreamOrderReconcilePending = new AtomicBoolean(false);
     private final ScheduledExecutorService marketWatchdog;
     private final AtomicReference<String> activeEntrySignalReason = new AtomicReference<>("UNKNOWN");
     private final AtomicReference<MarketSignalEvaluator.MarketContext> activeEntryContext = new AtomicReference<>();
@@ -211,7 +215,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     @Override
     public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
         if (activeMarketWebSocket.compareAndSet(webSocket, null)) {
-            handleMarketStreamLoss("连接关闭 " + statusCode + ": " + reason);
+            if (statusCode == 1001) {
+                handleTransientMarketClose("连接关闭 1001: " + reason);
+            } else {
+                handleMarketStreamLoss("连接关闭 " + statusCode + ": " + reason);
+            }
         }
         return CompletableFuture.completedFuture(null);
     }
@@ -237,9 +245,37 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     private void handleMarketStreamLoss(String reason) {
         if (!acceptingMarketConnections.get()) return;
+        transientMarketRecoveryPending.set(false);
+        preMarketRecoveryStatusReason.set(null);
         marketSignalEvaluator.reset();
         log.warn("[accountId={} alias={}] 行情流不可用: {}", accountId, accountAlias, reason);
         if (isRunning.get()) protectOnStreamLoss("行情流不可用: " + reason);
+        scheduleMarketReconnect();
+    }
+
+    /**
+     * Binance occasionally closes a healthy market stream with 1001 while rotating a connection.
+     * Keep the strategy running during the first reconnect attempt. A second close before any new
+     * market frame, a reconnect failure, or the watchdog timing out is treated as a real outage.
+     */
+    private void handleTransientMarketClose(String reason) {
+        if (!acceptingMarketConnections.get()) return;
+        if (!transientMarketRecoveryPending.compareAndSet(false, true)) {
+            handleMarketStreamLoss(reason + "；重连后仍未恢复行情");
+            return;
+        }
+        marketSignalEvaluator.reset();
+        lastMarketDataTimestamp.set(0);
+        if (isRunning.get()) {
+            preMarketRecoveryStatusReason.set(statusReason.get());
+            statusReason.set("行情流 1001 瞬断，正在自动重连");
+        }
+        log.warn("[accountId={} alias={}] 行情流 1001 瞬断，先自动重连；重连失败才停机: {}",
+                accountId, accountAlias, reason);
+        scheduleMarketReconnect();
+    }
+
+    private void scheduleMarketReconnect() {
         if (reconnectScheduled.compareAndSet(false, true)) {
             int attempt = marketReconnectAttempts.incrementAndGet();
             long delayMs = reconnectDelayMs(attempt);
@@ -646,7 +682,48 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     public synchronized void handleUserStreamLoss(String reason) {
+        if (isRunning.get()) userStreamOrderReconcilePending.set(true);
         protectOnStreamLoss("账户成交流不可用: " + reason);
+    }
+
+    /** A reconnect may have missed order events, so rebuild the dashboard snapshot once. */
+    public void handleUserStreamReady() {
+        if (isRunning.get() || userStreamOrderReconcilePending.getAndSet(false)) {
+            refreshDashboardOpenOrderSnapshot();
+        }
+        statusReason.compareAndSet("账户成交流暂不可用，等待自动重连", statusForCurrentState());
+    }
+
+    private String statusForCurrentState() {
+        return switch (currentStatus.get()) {
+            case IDLE -> "运行中，等待入场信号";
+            case BUYING -> "买单处理中";
+            case SELLING -> "卖单处理中";
+            case HALTED -> statusReason.get();
+        };
+    }
+
+    /** One account-wide REST snapshot at strategy start or after account-stream recovery. */
+    public void refreshDashboardOpenOrderSnapshot() {
+        JsonNode openOrders = tradeService.getAllOpenOrders();
+        if (openOrders == null || !openOrders.isArray()) {
+            log.warn("[accountId={} alias={}] 控制台活动订单快照刷新失败，保留上一份 WebSocket 状态",
+                    accountId, accountAlias);
+            return;
+        }
+        List<OpenOrderNotification> snapshot = new ArrayList<>();
+        for (JsonNode order : openOrders) {
+            snapshot.add(new OpenOrderNotification(
+                    accountId, accountAlias, order.path("symbol").asText(""),
+                    order.path("side").asText(""), order.path("type").asText(""),
+                    order.path("status").asText("NEW"), order.path("price").asText("0"),
+                    order.path("origQty").asText("0"), order.path("executedQty").asText("0"),
+                    order.path("orderId").asLong(0),
+                    order.path("time").asLong(order.path("updateTime").asLong(System.currentTimeMillis()))));
+        }
+        notificationService.replaceOpenOrders(accountId, snapshot);
+        log.info("[accountId={} alias={}] 控制台活动订单快照已对账，当前 {} 笔",
+                accountId, accountAlias, snapshot.size());
     }
 
     private void protectOnStreamLoss(String reason) {
@@ -668,6 +745,14 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return WebSocket.Listener.super.onText(webSocket, data, last);
         }
         lastMarketFrameTimestamp.set(System.currentTimeMillis());
+        if (transientMarketRecoveryPending.compareAndSet(true, false)) {
+            String recoveryMessage = "行情流 1001 瞬断，正在自动重连";
+            String previousReason = preMarketRecoveryStatusReason.getAndSet(null);
+            statusReason.compareAndSet(recoveryMessage,
+                    previousReason == null || previousReason.isBlank() ? "运行中，等待行情" : previousReason);
+            log.info("[accountId={} alias={}] 行情流 1001 重连成功，已收到新行情并继续运行",
+                    accountId, accountAlias);
+        }
         String payload;
         synchronized (inboundMarketMessage) {
             inboundMarketMessage.append(data);
@@ -713,6 +798,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         applyPendingStrategyIfSafe();
         var rule = ruleManager.getRule(properties.getStrategy().getSymbol());
         if (rule == null || !isRunning.get()) return;
+        if (!accountStreamReady.getAsBoolean()) {
+            statusReason.set("账户成交流暂不可用，等待自动重连");
+            return;
+        }
         refreshDailyVolumeCounterDate();
         long now = System.currentTimeMillis();
         if (enforceDailyVolumeLimit(rule)) return;
