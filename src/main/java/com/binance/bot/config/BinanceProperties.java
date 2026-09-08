@@ -94,7 +94,7 @@ public class BinanceProperties {
         private int bidDepthOffsetTicks;
         private int askDepthOffsetTicks;
         private long orderTtlMs;
-        /** Cancel an unfilled entry-price sell after this delay and market-sell the remainder. */
+        /** Check a working sell after this delay; keep it at best ask or re-place at latest best ask. */
         private long limitSellTimeoutMs = 120_000;
         /** Soft signal noise cannot cancel a fresh entry before this resting time. */
         private long minEntryOrderRestMs = 800;
@@ -125,11 +125,11 @@ public class BinanceProperties {
         private BigDecimal maxInventoryUsdt = new BigDecimal("40");
         private BigDecimal maxDailyDrawdownUsdt = new BigDecimal("8");
         private long maxInventoryAgeMs = 60_000;
-        /** Desired net profit after the estimated exit commission has been deducted. */
+        /** Legacy compatibility setting; the three current strategies do not use this profit target. */
         private double takeProfitBps = 10;
-        /** Keep the original fee-aware maker target untouched for this recovery window. */
+        /** Legacy compatibility setting; current sell repricing uses the configured sell timeout. */
         private long exitRepriceAfterMs = 15_000;
-        /** Once recovery time expires, only lower a passive sell at this cadence. */
+        /** Legacy compatibility setting; current sell repricing uses the configured sell timeout. */
         private long exitRepriceIntervalMs = 5_000;
         /** A pessimistic fee estimate, until actual commission events are accounted for. */
         private BigDecimal assumedMakerFeeBps = new BigDecimal("10");
@@ -153,7 +153,7 @@ public class BinanceProperties {
 
     @Data
     public static class Storage {
-        /** One compact SQLite file containing daily aggregates and trade-id deduplication state. */
+        /** One SQLite file containing daily aggregates, trade deduplication and runtime settings/state. */
         private String dailyStatsDb = "data/daily-stats.db";
     }
 }

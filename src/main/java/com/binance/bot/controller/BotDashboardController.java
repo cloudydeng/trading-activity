@@ -9,6 +9,7 @@ import com.binance.bot.service.BinanceAccountTradeClient;
 import com.binance.bot.strategy.HighFrequencyVolumeChurnEngine;
 import com.binance.bot.strategy.DailyTradeStatsStore;
 import com.fasterxml.jackson.databind.JsonNode;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -16,9 +17,12 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.*;
 
 @RestController
+@Slf4j
 public class BotDashboardController {
     private final TradingAccountManager accountManager;
     private final BinanceProperties properties;
@@ -54,6 +58,77 @@ public class BotDashboardController {
                         .thenComparing(DailyTradeStatsStore.AccountSymbolVolumeSummary::accountId,
                                 String.CASE_INSENSITIVE_ORDER))
                 .toList();
+    }
+
+    /**
+     * UTC-today dashboard summary backed only by the durable aggregate store. Each account is read
+     * independently so a damaged account row cannot hide every other account from the page.
+     */
+    @GetMapping("/api/accounts/stats/today")
+    public TodayTradingSummary todayTradingSummary() {
+        List<TodayAccountTradingSummary> accounts = new ArrayList<>();
+        for (AccountTradingRuntime runtime : accountManager.runtimes()) {
+            try {
+                List<DailyTradeStatsStore.AccountSymbolVolumeSummary> symbols =
+                        Optional.ofNullable(runtime.engine().getAccountSymbolVolumeSummaries(1))
+                                .orElseGet(List::of).stream()
+                                .filter(Objects::nonNull)
+                                .sorted(Comparator.comparing(summary ->
+                                                Objects.toString(summary.symbol(), ""),
+                                        String.CASE_INSENSITIVE_ORDER))
+                                .toList();
+                accounts.add(todayAccountSummary(runtime.accountId(), runtime.alias(), symbols, null));
+            } catch (RuntimeException e) {
+                log.warn("[accountId={} alias={}] 读取今日账户交易汇总失败，其他账户继续显示: {}",
+                        runtime.accountId(), runtime.alias(), e.getMessage());
+                accounts.add(todayAccountSummary(runtime.accountId(), runtime.alias(), List.of(),
+                        "今日统计暂时不可用"));
+            }
+        }
+        accounts.sort(Comparator.comparing(TodayAccountTradingSummary::accountAlias,
+                        String.CASE_INSENSITIVE_ORDER)
+                .thenComparing(TodayAccountTradingSummary::accountId, String.CASE_INSENSITIVE_ORDER));
+
+        BigDecimal volume = BigDecimal.ZERO;
+        BigDecimal commission = BigDecimal.ZERO;
+        BigDecimal netPnl = BigDecimal.ZERO;
+        BigDecimal loss = BigDecimal.ZERO;
+        for (TodayAccountTradingSummary account : accounts) {
+            volume = volume.add(account.totalVolumeQuote());
+            commission = commission.add(account.totalCommissionQuoteEquivalent());
+            netPnl = netPnl.add(account.netRealizedPnlQuote());
+            loss = loss.add(account.lossQuote());
+        }
+        return new TodayTradingSummary(LocalDate.now(ZoneOffset.UTC), List.copyOf(accounts),
+                volume, commission, netPnl, loss, System.currentTimeMillis());
+    }
+
+    private TodayAccountTradingSummary todayAccountSummary(
+            String accountId, String accountAlias,
+            List<DailyTradeStatsStore.AccountSymbolVolumeSummary> symbols, String error) {
+        BigDecimal buy = BigDecimal.ZERO;
+        BigDecimal sell = BigDecimal.ZERO;
+        BigDecimal total = BigDecimal.ZERO;
+        BigDecimal commission = BigDecimal.ZERO;
+        BigDecimal netPnl = BigDecimal.ZERO;
+        boolean commissionComplete = true;
+        for (DailyTradeStatsStore.AccountSymbolVolumeSummary symbol : symbols) {
+            buy = buy.add(orZero(symbol.buyVolumeQuote()));
+            sell = sell.add(orZero(symbol.sellVolumeQuote()));
+            total = total.add(orZero(symbol.totalVolumeQuote()));
+            commission = commission.add(orZero(symbol.totalCommissionQuoteEquivalent()));
+            netPnl = netPnl.add(orZero(symbol.netRealizedPnlQuote()));
+            commissionComplete &= symbol.commissionConversionComplete();
+        }
+        BigDecimal loss = netPnl.signum() < 0 ? netPnl.negate() : BigDecimal.ZERO;
+        String safeAccountId = Objects.toString(accountId, "");
+        String safeAlias = accountAlias == null || accountAlias.isBlank() ? safeAccountId : accountAlias;
+        return new TodayAccountTradingSummary(safeAccountId, safeAlias, List.copyOf(symbols), buy, sell,
+                total, commission, netPnl, loss, commissionComplete, error);
+    }
+
+    private static BigDecimal orZero(BigDecimal value) {
+        return value == null ? BigDecimal.ZERO : value;
     }
 
     @GetMapping("/api/accounts/{accountId}/status")
@@ -258,6 +333,19 @@ public class BotDashboardController {
     }
 
     private Optional<AccountTradingRuntime> runtime(String accountId) { return accountManager.find(accountId); }
+
+    public record TodayTradingSummary(LocalDate date, List<TodayAccountTradingSummary> accounts,
+                                      BigDecimal totalVolumeQuote,
+                                      BigDecimal totalCommissionQuoteEquivalent,
+                                      BigDecimal netRealizedPnlQuote, BigDecimal totalLossQuote,
+                                      long updatedAtMs) { }
+
+    public record TodayAccountTradingSummary(
+            String accountId, String accountAlias,
+            List<DailyTradeStatsStore.AccountSymbolVolumeSummary> symbols,
+            BigDecimal buyVolumeQuote, BigDecimal sellVolumeQuote, BigDecimal totalVolumeQuote,
+            BigDecimal totalCommissionQuoteEquivalent, BigDecimal netRealizedPnlQuote,
+            BigDecimal lossQuote, boolean commissionConversionComplete, String error) { }
     private Optional<AccountTradingRuntime> defaultRuntime() { return accountManager.runtimes().stream().findFirst(); }
     private ResponseEntity<?> noAccount() {
         return ResponseEntity.status(503).body(Map.of("message", "没有可用账号"));

@@ -1190,7 +1190,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     ChurnStatus.SELLING);
             if (activeOrderId.get() != null) {
                 statusReason.set("手续费保护卖单已挂出 @ " + floorPrice.toPlainString()
-                        + "（不低于保本及目标利润价）");
+                        + "（不低于手续费保护价）");
             }
             return;
         }

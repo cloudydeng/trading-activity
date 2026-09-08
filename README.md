@@ -55,7 +55,7 @@ BOT_ACCOUNT_PROFILES_JSON='{
 `BUY_PRICE_MAKER` 在买一挂买单，初始卖价直接取实际买入均价并按 tick 向上取整；
 `FEE_AWARE_MAKER` 同样在买一挂买单，但增加买入锚点，并让初始卖价不低于手续费保护价。
 卖单到达检查时间时，如果仍在卖一就保留并重新计时；如果不在卖一，则撤单对账并直接按最新卖一重挂。
-超时阶段优先释放仓位，不再强制买入价或手续费保护价底线。未配置时默认使用 `FEE_AWARE_MAKER`。
+超时阶段优先释放仓位，不再强制买入价或手续费保护价底线。控制台新建策略配置时默认选择 `FEE_AWARE_MAKER`；生产账户应为当前交易对保存明确的策略配置。
 
 控制台的“运行时策略切换”可在不重启的情况下修改当前账户/交易对的策略。切换请求会写入 SQLite
 `runtime_setting`，重启后优先于环境变量配置恢复；如果当前处于 BUYING 或 SELLING，修改会排队到订单完成并回到
@@ -89,6 +89,7 @@ java -jar target/binance-spot-competition-bot-3.0.0.jar
 - `GET /api/accounts`
 - `GET /api/accounts/open-orders`（所有账户当前活动买单/卖单）
 - `GET /api/accounts/stats/summary?days=10`（按账户 + 交易对分别汇总近 N 天成交）
+- `GET /api/accounts/stats/today`（按账户汇总 UTC 今日各交易对成交量、手续费和净盈亏；单账户错误隔离）
 - `GET /api/accounts/{accountId}/status`
 - `POST /api/accounts/{accountId}/start`
 - `POST /api/accounts/{accountId}/stop`
@@ -98,6 +99,7 @@ java -jar target/binance-spot-competition-bot-3.0.0.jar
 - `POST /api/accounts/reload`（从服务器受保护环境文件热加载新增账户；不会替换或停止已有账户）
 
 控制台的“API 账户10天汇总”页面展示上述汇总，只保留窗口内有真实成交的账户/交易对组合。
+控制台的“今日账户汇总”页面按 UTC 今日、账户和交易对展示本地每日聚合中的成交量、手续费和已实现净盈亏；每 10 秒刷新，但不直接请求 Binance，单账户读取失败不会影响其他账户。
 
 应用启动前会自动读取 `BOT_ACCOUNT_PROFILES_ENV_FILE` 指向的服务器环境文件（默认 `/etc/trading-activity.env`），
 将其中缺失的 `BOT_*`、`BINANCE_*` 配置加载到启动环境；已有进程环境变量优先。账户热加载也会重新读取同一文件。
