@@ -437,7 +437,77 @@ class HighFrequencyVolumeChurnEngineTest {
         verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
                 decimalEquals("0.6001"), anyString());
         assertEquals(77L, atomic("activeOrderId", Long.class).get());
-        assertTrue(engine.getStatusReason().get().contains("买入价上方"));
+        assertTrue(engine.getStatusReason().get().contains("1 tick"));
+    }
+
+    @Test
+    void bidAskMakerInitialSellMarkupTicksCanBeConfigured() throws Exception {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
+                "ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 3);
+        assertTrue(result.accepted());
+        assertEquals(3, engine.getStrategyProfile().getBidAskInitialSellMarkupTicks());
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6.0000"));
+        when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.6003"), anyString()))
+                .thenReturn(new ObjectMapper().readTree("{\"orderId\":78}"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.5990"), new BigDecimal("0.5991"));
+
+        verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.6003"), anyString());
+        assertTrue(engine.getStatusReason().get().contains("3 tick"));
+    }
+
+    @Test
+    void bidAskMakerRejectsZeroInitialSellMarkupTicks() {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
+                "ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 0);
+
+        assertFalse(result.accepted());
+        assertTrue(result.message().contains("1 到 10,000 tick"));
+    }
+
+    @Test
+    void buyPriceMakerBuysAtBestBidAndInitialSellUsesActualBuyAverage() throws Exception {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
+                "ENSOUSDT", "BUY_PRICE_MAKER", new BigDecimal("6"), 20_000L, 120_000L);
+        assertTrue(result.accepted());
+        assertEquals("BUY_PRICE_MAKER", engine.getStrategyMode());
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                decimalEquals("0.6000"), decimalEquals("10"), isNull(), anyString()))
+                .thenReturn(new ObjectMapper().readTree("{\"orderId\":66}"));
+        engine.getIsRunning().set(true);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6020"));
+
+        verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                decimalEquals("0.6000"), decimalEquals("10"), isNull(), anyString());
+
+        atomic("activeOrderId", Long.class).set(null);
+        atomic("activeClientOrderId", String.class).set(null);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6.0005"));
+        when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.6001"), anyString()))
+                .thenReturn(new ObjectMapper().readTree("{\"orderId\":77}"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.5990"), new BigDecimal("0.6020"));
+
+        verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.6001"), anyString());
+        assertEquals(77L, atomic("activeOrderId", Long.class).get());
+        assertTrue(engine.getStatusReason().get().contains("实际买入均价"));
     }
 
     @Test
@@ -549,6 +619,39 @@ class HighFrequencyVolumeChurnEngineTest {
 
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
                 new BigDecimal("0.598900"), new BigDecimal("0.599000"));
+
+        verify(tradeService).cancelOrder("ENSOUSDT", 77L);
+        verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.5990"), anyString());
+        assertEquals(88L, atomic("activeOrderId", Long.class).get());
+    }
+
+    @Test
+    void timedOutBuyPriceMakerSellRepricesToLatestAskWithoutBuyPriceFloor() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        engine.switchStrategy("ENSOUSDT", "BUY_PRICE_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L);
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("activeOrderId", Long.class).set(77L);
+        atomic("activeOrderPrice", BigDecimal.class).set(new BigDecimal("0.600000"));
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6.0000"));
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis() - 121_000L);
+        when(tradeService.cancelOrder("ENSOUSDT", 77L))
+                .thenReturn(mapper.readTree("{\"orderId\":77,\"status\":\"CANCELED\"}"));
+        when(tradeService.getOrder("ENSOUSDT", 77L)).thenReturn(mapper.readTree(
+                "{\"orderId\":77,\"status\":\"CANCELED\",\"side\":\"SELL\",\"executedQty\":\"0\",\"cummulativeQuoteQty\":\"0\"}"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(
+                new BinanceAccountTradeClient.AssetBalance("ENSO", new BigDecimal("10"), BigDecimal.ZERO,
+                        new BigDecimal("10")));
+        when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.5990"), anyString())).thenReturn(mapper.readTree("{\"orderId\":88}"));
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.5989"), new BigDecimal("0.5990"));
 
         verify(tradeService).cancelOrder("ENSOUSDT", 77L);
         verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
@@ -1309,6 +1412,20 @@ class HighFrequencyVolumeChurnEngineTest {
         verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
                 decimalEquals("0.6000"), decimalEquals("10"), isNull(), anyString());
         assertEquals(101L, atomic("activeOrderId", Long.class).get());
+    }
+
+    @Test
+    void buyPriceMakerUsesConfiguredPostSellWait() {
+        engine.switchStrategy("ENSOUSDT", "BUY_PRICE_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L, null, null, null, null, null, null, 45_000L);
+        engine.getIsRunning().set(true);
+
+        ReflectionTestUtils.invokeMethod(engine, "completeFlatExit", false);
+
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
+        assertTrue(engine.getStatusReason().get().contains("等待 45 秒"));
+        assertTrue(((AtomicLong) ReflectionTestUtils.getField(engine, "postSellNextEntryAllowedAtMs")).get()
+                > System.currentTimeMillis());
     }
 
     @Test

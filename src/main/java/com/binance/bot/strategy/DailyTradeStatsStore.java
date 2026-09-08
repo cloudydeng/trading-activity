@@ -1,7 +1,6 @@
 package com.binance.bot.strategy;
 
 import com.binance.bot.config.BinanceProperties;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
@@ -37,7 +36,6 @@ import java.util.Set;
 public class DailyTradeStatsStore {
     private static final MathContext MC = MathContext.DECIMAL64;
     private static final BigDecimal ONE_MILLION = new BigDecimal("1000000");
-    private static final TypeReference<LinkedHashSet<String>> STRING_SET = new TypeReference<>() { };
     private static final String STRATEGY_OVERRIDE_PREFIX = "strategy_override:";
     private static final String RUNTIME_STATE_PREFIX = "runtime_state:";
 
@@ -69,6 +67,16 @@ public class DailyTradeStatsStore {
                       updated_at INTEGER NOT NULL
                     )
                     """);
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS processed_trade (
+                      account_id TEXT NOT NULL,
+                      symbol TEXT NOT NULL,
+                      trade_identity TEXT NOT NULL,
+                      trade_date TEXT NOT NULL,
+                      processed_at INTEGER NOT NULL,
+                      PRIMARY KEY (account_id, symbol, trade_identity)
+                    )
+                    """);
         }
         if (tableExists("daily_trade_stats") && !columnExists("daily_trade_stats", "account_id")) {
             migrateLegacyDailyStats();
@@ -91,13 +99,103 @@ public class DailyTradeStatsStore {
                       trade_count INTEGER NOT NULL,
                       round_trips INTEGER NOT NULL,
                       commission_complete INTEGER NOT NULL,
-                      processed_trade_ids TEXT NOT NULL,
                       updated_at INTEGER NOT NULL,
                       PRIMARY KEY (account_id, trade_date, symbol)
                     )
                     """);
         }
+        if (columnExists("daily_trade_stats", "processed_trade_ids")) {
+            migrateProcessedTradeIds();
+        }
         rekeyLegacyAccountIds(properties);
+    }
+
+    /**
+     * Moves the old per-day JSON id set into a normalized table. The backfill and the aggregate-table
+     * rebuild share one SQLite transaction, so a failed migration leaves the original schema intact.
+     */
+    private void migrateProcessedTradeIds() throws SQLException {
+        connection.setAutoCommit(false);
+        int migratedIds = 0;
+        try {
+            try (PreparedStatement select = connection.prepareStatement("""
+                    SELECT account_id, trade_date, symbol, processed_trade_ids, updated_at
+                    FROM daily_trade_stats
+                    """);
+                 ResultSet rows = select.executeQuery();
+                 PreparedStatement insert = connection.prepareStatement("""
+                    INSERT OR IGNORE INTO processed_trade
+                      (account_id, symbol, trade_identity, trade_date, processed_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """)) {
+                while (rows.next()) {
+                    LinkedHashSet<String> identities;
+                    try {
+                        identities = objectMapper.readValue(rows.getString("processed_trade_ids"),
+                                objectMapper.getTypeFactory().constructCollectionType(
+                                        LinkedHashSet.class, String.class));
+                    } catch (Exception invalid) {
+                        throw new SQLException("无法迁移已处理成交 ID", invalid);
+                    }
+                    for (String identity : identities) {
+                        if (identity == null || identity.isBlank()) continue;
+                        insert.setString(1, rows.getString("account_id"));
+                        insert.setString(2, rows.getString("symbol"));
+                        insert.setString(3, identity);
+                        insert.setString(4, rows.getString("trade_date"));
+                        insert.setLong(5, rows.getLong("updated_at"));
+                        migratedIds += insert.executeUpdate();
+                    }
+                }
+            }
+
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("DROP TABLE IF EXISTS daily_trade_stats_v3");
+                statement.execute("""
+                        CREATE TABLE daily_trade_stats_v3 (
+                          account_id TEXT NOT NULL,
+                          account_alias TEXT NOT NULL,
+                          trade_date TEXT NOT NULL,
+                          symbol TEXT NOT NULL,
+                          buy_volume TEXT NOT NULL,
+                          sell_volume TEXT NOT NULL,
+                          total_volume TEXT NOT NULL,
+                          commission_quote TEXT NOT NULL,
+                          economic_fee_quote TEXT NOT NULL,
+                          realized_gross_pnl TEXT NOT NULL,
+                          position_qty TEXT NOT NULL,
+                          position_cost_quote TEXT NOT NULL,
+                          trade_count INTEGER NOT NULL,
+                          round_trips INTEGER NOT NULL,
+                          commission_complete INTEGER NOT NULL,
+                          updated_at INTEGER NOT NULL,
+                          PRIMARY KEY (account_id, trade_date, symbol)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO daily_trade_stats_v3
+                          (account_id, account_alias, trade_date, symbol, buy_volume, sell_volume,
+                           total_volume, commission_quote, economic_fee_quote, realized_gross_pnl,
+                           position_qty, position_cost_quote, trade_count, round_trips,
+                           commission_complete, updated_at)
+                        SELECT account_id, account_alias, trade_date, symbol, buy_volume, sell_volume,
+                               total_volume, commission_quote, economic_fee_quote, realized_gross_pnl,
+                               position_qty, position_cost_quote, trade_count, round_trips,
+                               commission_complete, updated_at
+                        FROM daily_trade_stats
+                        """);
+                statement.execute("DROP TABLE daily_trade_stats");
+                statement.execute("ALTER TABLE daily_trade_stats_v3 RENAME TO daily_trade_stats");
+            }
+            connection.commit();
+            log.warn("已将每日汇总表中的成交去重 JSON 迁移到 processed_trade，记录数={}", migratedIds);
+        } catch (Exception e) {
+            connection.rollback();
+            if (e instanceof SQLException sqlException) throw sqlException;
+            throw new SQLException("成交去重数据迁移失败", e);
+        } finally {
+            connection.setAutoCommit(true);
+        }
     }
 
     private boolean tableExists(String table) throws SQLException {
@@ -179,6 +277,23 @@ public class DailyTradeStatsStore {
                 }
             }
         }
+        try (PreparedStatement copy = connection.prepareStatement("""
+                INSERT OR IGNORE INTO processed_trade
+                  (account_id, symbol, trade_identity, trade_date, processed_at)
+                SELECT ?, symbol, trade_identity, trade_date, processed_at
+                FROM processed_trade WHERE account_id=?
+                """);
+             PreparedStatement delete = connection.prepareStatement(
+                     "DELETE FROM processed_trade WHERE account_id=?")) {
+            for (Map.Entry<String, String> mapping : aliasToAccountId.entrySet()) {
+                if (mapping.getKey().equals(mapping.getValue())) continue;
+                copy.setString(1, mapping.getValue());
+                copy.setString(2, mapping.getKey());
+                copy.executeUpdate();
+                delete.setString(1, mapping.getKey());
+                delete.executeUpdate();
+            }
+        }
     }
 
     private Map<String, String> legacyAliasMappings(BinanceProperties properties) {
@@ -238,18 +353,18 @@ public class DailyTradeStatsStore {
         String normalizedAccountId = normalizeAccountId(accountId);
         String alias = normalizeAlias(accountAlias);
         String normalizedSymbol = symbol.toUpperCase();
-        String identity = orderId + ":" + (tradeId >= 0 ? Long.toString(tradeId)
+        String tradeIdentity = orderId + ":" + (tradeId >= 0 ? Long.toString(tradeId)
                 : side + ":" + inventoryQuantity.toPlainString() + ":" + quoteQuantity.toPlainString()
                 + ":" + (commission == null ? "0" : commission.toPlainString()));
         try {
             connection.setAutoCommit(false);
-            MutableStats stats = load(date, normalizedAccountId, normalizedSymbol);
-            if (stats == null) stats = newStats(date, normalizedAccountId, alias, normalizedSymbol);
-            stats.accountAlias = alias;
-            if (!stats.processedTradeIds.add(identity)) {
+            if (!insertProcessedTrade(normalizedAccountId, normalizedSymbol, tradeIdentity, date, tradeTimeMs)) {
                 connection.rollback();
                 return RecordResult.DUPLICATE;
             }
+            MutableStats stats = load(date, normalizedAccountId, normalizedSymbol);
+            if (stats == null) stats = newStats(date, normalizedAccountId, alias, normalizedSymbol);
+            stats.accountAlias = alias;
             applyTrade(stats, side, inventoryQuantity, quoteQuantity, commission,
                     commissionQuoteEquivalent, economicFeeQuote);
             upsert(stats);
@@ -262,6 +377,22 @@ public class DailyTradeStatsStore {
             return RecordResult.FAILED;
         } finally {
             setAutoCommitQuietly(true);
+        }
+    }
+
+    private boolean insertProcessedTrade(String accountId, String symbol, String tradeIdentity,
+                                         LocalDate tradeDate, long processedAtMs) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                INSERT OR IGNORE INTO processed_trade
+                  (account_id, symbol, trade_identity, trade_date, processed_at)
+                VALUES (?, ?, ?, ?, ?)
+                """)) {
+            statement.setString(1, accountId);
+            statement.setString(2, symbol);
+            statement.setString(3, tradeIdentity);
+            statement.setString(4, tradeDate.toString());
+            statement.setLong(5, processedAtMs > 0 ? processedAtMs : System.currentTimeMillis());
+            return statement.executeUpdate() == 1;
         }
     }
 
@@ -691,13 +822,17 @@ public class DailyTradeStatsStore {
         stats.tradeCount = row.getInt("trade_count");
         stats.roundTrips = row.getInt("round_trips");
         stats.commissionComplete = row.getInt("commission_complete") == 1;
-        stats.processedTradeIds.addAll(objectMapper.readValue(row.getString("processed_trade_ids"), STRING_SET));
         return stats;
     }
 
     private void upsert(MutableStats stats) throws Exception {
         try (PreparedStatement statement = connection.prepareStatement("""
-                INSERT INTO daily_trade_stats VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO daily_trade_stats
+                  (account_id, account_alias, trade_date, symbol, buy_volume, sell_volume,
+                   total_volume, commission_quote, economic_fee_quote, realized_gross_pnl,
+                   position_qty, position_cost_quote, trade_count, round_trips,
+                   commission_complete, updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(account_id, trade_date, symbol) DO UPDATE SET
                   account_alias=excluded.account_alias,
                   buy_volume=excluded.buy_volume, sell_volume=excluded.sell_volume,
@@ -705,8 +840,7 @@ public class DailyTradeStatsStore {
                   economic_fee_quote=excluded.economic_fee_quote, realized_gross_pnl=excluded.realized_gross_pnl,
                   position_qty=excluded.position_qty, position_cost_quote=excluded.position_cost_quote,
                   trade_count=excluded.trade_count, round_trips=excluded.round_trips,
-                  commission_complete=excluded.commission_complete,
-                  processed_trade_ids=excluded.processed_trade_ids, updated_at=excluded.updated_at
+                  commission_complete=excluded.commission_complete, updated_at=excluded.updated_at
                 """)) {
             int i = 1;
             statement.setString(i++, stats.accountId);
@@ -724,7 +858,6 @@ public class DailyTradeStatsStore {
             statement.setInt(i++, stats.tradeCount);
             statement.setInt(i++, stats.roundTrips);
             statement.setInt(i++, stats.commissionComplete ? 1 : 0);
-            statement.setString(i++, objectMapper.writeValueAsString(stats.processedTradeIds));
             statement.setLong(i, System.currentTimeMillis());
             statement.executeUpdate();
         }
@@ -855,7 +988,6 @@ public class DailyTradeStatsStore {
         private int tradeCount;
         private int roundTrips;
         private boolean commissionComplete = true;
-        private final Set<String> processedTradeIds = new LinkedHashSet<>();
 
         private MutableStats(LocalDate date, String accountId, String accountAlias, String symbol) {
             this.date = date;

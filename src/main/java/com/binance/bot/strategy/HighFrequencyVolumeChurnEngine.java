@@ -1108,9 +1108,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             trackOrder(response.get("orderId").asLong(), clientOrderId, ChurnStatus.SELLING);
             activeOrderPrice.set(floorPrice);
             persistRuntimeState(true);
-            statusReason.set(usesBidAskMakerStrategy()
-                    ? "BUY 成交后按卖一/买入价上方挂限价卖单 @ " + floorPrice.toPlainString()
-                    : "BUY 成交后按买入均价下限卖出中 @ " + floorPrice.toPlainString());
+            String initialExitReason = usesBidAskMakerStrategy()
+                    ? "BUY 成交后按卖一/买入均价上方 " + bidAskInitialSellMarkupTicks()
+                    + " tick 挂 LIMIT 卖单 @ " + floorPrice.toPlainString()
+                    : usesBuyPriceMakerStrategy()
+                    ? "BUY 成交后按实际买入均价挂 LIMIT 卖单 @ " + floorPrice.toPlainString()
+                    : "BUY 成交后按买入均价下限卖出中 @ " + floorPrice.toPlainString();
+            statusReason.set(initialExitReason);
             log.info("[accountId={} alias={}] BUY 成交后已挂 GTC 限价卖出 {} {} @ {}",
                     accountId, accountAlias, quantity, baseAsset(), floorPrice);
         } else {
@@ -1122,8 +1126,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
      * Every sell order has a configurable working window. Once it expires, keep
      * the order when it is still at the latest best ask and re-arm the timer.
      * Only an order that is no longer at the best ask is canceled, reconciled,
-     * and repriced. Both strategies use the latest best ask when repricing;
-     * FEE_AWARE_MAKER only enforces the fee floor on the initial exit order.
+     * and repriced. All strategies use the latest best ask when repricing;
+     * FEE_AWARE_MAKER only enforces the fee floor on the initial exit order, while
+     * BUY_PRICE_MAKER only enforces the actual buy average on the initial exit order.
      * Neither path falls back to MARKET.
      */
     private boolean deferTimedOutExitIfStillBestAsk(SymbolRuleManager.SymbolRule rule,
@@ -1386,6 +1391,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     private BigDecimal entryAverageStrictlyHigherPrice(SymbolRuleManager.SymbolRule rule) {
+        BigDecimal average = entryAveragePrice(rule);
+        if (average.signum() <= 0) return BigDecimal.ZERO;
+        BigDecimal markup = rule.tickSize().multiply(BigDecimal.valueOf(bidAskInitialSellMarkupTicks()));
+        return PrecisionUtil.roundUpToStep(average.add(markup), rule.tickSize());
+    }
+
+    private BigDecimal entryAveragePrice(SymbolRuleManager.SymbolRule rule) {
         BigDecimal filledQuantity = filledEntryQuantity.get();
         BigDecimal filledQuote = filledEntryQuoteQuantity.get();
         if (rule == null) return BigDecimal.ZERO;
@@ -1400,7 +1412,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             }
         }
         if (average.signum() <= 0) return BigDecimal.ZERO;
-        return PrecisionUtil.roundUpToStep(average.add(rule.tickSize()), rule.tickSize());
+        return PrecisionUtil.roundUpToStep(average, rule.tickSize());
     }
 
     private BigDecimal bidAskMakerExitPrice(SymbolRuleManager.SymbolRule rule, BigDecimal bestAsk) {
@@ -2195,6 +2207,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         BigDecimal amount = orderAmountUsdt();
         return amount == null ? BigDecimal.ZERO : amount;
     }
+    public BigDecimal getTickSize() {
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule(properties.getStrategy().getSymbol());
+        return rule == null || rule.tickSize() == null ? BigDecimal.ZERO : rule.tickSize();
+    }
     public String getStrategyMode() {
         var profile = symbolStrategy(properties.getStrategy().getSymbol());
         return profile == null || profile.getMode() == null || profile.getMode().isBlank()
@@ -2320,6 +2336,25 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                                               BigDecimal requestedManualEntryAnchorPrice,
                                                               Long requestedPostSellEntryDelayMs,
                                                               BigDecimal requestedDailyVolumeLimitUsdt) {
+        return switchStrategy(requestedSymbol, requestedMode, requestedAmount, requestedEntryTimeoutMs,
+                requestedExitTimeoutMs, requestedMakerFeeBps, requestedTargetNetProfitBps,
+                requestedEntryAnchorWaitMs, requestedMaxEntryAnchorDriftBps,
+                requestedMaxCumulativeEntryAnchorDriftBps, requestedManualEntryAnchorPrice,
+                requestedPostSellEntryDelayMs, requestedDailyVolumeLimitUsdt, null);
+    }
+
+    public synchronized StrategySwitchResult switchStrategy(String requestedSymbol, String requestedMode,
+                                                              BigDecimal requestedAmount, Long requestedEntryTimeoutMs,
+                                                              Long requestedExitTimeoutMs,
+                                                              BigDecimal requestedMakerFeeBps,
+                                                              BigDecimal requestedTargetNetProfitBps,
+                                                              Long requestedEntryAnchorWaitMs,
+                                                              BigDecimal requestedMaxEntryAnchorDriftBps,
+                                                              BigDecimal requestedMaxCumulativeEntryAnchorDriftBps,
+                                                              BigDecimal requestedManualEntryAnchorPrice,
+                                                              Long requestedPostSellEntryDelayMs,
+                                                              BigDecimal requestedDailyVolumeLimitUsdt,
+                                                              Integer requestedBidAskInitialSellMarkupTicks) {
         String symbol = normalizeStrategySymbol(requestedSymbol);
         if (symbol.isBlank() || !symbol.endsWith("USDT")) {
             return StrategySwitchResult.rejected(properties.getStrategy().getSymbol(),
@@ -2329,7 +2364,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         String mode = requestedMode == null || requestedMode.isBlank()
                 ? existing == null ? "FEE_AWARE_MAKER" : normalizeStrategyMode(existing.getMode())
                 : requestedMode.trim().toUpperCase();
-        if (!"BID_ASK_MAKER".equals(mode) && !"FEE_AWARE_MAKER".equals(mode)) {
+        if (!"BID_ASK_MAKER".equals(mode) && !"BUY_PRICE_MAKER".equals(mode)
+                && !"FEE_AWARE_MAKER".equals(mode)) {
             return StrategySwitchResult.rejected(symbol, "不支持的策略类型: " + mode);
         }
         BigDecimal amount = requestedAmount == null && existing != null
@@ -2351,6 +2387,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (postSellEntryDelayMs == null) postSellEntryDelayMs = 60_000L;
         if (!validPostSellEntryDelay(postSellEntryDelayMs)) {
             return StrategySwitchResult.rejected(symbol, "卖出后买入等待时间必须在 0 秒到 24 小时之间");
+        }
+        Integer bidAskInitialSellMarkupTicks = requestedBidAskInitialSellMarkupTicks == null && existing != null
+                ? existing.getBidAskInitialSellMarkupTicks() : requestedBidAskInitialSellMarkupTicks;
+        if (bidAskInitialSellMarkupTicks == null) bidAskInitialSellMarkupTicks = 1;
+        if (bidAskInitialSellMarkupTicks < 1 || bidAskInitialSellMarkupTicks > 10_000) {
+            return StrategySwitchResult.rejected(symbol, "BID_ASK_MAKER 初始卖价加价必须在 1 到 10,000 tick 之间");
         }
         BigDecimal dailyVolumeLimitUsdt = requestedDailyVolumeLimitUsdt == null && existing != null
                 ? existing.getDailyVolumeLimitUsdt() : requestedDailyVolumeLimitUsdt;
@@ -2413,6 +2455,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         profile.setMaxCumulativeEntryAnchorDriftBps(maxCumulativeEntryAnchorDriftBps);
         profile.setManualEntryAnchorPrice(manualEntryAnchorPrice);
         profile.setPostSellEntryDelayMs(postSellEntryDelayMs);
+        profile.setBidAskInitialSellMarkupTicks(bidAskInitialSellMarkupTicks);
         profile.setDailyVolumeLimitUsdt(dailyVolumeLimitUsdt);
 
         String currentSymbol = normalizeStrategySymbol(properties.getStrategy().getSymbol());
@@ -2490,7 +2533,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     private String normalizeStrategyMode(String mode) {
         String normalized = mode == null ? "" : mode.trim().toUpperCase();
-        return "BID_ASK_MAKER".equals(normalized) ? "BID_ASK_MAKER" : "FEE_AWARE_MAKER";
+        if ("BID_ASK_MAKER".equals(normalized)) return "BID_ASK_MAKER";
+        if ("BUY_PRICE_MAKER".equals(normalized)) return "BUY_PRICE_MAKER";
+        return "FEE_AWARE_MAKER";
     }
 
     private String normalizeStrategySymbol(String symbol) {
@@ -2512,6 +2557,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         copy.setMaxCumulativeEntryAnchorDriftBps(source.getMaxCumulativeEntryAnchorDriftBps());
         copy.setManualEntryAnchorPrice(source.getManualEntryAnchorPrice());
         copy.setPostSellEntryDelayMs(source.getPostSellEntryDelayMs());
+        copy.setBidAskInitialSellMarkupTicks(source.getBidAskInitialSellMarkupTicks());
         copy.setDailyVolumeLimitUsdt(source.getDailyVolumeLimitUsdt());
         return copy;
     }
@@ -2530,8 +2576,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return profile != null && "FEE_AWARE_MAKER".equalsIgnoreCase(profile.getMode());
     }
 
+    private boolean usesBuyPriceMakerStrategy() {
+        var profile = symbolStrategy(properties.getStrategy().getSymbol());
+        return profile != null && "BUY_PRICE_MAKER".equalsIgnoreCase(profile.getMode());
+    }
+
     private boolean usesBestBidEntryStrategy() {
-        return usesBidAskMakerStrategy() || usesFeeAwareMakerStrategy();
+        return usesBidAskMakerStrategy() || usesBuyPriceMakerStrategy() || usesFeeAwareMakerStrategy();
     }
 
     private MarketSignalEvaluator.EntryDecision entryDecisionForStrategy(long now) {
@@ -2555,6 +2606,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         Long delayMs = profile == null ? null : profile.getPostSellEntryDelayMs();
         if (delayMs == null) delayMs = 60_000L;
         return Math.max(0, Math.min(86_400_000L, delayMs));
+    }
+
+    private int bidAskInitialSellMarkupTicks() {
+        var profile = symbolStrategy(properties.getStrategy().getSymbol());
+        Integer ticks = profile == null ? null : profile.getBidAskInitialSellMarkupTicks();
+        return ticks == null ? 1 : Math.max(1, Math.min(10_000, ticks));
     }
 
     private long schedulePostSellEntryDelay() {
@@ -2590,6 +2647,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     private BigDecimal initialStrategyExitPrice(SymbolRuleManager.SymbolRule rule) {
         if (usesFeeAwareMakerStrategy()) return feeProtectedExitPrice(rule, lastBestAskOrZero());
+        if (usesBuyPriceMakerStrategy()) {
+            BigDecimal price = entryAveragePrice(rule);
+            if (price.signum() > 0) return price;
+        }
         if (usesBidAskMakerStrategy()) {
             BigDecimal price = bidAskMakerExitPrice(rule, lastBestAskOrZero());
             if (price.signum() > 0) return price;

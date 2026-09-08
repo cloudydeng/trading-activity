@@ -150,7 +150,8 @@ public class BotDashboardController {
                 request.exitTimeoutMs(), request.makerFeeBps(), request.targetNetProfitBps(),
                 request.entryAnchorWaitMs(), request.maxEntryAnchorDriftBps(),
                 request.maxCumulativeEntryAnchorDriftBps(), request.manualEntryAnchorPrice(),
-                request.postSellEntryDelayMs(), request.dailyVolumeLimitUsdt());
+                request.postSellEntryDelayMs(), request.dailyVolumeLimitUsdt(),
+                request.bidAskInitialSellMarkupTicks());
         return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
     }
 
@@ -236,6 +237,7 @@ public class BotDashboardController {
                 Map.entry("symbol", engine.getSymbol()),
                 Map.entry("strategyMode", engine.getStrategyMode()),
                 Map.entry("strategyProfile", engine.getStrategyProfile()),
+                Map.entry("tickSize", engine.getTickSize()),
                 Map.entry("feeAwareRecommendedEntryAnchorPrice", engine.getFeeAwareRecommendedEntryAnchorPrice()),
                 Map.entry("strategyChangePending", engine.hasPendingStrategyChange()),
                 Map.entry("orderAmountUsdt", engine.getOrderAmountUsdt()),
@@ -396,7 +398,8 @@ public class BotDashboardController {
                                         BigDecimal maxCumulativeEntryAnchorDriftBps,
                                         BigDecimal manualEntryAnchorPrice,
                                         Long postSellEntryDelayMs,
-                                        BigDecimal dailyVolumeLimitUsdt) { }
+                                        BigDecimal dailyVolumeLimitUsdt,
+                                        Integer bidAskInitialSellMarkupTicks) { }
     public record AccountSnapshot(String accountId, String symbol, String apiKeyAlias, String accountType,
                                   boolean canTrade, long accountUpdateTimeMs, List<BalanceView> balances,
                                   List<OrderView> filledOrders, List<OrderView> openOrders, int usedApiWeight1m) { }

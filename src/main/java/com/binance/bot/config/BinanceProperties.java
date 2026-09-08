@@ -50,7 +50,10 @@ public class BinanceProperties {
 
     @Data
     public static class SymbolStrategyProfile {
-        /** BID_ASK_MAKER uses bid/ask; FEE_AWARE_MAKER protects fees and is the default. */
+        /**
+         * BID_ASK_MAKER starts at best ask, BUY_PRICE_MAKER starts at the actual buy average,
+         * and FEE_AWARE_MAKER protects fees and remains the default.
+         */
         private String mode = "FEE_AWARE_MAKER";
         private BigDecimal orderAmountUsdt;
         /** Entry timeout after which a stale bid is canceled; same bid remains working. */
@@ -69,8 +72,10 @@ public class BinanceProperties {
         private BigDecimal maxCumulativeEntryAnchorDriftBps;
         /** Optional manual cumulative anchor price. Null lets the runtime derive it from recent buys. */
         private BigDecimal manualEntryAnchorPrice;
-        /** BID_ASK_MAKER waits this long after a flat sell before opening the next buy. */
+        /** Best-bid entry strategies wait this long after a flat sell before opening the next buy. */
         private Long postSellEntryDelayMs = 60_000L;
+        /** BID_ASK_MAKER initial sell markup above the actual buy average, measured in ticks. */
+        private Integer bidAskInitialSellMarkupTicks = 1;
         /** UTC-day real fill volume cap in quote asset; the account stops safely after flattening. */
         private BigDecimal dailyVolumeLimitUsdt = new BigDecimal("510");
     }

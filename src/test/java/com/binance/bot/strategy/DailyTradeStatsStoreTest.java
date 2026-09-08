@@ -18,7 +18,7 @@ class DailyTradeStatsStoreTest {
     @TempDir Path tempDir;
 
     @Test
-    void persistsDailyEconomicsAndDeduplicatesTradesAcrossRestart() {
+    void persistsDailyEconomicsAndDeduplicatesTradesAcrossRestart() throws Exception {
         BinanceProperties properties = properties();
         DailyTradeStatsStore first = new DailyTradeStatsStore(properties);
         long now = System.currentTimeMillis();
@@ -50,6 +50,24 @@ class DailyTradeStatsStoreTest {
         assertDecimal("0.00798", stats.netRealizedPnlQuote());
         assertEquals(2, stats.tradeCount());
         assertEquals(1, stats.roundTrips());
+        try (var connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + tempDir.resolve("daily.db"));
+             var columns = connection.createStatement().executeQuery(
+                     "PRAGMA table_info(daily_trade_stats)")) {
+            boolean oldJsonColumnPresent = false;
+            while (columns.next()) {
+                if ("processed_trade_ids".equals(columns.getString("name"))) {
+                    oldJsonColumnPresent = true;
+                }
+            }
+            assertEquals(false, oldJsonColumnPresent);
+        }
+        try (var connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + tempDir.resolve("daily.db"));
+             var count = connection.createStatement().executeQuery(
+                     "SELECT COUNT(*) FROM processed_trade")) {
+            assertEquals(2, count.getInt(1));
+        }
         restarted.close();
     }
 
@@ -183,6 +201,7 @@ class DailyTradeStatsStoreTest {
         profile.setMaxEntryAnchorDriftBps(new BigDecimal("8"));
         profile.setMaxCumulativeEntryAnchorDriftBps(new BigDecimal("5"));
         profile.setManualEntryAnchorPrice(new BigDecimal("0.5900"));
+        profile.setBidAskInitialSellMarkupTicks(3);
         profile.setDailyVolumeLimitUsdt(new BigDecimal("750"));
 
         store.saveStrategyOverride("account-a", "ensousdt", profile);
@@ -199,6 +218,7 @@ class DailyTradeStatsStoreTest {
         assertDecimal("8", loaded.get("ENSOUSDT").getMaxEntryAnchorDriftBps());
         assertDecimal("5", loaded.get("ENSOUSDT").getMaxCumulativeEntryAnchorDriftBps());
         assertDecimal("0.5900", loaded.get("ENSOUSDT").getManualEntryAnchorPrice());
+        assertEquals(3, loaded.get("ENSOUSDT").getBidAskInitialSellMarkupTicks());
         assertDecimal("750", loaded.get("ENSOUSDT").getDailyVolumeLimitUsdt());
         store.close();
     }
@@ -262,10 +282,29 @@ class DailyTradeStatsStoreTest {
         assertEquals(2, stats.tradeCount());
         assertDecimal("12.02", stats.totalVolumeQuote());
         assertEquals(0, store.today("legacy-bot", "legacy-bot", "ENSOUSDT").tradeCount());
+        assertEquals(DailyTradeStatsStore.RecordResult.DUPLICATE, store.recordTrade(
+                "primary", "legacy-bot", "ENSOUSDT", 1, 1, "BUY", BigDecimal.ONE,
+                BigDecimal.ONE, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
+                System.currentTimeMillis()));
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + database);
-             var row = connection.createStatement().executeQuery(
-                     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='daily_trade_stats_legacy_v1'")) {
-            assertEquals(1, row.getInt(1));
+             var tables = connection.createStatement().executeQuery(
+                     "SELECT name FROM sqlite_master WHERE type='table'")) {
+            java.util.Set<String> names = new java.util.HashSet<>();
+            while (tables.next()) names.add(tables.getString(1));
+            assertEquals(true, names.contains("daily_trade_stats_legacy_v1"));
+            assertEquals(true, names.contains("daily_trade_stats"));
+            assertEquals(true, names.contains("processed_trade"));
+        }
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + database);
+             var columns = connection.createStatement().executeQuery(
+                     "PRAGMA table_info(daily_trade_stats)")) {
+            boolean oldJsonColumnPresent = false;
+            while (columns.next()) {
+                if ("processed_trade_ids".equals(columns.getString("name"))) {
+                    oldJsonColumnPresent = true;
+                }
+            }
+            assertEquals(false, oldJsonColumnPresent);
         }
         store.close();
     }
