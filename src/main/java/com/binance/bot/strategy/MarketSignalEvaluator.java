@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Collects market diagnostics and retains the legacy conservative evaluator. The three current
- * best-bid strategies call {@link #evaluateBestBidMaker(long, BinanceProperties.Strategy)}, which
+ * maker-entry strategies call {@link #evaluateBestBidMaker(long, BinanceProperties.Strategy)}, which
  * records these metrics but does not use thin-book, imbalance, taker-flow or volatility as gates.
  */
 public class MarketSignalEvaluator {

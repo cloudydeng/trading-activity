@@ -40,8 +40,10 @@ binance:
     symbol: "${BINANCE_STRATEGY_SYMBOL:ENSOUSDT}"
     # 单笔名义金额；ENSOUSDT 的 Binance 最小名义额为 5 USDT。
     order-amount-usdt: 12.0
-    max-live-order-notional-usdt: 12.0
-    # 买单挂在买一以提高 Maker 成交率；LIMIT_MAKER 仍会阻止意外 Taker 成交。
+    # 控制台可配置的单笔 LIVE 金额上限；现有账户金额不会因此自动放大。
+    max-live-order-notional-usdt: 30.0
+    # 默认买一；BID_ASK_MAKER 可在账户/交易对配置中选择买一至买五。
+    # LIMIT_MAKER 仍会阻止意外 Taker 成交。
     bid-depth-offset-ticks: 0
     # 旧版盘口偏移配置；当前三种策略的初始卖价不读取该字段。
     ask-depth-offset-ticks: 0
@@ -51,8 +53,8 @@ binance:
     limit-sell-timeout-ms: 120000
     # 仅作为兼容配置；买单现在固定驻留至 20 秒 TTL，不再因短线信号撤单。
     min-entry-order-rest-ms: 800
-    # 买入只允许 Maker；20 秒后若仍在买一则继续挂，否则撤单，不追卖一、不转 IOC。
-    # 每笔固定 12U；数量仅按交易所 stepSize 向下取整，不再随机放大/缩小。
+    # 买入只允许 Maker；20 秒后若仍在策略配置档位则继续挂，否则撤单，不追卖一、不转 IOC。
+    # 默认每笔 12U，可按账户/交易对配置但不得超过 30U；数量仅按 stepSize 向下取整。
     random-size-jitter: 0
     # 以下行情参数继续用于原始技术数据和兼容评估器；当前三种策略不会据此阻断买一 Maker 入场。
     signal-lookback-ms: 3000
@@ -76,7 +78,8 @@ binance:
     min-post-selloff-reclaim-bps: 3
     # 生产安全上限：达到任一限制后只允许继续降低已有仓位，禁止新开仓。
     max-inventory-usdt: 40
-    max-daily-drawdown-usdt: 8
+    # 可由受保护环境文件中的 BINANCE_STRATEGY_MAX_DAILY_DRAWDOWN_USDT 覆盖。
+    max-daily-drawdown-usdt: "${BINANCE_STRATEGY_MAX_DAILY_DRAWDOWN_USDT:8}"
     max-inventory-age-ms: 600000
     # 以下三个字段仅为旧配置兼容；当前策略不使用利润目标或 15 秒阶梯改价。
     take-profit-bps: 10

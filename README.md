@@ -7,7 +7,7 @@
 ## 安全边界
 
 - BUY 部分成交会立即进入 SELL 管理，成交以账户事件流和 REST 对账为准。
-- 买入只使用买一价 `LIMIT_MAKER`；每笔最多 `12 USDT`，20 秒后若订单仍是买一则继续挂，只有不再是买一时才撤单；不转 IOC、不因短线信号提前撤单。
+- 买入只使用 `LIMIT_MAKER`；`BID_ASK_MAKER` 可配置买一至买五，另外两种策略固定买一。默认每笔 `12 USDT`、最高可配置 `30 USDT`；超时后若订单仍在所选档位则继续挂，否则撤单，不转 IOC。
 - BUY 一旦真实成交（包括达到最小可卖额的部分成交），立即撤销剩余买单并对账，再按当前策略挂第一张卖单：`BID_ASK_MAKER` 使用卖一/买入价上方可配置 tick 底线，`BUY_PRICE_MAKER` 使用实际买入均价，`FEE_AWARE_MAKER` 使用手续费保护价。
 - 每张卖单按配置时间检查（默认 2 分钟）；若原单仍在卖一，则保留原单并重新计时；若不在卖一，则撤单、对账并直接按最新卖一重挂。超时重挂不再使用买入价或手续费保护价底线。
 - 自动交易流程没有价格止损、止损冷却或 MARKET 卖出；MARKET 只保留给人工授权清仓。库存对账与防重复卖出始终是强制保护。
@@ -50,8 +50,10 @@ BOT_ACCOUNT_PROFILES_JSON='{
 `orderAmountsUsdt` 可为每个账户按交易对设置单笔 USDT 名义金额；未配置的交易对回退到全局
 `binance.strategy.order-amount-usdt`。单笔金额仍不能超过 `max-live-order-notional-usdt`，并会在控制台显示当前生效值。
 
+生产环境可在受保护配置文件中用 `BINANCE_STRATEGY_MAX_DAILY_DRAWDOWN_USDT` 覆盖日内最大回撤；未配置时默认 `8 USDT`，修改后需重启服务。
+
 `symbolStrategies` 可为每个账户的每个交易对选择三种策略：
-`BID_ASK_MAKER` 在买一挂买单，初始卖价取卖一和“买入均价 + `bidAskInitialSellMarkupTicks` 个 tick”的较高值，加价默认 `1 tick`；
+`BID_ASK_MAKER` 按 `bidAskEntryBookLevel` 选择买一至买五挂买单（默认买一），初始卖价取卖一和“买入均价 + `bidAskInitialSellMarkupTicks` 个 tick”的较高值，加价默认 `1 tick`；
 `BUY_PRICE_MAKER` 在买一挂买单，初始卖价直接取实际买入均价并按 tick 向上取整；
 `FEE_AWARE_MAKER` 同样在买一挂买单，但增加买入锚点，并让初始卖价不低于手续费保护价。
 卖单到达检查时间时，如果仍在卖一就保留并重新计时；如果不在卖一，则撤单对账并直接按最新卖一重挂。
@@ -63,7 +65,7 @@ BOT_ACCOUNT_PROFILES_JSON='{
 
 对应接口为 `POST /api/accounts/{accountId}/strategy`（旧版默认账户也支持
 `POST /api/bot/strategy`），请求体字段为 `symbol`、`mode`、`orderAmountUsdt`、`entryTimeoutMs`、
-`exitTimeoutMs`、`postSellEntryDelayMs`、`dailyVolumeLimitUsdt`、`bidAskInitialSellMarkupTicks`、`makerFeeBps`、锚点相关字段和兼容旧请求的
+`exitTimeoutMs`、`postSellEntryDelayMs`、`dailyVolumeLimitUsdt`、`bidAskEntryBookLevel`、`bidAskInitialSellMarkupTicks`、`makerFeeBps`、锚点相关字段和兼容旧请求的
 `targetNetProfitBps`。`makerFeeBps` 留空时按账户和交易对从币安读取
 实际 Maker 卖出费率，读取失败才回退到全局保守估值；金额不能超过生产上限，超时时间限制为 1 秒至 30 分钟。
 

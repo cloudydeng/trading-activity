@@ -56,7 +56,7 @@ public class BinanceProperties {
          */
         private String mode = "FEE_AWARE_MAKER";
         private BigDecimal orderAmountUsdt;
-        /** Entry timeout after which a stale bid is canceled; same bid remains working. */
+        /** Entry timeout after which an order outside its configured book level is canceled. */
         private Long entryTimeoutMs;
         /** Exit timeout before canceling and re-placing at the latest ask. */
         private Long exitTimeoutMs;
@@ -72,10 +72,12 @@ public class BinanceProperties {
         private BigDecimal maxCumulativeEntryAnchorDriftBps;
         /** Optional manual cumulative anchor price. Null lets the runtime derive it from recent buys. */
         private BigDecimal manualEntryAnchorPrice;
-        /** Best-bid entry strategies wait this long after a flat sell before opening the next buy. */
+        /** Maker-entry strategies wait this long after a flat sell before opening the next buy. */
         private Long postSellEntryDelayMs = 60_000L;
         /** BID_ASK_MAKER initial sell markup above the actual buy average, measured in ticks. */
         private Integer bidAskInitialSellMarkupTicks = 1;
+        /** BID_ASK_MAKER entry book level: 1=best bid, up to the fifth bid from the depth stream. */
+        private Integer bidAskEntryBookLevel = 1;
         /** UTC-day real fill volume cap in quote asset; the account stops safely after flattening. */
         private BigDecimal dailyVolumeLimitUsdt = new BigDecimal("510");
     }
@@ -90,7 +92,7 @@ public class BinanceProperties {
         private Map<String, BigDecimal> orderAmountsUsdt = new LinkedHashMap<>();
         /** Account-specific strategy overrides copied into each runtime. */
         private Map<String, SymbolStrategyProfile> symbolStrategies = new LinkedHashMap<>();
-        private BigDecimal maxLiveOrderNotionalUsdt = new BigDecimal("11");
+        private BigDecimal maxLiveOrderNotionalUsdt = new BigDecimal("30");
         private int bidDepthOffsetTicks;
         private int askDepthOffsetTicks;
         private long orderTtlMs;

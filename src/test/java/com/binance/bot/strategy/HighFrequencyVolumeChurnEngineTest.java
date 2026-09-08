@@ -485,6 +485,64 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void bidAskMakerCanBuyAtConfiguredThirdBidLevel() throws Exception {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
+                "ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 1, 3);
+        assertTrue(result.accepted());
+        assertEquals(3, engine.getStrategyProfile().getBidAskEntryBookLevel());
+        atomic("latestBidDepthPrices", List.class).set(List.of(
+                new BigDecimal("0.6000"), new BigDecimal("0.5999"), new BigDecimal("0.5998")));
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "lastDepthDataTimestamp"))
+                .set(System.currentTimeMillis());
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                decimalEquals("0.5998"), decimalEquals("10.0"), isNull(), anyString()))
+                .thenReturn(new ObjectMapper().readTree("{\"orderId\":303}"));
+        engine.getIsRunning().set(true);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+
+        verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                decimalEquals("0.5998"), decimalEquals("10.0"), isNull(), anyString());
+    }
+
+    @Test
+    void bidAskMakerWaitsWhenConfiguredBidLevelIsUnavailable() {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
+                "ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 1, 3);
+        assertTrue(result.accepted());
+        engine.getIsRunning().set(true);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+
+        verify(tradeService, never()).cancelAndReplaceOrder(anyString(), anyString(), any(), any(), any(), anyString());
+        assertTrue(engine.getStatusReason().get().contains("等待买3深度行情"));
+    }
+
+    @Test
+    void bidAskMakerRejectsEntryBookLevelOutsideDepthFive() {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
+                "ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 1, 6);
+
+        assertFalse(result.accepted());
+        assertTrue(result.message().contains("1 到 5"));
+    }
+
+    @Test
+    void liveOrderAmountCanBeConfiguredUpToThirtyUsdt() {
+        properties.getStrategy().setMaxLiveOrderNotionalUsdt(new BigDecimal("30"));
+
+        assertTrue(engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("30"),
+                20_000L, 120_000L).accepted());
+        assertFalse(engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("30.01"),
+                20_000L, 120_000L).accepted());
+    }
+
+    @Test
     void buyPriceMakerBuysAtBestBidAndInitialSellUsesActualBuyAverage() throws Exception {
         HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
                 "ENSOUSDT", "BUY_PRICE_MAKER", new BigDecimal("6"), 20_000L, 120_000L);
@@ -1838,6 +1896,32 @@ class HighFrequencyVolumeChurnEngineTest {
         verify(tradeService, never()).cancelOrder("ENSOUSDT", 42L);
         assertEquals(42L, atomic("activeOrderId", Long.class).get());
         assertTrue(engine.getStatusReason().get().contains("仍处于买一"));
+    }
+
+    @Test
+    void bidAskMakerEntryPastTimeoutRemainsWhenItIsStillConfiguredThirdBid() {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
+                "ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"), 1_000L, 120_000L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 1, 3);
+        assertTrue(result.accepted());
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
+        atomic("activeOrderId", Long.class).set(42L);
+        atomic("activeClientOrderId", String.class).set("churn-BUY-third-level");
+        atomic("activeOrderPrice", BigDecimal.class).set(new BigDecimal("0.8618"));
+        atomic("latestBidDepthPrices", List.class).set(List.of(
+                new BigDecimal("0.8620"), new BigDecimal("0.8619"), new BigDecimal("0.8618")));
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "lastDepthDataTimestamp"))
+                .set(System.currentTimeMillis());
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis() - 2_000);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.8620"), new BigDecimal("0.8621"));
+
+        verify(tradeService, never()).cancelOrder("ENSOUSDT", 42L);
+        assertEquals(42L, atomic("activeOrderId", Long.class).get());
+        assertTrue(engine.getStatusReason().get().contains("仍处于买3"));
     }
 
     @Test
