@@ -20,13 +20,9 @@ import java.util.*;
 
 @RestController
 public class BotDashboardController {
-    private static final long RECENT_FILLS_CACHE_MS = 30_000L;
-    private static final int RECENT_FILLS_PER_ACCOUNT = 20;
     private final TradingAccountManager accountManager;
     private final BinanceProperties properties;
     private final TradeNotificationService notificationService;
-    private final Object recentFillsLock = new Object();
-    private volatile RecentFillsCache recentFillsCache = new RecentFillsCache(List.of(), 0L);
 
     public BotDashboardController(TradingAccountManager accountManager, BinanceProperties properties,
                                   TradeNotificationService notificationService) {
@@ -96,7 +92,7 @@ public class BotDashboardController {
     @GetMapping("/api/accounts/notifications")
     public List<FillNotification> allNotifications(@RequestParam(defaultValue = "10") int limit) {
         int safeLimit = Math.max(1, Math.min(500, limit));
-        return recentRemoteFills(safeLimit);
+        return notificationService.recentFills(safeLimit);
     }
 
     @GetMapping("/api/accounts/{accountId}/notifications")
@@ -341,54 +337,6 @@ public class BotDashboardController {
     }
     private int compareDecimal(String left, String right) { return decimal(left).compareTo(decimal(right)); }
 
-    private List<FillNotification> recentRemoteFills(int limit) {
-        long now = System.currentTimeMillis();
-        RecentFillsCache cached = recentFillsCache;
-        if (now - cached.loadedAtMs() < RECENT_FILLS_CACHE_MS) return first(cached.fills(), limit);
-        synchronized (recentFillsLock) {
-            cached = recentFillsCache;
-            if (now - cached.loadedAtMs() < RECENT_FILLS_CACHE_MS) return first(cached.fills(), limit);
-
-            Map<String, FillNotification> merged = new LinkedHashMap<>();
-            cached.fills().forEach(fill -> merged.put(fillIdentity(fill), fill));
-            notificationService.recentFills(500).forEach(fill -> merged.put(fillIdentity(fill), fill));
-            accountManager.runtimes().forEach(runtime -> {
-                String symbol = runtime.engine().getSymbol();
-                JsonNode trades = runtime.tradeClient().getRecentMyTrades(symbol, RECENT_FILLS_PER_ACCOUNT);
-                if (trades == null || !trades.isArray()) return;
-                for (JsonNode trade : trades) {
-                    FillNotification fill = remoteFill(runtime, symbol, trade);
-                    merged.put(fillIdentity(fill), fill);
-                }
-            });
-            List<FillNotification> fills = merged.values().stream()
-                    .sorted(Comparator.comparingLong(FillNotification::eventTime).reversed())
-                    .limit(500)
-                    .toList();
-            recentFillsCache = new RecentFillsCache(fills, now);
-            return first(fills, limit);
-        }
-    }
-
-    private FillNotification remoteFill(AccountTradingRuntime runtime, String symbol, JsonNode trade) {
-        BigDecimal quantity = decimal(trade.path("qty").asText("0"));
-        BigDecimal price = decimal(trade.path("price").asText("0"));
-        BigDecimal quote = decimal(trade.path("quoteQty").asText(quantity.multiply(price).toPlainString()));
-        return new FillNotification(runtime.accountId(), runtime.alias(), symbol,
-                trade.path("isBuyer").asBoolean(false) ? "BUY" : "SELL",
-                trade.path("orderId").asLong(-1), trade.path("id").asLong(-1), "",
-                quantity, price, quote, decimal(trade.path("commission").asText("0")),
-                trade.path("commissionAsset").asText(""), trade.path("time").asLong(0));
-    }
-
-    private String fillIdentity(FillNotification fill) {
-        return fill.accountId() + ':' + fill.symbol() + ':' + fill.tradeId();
-    }
-
-    private List<FillNotification> first(List<FillNotification> fills, int limit) {
-        return List.copyOf(fills.subList(0, Math.min(limit, fills.size())));
-    }
-
     public record LiquidationRequest(String password, String confirmation) { }
     public record SymbolSwitchRequest(String symbol) { }
     public record StrategySwitchRequest(String symbol, String mode, BigDecimal orderAmountUsdt,
@@ -408,5 +356,4 @@ public class BotDashboardController {
                             String price, String originalQty, String executedQty, String quoteQty, long timeMs) { }
     public record OpenOrderView(String accountId, String accountAlias, String symbol, String side, String type,
                                 String status, String price, String originalQty, long orderId, long timeMs) { }
-    private record RecentFillsCache(List<FillNotification> fills, long loadedAtMs) { }
 }
