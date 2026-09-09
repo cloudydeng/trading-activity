@@ -1081,10 +1081,15 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             syncDailyCounters();
             return TradeAccountingLedger.AppliedTrade.ignored();
         }
+        BigDecimal notificationEntryPrice = "SELL".equalsIgnoreCase(side)
+                ? currentEntryAverageExecutionPrice() : null;
+        BigDecimal notificationEntryQuote = notificationEntryPrice == null
+                ? null : notificationEntryPrice.multiply(quantity);
         notificationService.notifyFill(new FillNotification(accountId, accountAlias,
                 properties.getStrategy().getSymbol(), side, orderId, tradeId,
                 clientOrderId == null ? "" : clientOrderId, quantity, price,
-                quoteQuantity, commission, commissionAsset, tradeTimeMs));
+                quoteQuantity, notificationEntryPrice, notificationEntryQuote,
+                commission, commissionAsset, tradeTimeMs));
         if ("BUY".equalsIgnoreCase(side)) {
             filledEntryQuantity.accumulateAndGet(trade.quantity(), BigDecimal::add);
             filledEntryQuoteQuantity.accumulateAndGet(trade.quoteQuantity(), BigDecimal::add);
@@ -1538,6 +1543,21 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (rule == null || filledQuantity.signum() <= 0 || filledQuote.signum() <= 0) return BigDecimal.ZERO;
         return PrecisionUtil.roundUpToStep(filledQuote.divide(filledQuantity,
                 java.math.MathContext.DECIMAL64), rule.tickSize());
+    }
+
+    /** Exact weighted execution average used only for dashboard SELL cost display. */
+    private BigDecimal currentEntryAverageExecutionPrice() {
+        BigDecimal filledQuantity = filledEntryQuantity.get();
+        BigDecimal filledQuote = filledEntryQuoteQuantity.get();
+        if (filledQuantity.signum() > 0 && filledQuote.signum() > 0) {
+            return filledQuote.divide(filledQuantity, java.math.MathContext.DECIMAL64);
+        }
+        TradingRiskGuard.RiskSnapshot risk = riskGuard.snapshot();
+        if (risk.positionQty() != null && risk.positionQty().signum() > 0
+                && risk.positionCostUsdt() != null && risk.positionCostUsdt().signum() > 0) {
+            return risk.positionCostUsdt().divide(risk.positionQty(), java.math.MathContext.DECIMAL64);
+        }
+        return null;
     }
 
     private BigDecimal entryAverageStrictlyHigherPrice(SymbolRuleManager.SymbolRule rule) {

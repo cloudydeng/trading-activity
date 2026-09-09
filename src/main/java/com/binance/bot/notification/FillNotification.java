@@ -14,7 +14,18 @@ public record FillNotification(
         BigDecimal quantity,
         BigDecimal price,
         BigDecimal quoteAmount,
+        BigDecimal entryPrice,
+        BigDecimal entryQuoteAmount,
         BigDecimal commission,
         String commissionAsset,
         long eventTime
-) { }
+) {
+    /** Compatibility constructor for callers that do not have a position cost basis. */
+    public FillNotification(String accountId, String accountAlias, String symbol, String side,
+                            long orderId, long tradeId, String clientOrderId,
+                            BigDecimal quantity, BigDecimal price, BigDecimal quoteAmount,
+                            BigDecimal commission, String commissionAsset, long eventTime) {
+        this(accountId, accountAlias, symbol, side, orderId, tradeId, clientOrderId,
+                quantity, price, quoteAmount, null, null, commission, commissionAsset, eventTime);
+    }
+}

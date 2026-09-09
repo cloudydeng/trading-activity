@@ -5,6 +5,7 @@ import com.binance.bot.account.AccountCredentials;
 import com.binance.bot.account.AccountExecutionEvent;
 import com.binance.bot.manager.SymbolRuleManager;
 import com.binance.bot.notification.TradeNotificationService;
+import com.binance.bot.notification.FillNotification;
 import com.binance.bot.service.BinanceAccountTradeClient;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -52,6 +53,7 @@ class HighFrequencyVolumeChurnEngineTest {
     private AtomicBoolean userDataStreamReady;
     private MarketSignalEvaluator marketSignalEvaluator;
     private DailyTradeStatsStore dailyStatsStore;
+    private TradeNotificationService notificationService;
     private HighFrequencyVolumeChurnEngine engine;
     private final AtomicLong testTradeId = new AtomicLong(7_000);
     private final Map<Long, BigDecimal> cumulativeQuantity = new HashMap<>();
@@ -111,10 +113,30 @@ class HighFrequencyVolumeChurnEngineTest {
                 MarketSignalEvaluator.EntryDecision.allow(new BigDecimal("0.2"), new BigDecimal("0.2"),
                         new BigDecimal("0.2"), BigDecimal.ZERO, BigDecimal.ZERO));
         AccountCredentials credentials = new AccountCredentials("test-account", "test-bot", "test-api-key", "test-secret-key");
+        notificationService = mock(TradeNotificationService.class);
         engine = new HighFrequencyVolumeChurnEngine("test-account", "test-bot", credentials,
                 properties, tradeService, ruleManager, userDataStreamReady::get, marketSignalEvaluator,
                 mock(PostFillOutcomeTracker.class), new TradingRiskGuard(), dailyStatsStore,
-                mock(TradeNotificationService.class));
+                notificationService);
+    }
+
+    @Test
+    void sellFillNotificationIncludesWeightedBuyCostForSameQuantity() {
+        ReflectionTestUtils.invokeMethod(engine, "applyTrade", 41L, 101L, "BUY",
+                BigDecimal.ONE, new BigDecimal("5.907"), new BigDecimal("5.907"),
+                BigDecimal.ZERO, "USDT", "ta-buy-1", 100L);
+        ReflectionTestUtils.invokeMethod(engine, "applyTrade", 41L, 102L, "BUY",
+                BigDecimal.ONE, new BigDecimal("5.909"), new BigDecimal("5.909"),
+                BigDecimal.ZERO, "USDT", "ta-buy-1", 101L);
+        ReflectionTestUtils.invokeMethod(engine, "applyTrade", 42L, 103L, "SELL",
+                new BigDecimal("2"), new BigDecimal("5.910"), new BigDecimal("11.820"),
+                BigDecimal.ZERO, "USDT", "ta-sell-1", 102L);
+
+        ArgumentCaptor<FillNotification> fills = ArgumentCaptor.forClass(FillNotification.class);
+        verify(notificationService, times(3)).notifyFill(fills.capture());
+        FillNotification sell = fills.getAllValues().get(2);
+        assertEquals(0, new BigDecimal("5.908").compareTo(sell.entryPrice()));
+        assertEquals(0, new BigDecimal("11.816").compareTo(sell.entryQuoteAmount()));
     }
 
     @Test
