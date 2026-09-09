@@ -26,6 +26,30 @@ import static org.mockito.Mockito.when;
 
 class BotDashboardControllerTest {
     @Test
+    void accountSymbolConfigurationCanBeReadAndUpdated() {
+        TradingAccountManager accountManager = mock(TradingAccountManager.class);
+        TradeNotificationService notificationService = mock(TradeNotificationService.class);
+        TradingAccountManager.AccountSymbolsConfiguration configuration =
+                new TradingAccountManager.AccountSymbolsConfiguration(
+                        "account-a", "A", List.of("PROMUSDT", "SAHARAUSDT"),
+                        List.of("PROMUSDT"), true, true, "");
+        when(accountManager.accountSymbolsConfiguration("account-a")).thenReturn(Optional.of(configuration));
+        when(accountManager.updateAccountSymbols("account-a", List.of("PROMUSDT", "SAHARAUSDT")))
+                .thenReturn(new TradingAccountManager.SymbolsUpdateResult(true, "已保存", configuration));
+        BotDashboardController controller = new BotDashboardController(
+                accountManager, new BinanceProperties(), notificationService);
+
+        ResponseEntity<?> read = controller.configuredSymbols("account-a");
+        ResponseEntity<?> update = controller.updateConfiguredSymbols("account-a",
+                new BotDashboardController.SymbolsConfigurationRequest(List.of("PROMUSDT", "SAHARAUSDT")));
+
+        assertEquals(HttpStatus.OK, read.getStatusCode());
+        assertEquals(configuration, read.getBody());
+        assertEquals(HttpStatus.OK, update.getStatusCode());
+        verify(accountManager).updateAccountSymbols("account-a", List.of("PROMUSDT", "SAHARAUSDT"));
+    }
+
+    @Test
     void globalRecentFillsComeOnlyFromWebSocketMemory() {
         TradingAccountManager accountManager = mock(TradingAccountManager.class);
         TradeNotificationService notificationService = mock(TradeNotificationService.class);

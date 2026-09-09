@@ -51,11 +51,11 @@ BOT_ACCOUNT_PROFILES_JSON='{
 }'
 ```
 
-`symbols` 是该账户要创建的并发交易对清单，按配置顺序展示，当前只接受 USDT 现货交易对，去重后最多 5 个。清单中的每个交易对都可以在控制台独立启动、停止和切换策略。同一账户只建立一条账户成交流；成交和订单事件按 `symbol` 分发给对应策略。未配置 `symbols` 时保持旧版单币种行为：优先恢复该账户保存的活动交易对，否则使用全局 `BINANCE_STRATEGY_SYMBOL`。
+`symbols` 是该账户首次启动时使用的并发交易对清单，按配置顺序展示，当前只接受 USDT 现货交易对，去重后最多 5 个。清单中的每个交易对都可以在控制台独立启动、停止和切换策略。同一账户只建立一条账户成交流；成交和订单事件按 `symbol` 分发给对应策略。未配置 `symbols` 时保持旧版单币种行为：优先恢复该账户保存的活动交易对，否则使用全局 `BINANCE_STRATEGY_SYMBOL`。
 
 多币种账户必须使用带 `symbol` 的启动接口，避免旧账户级接口含义不明确；旧账户级“停止”接口会停止该账户的全部币种，不会只停配置中的第一个币种。
 
-已有账户的热加载不会替换正在运行的账户实例，因此给已有账户新增或删除 `symbols` 后需要重启服务；这避免热加载时误动现有订单。只有单币种账户支持原来的“安全切换交易对”，多币种账户通过修改 `symbols` 清单管理交易对。
+控制台“账户交易对配置”可以增加或删除交易对。页面只把非敏感的交易对清单写入 SQLite 的 `runtime_setting`，不会读取、覆盖或重写 `/etc/trading-activity.env`；SQLite 清单在后续启动时优先于 env 中的初始 `symbols`。修改前必须停止该账户全部币种且本地没有活动订单，保存后重启服务生效。已有账户的热加载不会替换正在运行的账户实例，这避免改清单时误动现有订单。
 
 `orderAmountsUsdt` 可为每个账户按交易对设置单笔 USDT 名义金额；未配置的交易对回退到全局
 `binance.strategy.order-amount-usdt`。单笔金额仍不能超过 `max-live-order-notional-usdt`，并会在控制台显示当前生效值。
@@ -66,6 +66,7 @@ BOT_ACCOUNT_PROFILES_JSON='{
 `BID_ASK_MAKER` 按 `bidAskEntryBookLevel` 选择买一至买五挂买单（默认买一），初始卖价取卖一和“买入均价 + `bidAskInitialSellMarkupTicks` 个 tick”的较高值，加价默认 `1 tick`；
 `BUY_PRICE_MAKER` 在买一挂买单，初始卖价直接取实际买入均价并按 tick 向上取整；
 `FEE_AWARE_MAKER` 同样在买一挂买单，但增加买入锚点，并让初始卖价不低于手续费保护价。
+其中 `1 bps = 0.01%`；单轮最大追高上限为 `100 bps`（1%），累计最大追高上限为 `1000 bps`（10%）。
 卖单到达检查时间时，如果仍在卖一就保留并重新计时；如果不在卖一，则撤单对账并直接按最新卖一重挂。
 超时阶段优先释放仓位，不再强制买入价或手续费保护价底线。控制台新建策略配置时默认选择 `FEE_AWARE_MAKER`；生产账户应为当前交易对保存明确的策略配置。
 
@@ -77,7 +78,7 @@ BOT_ACCOUNT_PROFILES_JSON='{
 `POST /api/bot/strategy`），请求体字段为 `symbol`、`mode`、`orderAmountUsdt`、`entryTimeoutMs`、
 `exitTimeoutMs`、`postSellEntryDelayMs`、`dailyVolumeLimitUsdt`、`bidAskEntryBookLevel`、`bidAskInitialSellMarkupTicks`、`makerFeeBps`、锚点相关字段和兼容旧请求的
 `targetNetProfitBps`。`makerFeeBps` 留空时按账户和交易对从币安读取
-实际 Maker 卖出费率，读取失败才回退到全局保守估值；金额不能超过生产上限，超时时间限制为 1 秒至 30 分钟。
+实际 Maker 卖出费率，读取失败才回退到全局保守估值；金额不能超过生产上限。买单超时限制为 1 秒至 30 分钟，卖单检查限制为 1 秒至 24 小时。锚定价格可通过“删除手动值，恢复自动”明确清除，页面会常驻显示保存成功、排队或失败状态。
 
 单账户旧配置仍作为兼容回退，仅在未配置 `BOT_ACCOUNT_PROFILES_JSON` 时生效：
 
@@ -87,7 +88,7 @@ BINANCE_API_API_KEY=...
 BINANCE_API_SECRET_KEY=...
 ```
 
-每个启用账户的 API Key 和 Secret 必须同时配置。网页只显示账户 ID 和别名，绝不返回密钥。各账户切换后的交易对按账户 ID 写入 SQLite，服务重启后独立恢复。
+每个启用账户的 API Key 和 Secret 必须同时配置。网页只显示账户 ID 和别名，绝不返回密钥。网页配置的交易对清单及各账户切换后的交易对按账户 ID 写入 SQLite，服务重启后独立恢复；env 仅提供凭证和未设置 SQLite 覆盖时的初始默认值。
 
 ## 构建与启动
 

@@ -168,6 +168,9 @@ public class AccountTradingRuntime {
     public PostFillOutcomeTracker outcomeTracker() { return outcomeTrackers.get(engine().getSymbol()); }
     public int symbolCount() { return engines.size(); }
     public boolean initialized() { return initialized.get(); }
+    public boolean canChangeConfiguredSymbols() {
+        return engines.stream().allMatch(engine -> !engine.getIsRunning().get() && !engine.hasActiveOrder());
+    }
 
     private boolean reconcileAccountRisk(HighFrequencyVolumeChurnEngine target) {
         var accountInfo = tradeClient.getAccountInfo();

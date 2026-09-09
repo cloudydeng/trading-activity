@@ -38,6 +38,7 @@ public class DailyTradeStatsStore {
     private static final BigDecimal ONE_MILLION = new BigDecimal("1000000");
     private static final String STRATEGY_OVERRIDE_PREFIX = "strategy_override:";
     private static final String RUNTIME_STATE_PREFIX = "runtime_state:";
+    private static final String ACCOUNT_SYMBOLS_PREFIX = "account_symbols:";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Connection connection;
@@ -771,6 +772,32 @@ public class DailyTradeStatsStore {
         }
     }
 
+    /** Stores the non-secret account symbol list edited from the dashboard. */
+    public synchronized void saveAccountSymbols(String accountId, List<String> symbols) {
+        List<String> normalized = normalizeSymbols(symbols);
+        try {
+            saveSetting(ACCOUNT_SYMBOLS_PREFIX + normalizeAccountId(accountId),
+                    objectMapper.writeValueAsString(normalized), "保存账户交易对配置失败");
+        } catch (Exception e) {
+            if (e instanceof IllegalStateException state) throw state;
+            throw new IllegalStateException("保存账户交易对配置失败", e);
+        }
+    }
+
+    /** A persisted dashboard override takes precedence over the credential profile's initial symbols. */
+    public synchronized java.util.Optional<List<String>> loadAccountSymbols(String accountId) {
+        try {
+            java.util.Optional<String> payload = loadSetting(
+                    ACCOUNT_SYMBOLS_PREFIX + normalizeAccountId(accountId));
+            if (payload.isEmpty()) return java.util.Optional.empty();
+            List<String> values = objectMapper.readValue(payload.get(), objectMapper.getTypeFactory()
+                    .constructCollectionType(List.class, String.class));
+            return java.util.Optional.of(normalizeSymbols(values));
+        } catch (Exception e) {
+            throw new IllegalStateException("读取账户交易对配置失败", e);
+        }
+    }
+
     /** Persists only the non-secret strategy profile for one account and symbol. */
     public synchronized void saveStrategyOverride(String accountId, String symbol,
                                                    BinanceProperties.SymbolStrategyProfile profile) {
@@ -863,6 +890,16 @@ public class DailyTradeStatsStore {
             throw new IllegalArgumentException("当前策略仅支持 USDT 现货交易对");
         }
         return normalized;
+    }
+
+    private List<String> normalizeSymbols(List<String> symbols) {
+        LinkedHashSet<String> normalized = new LinkedHashSet<>();
+        if (symbols != null) {
+            for (String symbol : symbols) normalized.add(normalizeSymbol(symbol));
+        }
+        if (normalized.isEmpty()) throw new IllegalArgumentException("账户至少需要保留一个 USDT 交易对");
+        if (normalized.size() > 5) throw new IllegalArgumentException("一个账户最多配置 5 个交易对");
+        return List.copyOf(normalized);
     }
 
     private void saveSetting(String key, String value, String errorMessage) {

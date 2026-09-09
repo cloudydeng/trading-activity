@@ -1,6 +1,7 @@
 package com.binance.bot.account;
 
 import com.binance.bot.config.BinanceProperties;
+import com.binance.bot.strategy.DailyTradeStatsStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
@@ -25,13 +26,16 @@ import java.util.concurrent.ConcurrentMap;
 public class TradingAccountManager {
     private final BinanceProperties properties;
     private final AccountTradingRuntimeFactory runtimeFactory;
+    private final DailyTradeStatsStore dailyStatsStore;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final ConcurrentMap<String, AccountTradingRuntime> runtimes = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, String> initializationErrors = new ConcurrentHashMap<>();
 
-    public TradingAccountManager(BinanceProperties properties, AccountTradingRuntimeFactory runtimeFactory) {
+    public TradingAccountManager(BinanceProperties properties, AccountTradingRuntimeFactory runtimeFactory,
+                                 DailyTradeStatsStore dailyStatsStore) {
         this.properties = properties;
         this.runtimeFactory = runtimeFactory;
+        this.dailyStatsStore = dailyStatsStore;
     }
 
     @PostConstruct
@@ -164,6 +168,48 @@ public class TradingAccountManager {
         return runtimes.values().stream().sorted(Comparator.comparing(AccountTradingRuntime::accountId)).toList();
     }
 
+    public Optional<AccountSymbolsConfiguration> accountSymbolsConfiguration(String accountId) {
+        AccountTradingRuntime runtime = runtimes.get(accountId);
+        if (runtime == null) return Optional.empty();
+        List<String> activeSymbols = runtime.engines().stream()
+                .map(engine -> engine.getSymbol().toUpperCase()).toList();
+        List<String> configuredSymbols = dailyStatsStore.loadAccountSymbols(accountId).orElse(activeSymbols);
+        boolean editable = runtime.canChangeConfiguredSymbols();
+        return Optional.of(new AccountSymbolsConfiguration(runtime.accountId(), runtime.alias(),
+                configuredSymbols, activeSymbols, !configuredSymbols.equals(activeSymbols), editable,
+                editable ? "" : "请先停止该账户的全部币种，并确认没有活动订单"));
+    }
+
+    public synchronized SymbolsUpdateResult updateAccountSymbols(String accountId, List<String> symbols) {
+        AccountTradingRuntime runtime = runtimes.get(accountId);
+        if (runtime == null) return new SymbolsUpdateResult(false, "账户不存在或未初始化", null);
+        if (!runtime.canChangeConfiguredSymbols()) {
+            return new SymbolsUpdateResult(false, "请先停止该账户的全部币种，并确认没有活动订单",
+                    accountSymbolsConfiguration(accountId).orElse(null));
+        }
+        try {
+            dailyStatsStore.saveAccountSymbols(accountId, symbols);
+            AccountSymbolsConfiguration configuration = accountSymbolsConfiguration(accountId).orElseThrow();
+            String message = configuration.restartRequired()
+                    ? "交易对配置已保存到 SQLite，重启服务后生效"
+                    : "交易对配置已保存，当前运行实例无需变化";
+            return new SymbolsUpdateResult(true, message, configuration);
+        } catch (IllegalArgumentException e) {
+            return new SymbolsUpdateResult(false, safeMessage(e), safeAccountSymbolsConfiguration(accountId));
+        } catch (RuntimeException e) {
+            log.error("[accountId={}] 保存账户交易对配置失败: {}", safeProfileId(accountId), safeMessage(e));
+            return new SymbolsUpdateResult(false, "保存交易对配置失败", safeAccountSymbolsConfiguration(accountId));
+        }
+    }
+
+    private AccountSymbolsConfiguration safeAccountSymbolsConfiguration(String accountId) {
+        try {
+            return accountSymbolsConfiguration(accountId).orElse(null);
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
     public List<AccountSummary> summaries() {
         List<AccountSummary> result = new ArrayList<>();
         runtimes().forEach(runtime -> runtime.engines().forEach(engine -> result.add(new AccountSummary(
@@ -289,4 +335,10 @@ public class TradingAccountManager {
                                  boolean accountStreamReady, String error) { }
     public record OperationResult(boolean success, String reason) { }
     public record ReloadResult(int added, List<String> addedAccounts, Map<String, String> errors) { }
+    public record AccountSymbolsConfiguration(String accountId, String accountAlias,
+                                              List<String> configuredSymbols, List<String> activeSymbols,
+                                              boolean restartRequired, boolean editable,
+                                              String editBlockReason) { }
+    public record SymbolsUpdateResult(boolean accepted, String message,
+                                      AccountSymbolsConfiguration configuration) { }
 }

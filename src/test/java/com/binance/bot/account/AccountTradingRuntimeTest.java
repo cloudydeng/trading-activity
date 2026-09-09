@@ -216,6 +216,27 @@ class AccountTradingRuntimeTest {
         verify(btc, never()).refreshDashboardOpenOrderSnapshot();
     }
 
+    @Test
+    void configuredSymbolsCanChangeOnlyWhenEveryEngineIsStoppedAndOrderFree() {
+        HighFrequencyVolumeChurnEngine enso = mock(HighFrequencyVolumeChurnEngine.class);
+        HighFrequencyVolumeChurnEngine btc = mock(HighFrequencyVolumeChurnEngine.class);
+        when(enso.getSymbol()).thenReturn("ENSOUSDT");
+        when(btc.getSymbol()).thenReturn("BTCUSDT");
+        when(enso.getIsRunning()).thenReturn(new java.util.concurrent.atomic.AtomicBoolean(false));
+        when(btc.getIsRunning()).thenReturn(new java.util.concurrent.atomic.AtomicBoolean(false));
+        AccountTradingRuntime runtime = new AccountTradingRuntime(
+                new AccountCredentials("account-a", "A", "key", "secret"),
+                mock(BinanceAccountTradeClient.class), mock(AccountUserDataStream.class),
+                List.of(enso, btc), Map.of(), Map.of());
+
+        assertTrue(runtime.canChangeConfiguredSymbols());
+        when(btc.hasActiveOrder()).thenReturn(true);
+        assertFalse(runtime.canChangeConfiguredSymbols());
+        when(btc.hasActiveOrder()).thenReturn(false);
+        when(enso.getIsRunning()).thenReturn(new java.util.concurrent.atomic.AtomicBoolean(true));
+        assertFalse(runtime.canChangeConfiguredSymbols());
+    }
+
     private AccountTradingRuntime runtime(String accountId, HighFrequencyVolumeChurnEngine engine) {
         return new AccountTradingRuntime(new AccountCredentials(accountId, accountId, "key", "secret"),
                 mock(BinanceAccountTradeClient.class), mock(AccountUserDataStream.class), engine,

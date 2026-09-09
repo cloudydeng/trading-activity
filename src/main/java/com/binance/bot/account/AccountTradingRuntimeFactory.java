@@ -103,7 +103,8 @@ public class AccountTradingRuntimeFactory {
     }
 
     private List<String> configuredSymbols(AccountCredentials credentials) {
-        LinkedHashSet<String> symbols = new LinkedHashSet<>(credentials.symbols());
+        LinkedHashSet<String> symbols = new LinkedHashSet<>(
+                dailyStatsStore.loadAccountSymbols(credentials.accountId()).orElse(credentials.symbols()));
         if (symbols.isEmpty()) {
             dailyStatsStore.loadActiveSymbol(credentials.accountId()).ifPresent(symbols::add);
         }

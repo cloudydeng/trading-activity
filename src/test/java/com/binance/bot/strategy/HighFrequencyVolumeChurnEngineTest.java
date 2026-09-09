@@ -46,6 +46,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.atLeast;
+import static org.mockito.Mockito.clearInvocations;
 
 class HighFrequencyVolumeChurnEngineTest {
     private BinanceProperties properties;
@@ -318,6 +319,73 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(0, new BigDecimal("8").compareTo(profile.getValue().getMaxCumulativeEntryAnchorDriftBps()));
         assertEquals(60_000L, profile.getValue().getPostSellEntryDelayMs());
         assertEquals(0, new BigDecimal("510").compareTo(profile.getValue().getDailyVolumeLimitUsdt()));
+    }
+
+    @Test
+    void sellCheckAllowsUpToTwentyFourHoursWhileBuyTimeoutKeepsThirtyMinuteLimit() {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult accepted = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 1_800_000L, 86_400_000L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 1, 1);
+
+        assertTrue(accepted.accepted());
+        assertEquals(86_400_000L, engine.getStrategyProfile().getExitTimeoutMs());
+
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult excessiveSell = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 1_800_000L, 86_400_001L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 1, 1);
+        assertFalse(excessiveSell.accepted());
+        assertTrue(excessiveSell.message().contains("卖单检查时间"));
+
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult excessiveBuy = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 1_800_001L, 86_400_000L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 1, 1);
+        assertFalse(excessiveBuy.accepted());
+        assertTrue(excessiveBuy.message().contains("买单超时时间"));
+    }
+
+    @Test
+    void cumulativeEntryAnchorDriftAllowsUpToOneThousandBps() {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult accepted = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
+                null, null, 1_800_000L, new BigDecimal("100"), new BigDecimal("1000"),
+                null, 60_000L, new BigDecimal("510"), 1, 1);
+
+        assertTrue(accepted.accepted());
+        assertEquals(0, new BigDecimal("1000").compareTo(
+                engine.getStrategyProfile().getMaxCumulativeEntryAnchorDriftBps()));
+
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult excessive = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
+                null, null, 1_800_000L, new BigDecimal("100"), new BigDecimal("1000.01"),
+                null, 60_000L, new BigDecimal("510"), 1, 1);
+
+        assertFalse(excessive.accepted());
+        assertTrue(excessive.message().contains("累计最大追高"));
+        assertTrue(excessive.message().contains("1000 bps"));
+    }
+
+    @Test
+    void clearingManualAnchorPersistsAutomaticAnchorMode() {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult manual = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
+                null, null, 1_800_000L, BigDecimal.ZERO, BigDecimal.ZERO,
+                new BigDecimal("0.5900"), 60_000L, new BigDecimal("510"), 1, 1);
+        assertTrue(manual.accepted());
+        assertEquals(0, new BigDecimal("0.5900").compareTo(
+                engine.getStrategyProfile().getManualEntryAnchorPrice()));
+        clearInvocations(dailyStatsStore);
+
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult automatic = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
+                null, null, 1_800_000L, BigDecimal.ZERO, BigDecimal.ZERO,
+                null, 60_000L, new BigDecimal("510"), 1, 1);
+
+        assertTrue(automatic.accepted());
+        assertNull(engine.getStrategyProfile().getManualEntryAnchorPrice());
+        ArgumentCaptor<BinanceProperties.SymbolStrategyProfile> saved =
+                ArgumentCaptor.forClass(BinanceProperties.SymbolStrategyProfile.class);
+        verify(dailyStatsStore).saveStrategyOverride(eq("test-account"), eq("ENSOUSDT"), saved.capture());
+        assertNull(saved.getValue().getManualEntryAnchorPrice());
     }
 
     @Test

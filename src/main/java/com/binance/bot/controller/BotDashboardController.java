@@ -315,6 +315,24 @@ public class BotDashboardController {
     @PostMapping("/api/accounts/reload")
     public TradingAccountManager.ReloadResult reloadAccounts() { return accountManager.reloadProfiles(); }
 
+    @GetMapping("/api/accounts/{accountId}/configuration/symbols")
+    public ResponseEntity<?> configuredSymbols(@PathVariable String accountId) {
+        return accountManager.accountSymbolsConfiguration(accountId)
+                .<ResponseEntity<?>>map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.notFound().build());
+    }
+
+    @PutMapping("/api/accounts/{accountId}/configuration/symbols")
+    public ResponseEntity<?> updateConfiguredSymbols(@PathVariable String accountId,
+                                                      @RequestBody SymbolsConfigurationRequest request) {
+        if (request == null) {
+            return ResponseEntity.badRequest().body(Map.of("accepted", false, "message", "交易对配置不能为空"));
+        }
+        TradingAccountManager.SymbolsUpdateResult result =
+                accountManager.updateAccountSymbols(accountId, request.symbols());
+        return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
+    }
+
     /* Legacy dashboard routes select a stable first runtime; credentials are never hot-switched. */
     @GetMapping("/api/bot/status")
     public ResponseEntity<?> legacyStatus() {
@@ -502,6 +520,7 @@ public class BotDashboardController {
 
     public record LiquidationRequest(String password, String confirmation) { }
     public record SymbolSwitchRequest(String symbol) { }
+    public record SymbolsConfigurationRequest(List<String> symbols) { }
     public record StrategySwitchRequest(String symbol, String mode, BigDecimal orderAmountUsdt,
                                         Long entryTimeoutMs, Long exitTimeoutMs, BigDecimal makerFeeBps,
                                         BigDecimal targetNetProfitBps, Long entryAnchorWaitMs,

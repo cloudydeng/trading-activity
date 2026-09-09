@@ -1,6 +1,7 @@
 package com.binance.bot.account;
 
 import com.binance.bot.config.BinanceProperties;
+import com.binance.bot.strategy.DailyTradeStatsStore;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -9,11 +10,73 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class TradingAccountManagerTest {
+    @Test
+    void savesStoppedAccountSymbolsToSqliteForNextRestart() {
+        BinanceProperties properties = propertiesWith("account-a", "A", "key-a", "secret-a",
+                "account-b", "B", "key-b", "secret-b");
+        AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
+        DailyTradeStatsStore store = mock(DailyTradeStatsStore.class);
+        AccountTradingRuntime accountA = mock(AccountTradingRuntime.class);
+        AccountTradingRuntime accountB = mock(AccountTradingRuntime.class);
+        com.binance.bot.strategy.HighFrequencyVolumeChurnEngine engineA =
+                mock(com.binance.bot.strategy.HighFrequencyVolumeChurnEngine.class);
+        com.binance.bot.strategy.HighFrequencyVolumeChurnEngine engineB =
+                mock(com.binance.bot.strategy.HighFrequencyVolumeChurnEngine.class);
+        when(accountA.accountId()).thenReturn("account-a");
+        when(accountA.alias()).thenReturn("A");
+        when(accountA.engines()).thenReturn(List.of(engineA));
+        when(accountA.canChangeConfiguredSymbols()).thenReturn(true);
+        when(engineA.getSymbol()).thenReturn("PROMUSDT");
+        when(accountB.accountId()).thenReturn("account-b");
+        when(accountB.engines()).thenReturn(List.of(engineB));
+        when(engineB.getSymbol()).thenReturn("BTCUSDT");
+        when(factory.create(any())).thenAnswer(invocation ->
+                "account-a".equals(((AccountCredentials) invocation.getArgument(0)).accountId()) ? accountA : accountB);
+        when(store.loadAccountSymbols("account-a"))
+                .thenReturn(Optional.of(List.of("PROMUSDT", "SAHARAUSDT")));
+        TradingAccountManager manager = new TradingAccountManager(properties, factory, store);
+        manager.initialize();
+
+        TradingAccountManager.SymbolsUpdateResult result = manager.updateAccountSymbols(
+                "account-a", List.of("PROMUSDT", "SAHARAUSDT"));
+
+        assertTrue(result.accepted());
+        assertTrue(result.configuration().restartRequired());
+        assertEquals(List.of("PROMUSDT", "SAHARAUSDT"), result.configuration().configuredSymbols());
+        verify(store).saveAccountSymbols("account-a", List.of("PROMUSDT", "SAHARAUSDT"));
+    }
+
+    @Test
+    void rejectsAccountSymbolChangesWhileRuntimeIsUnsafe() {
+        BinanceProperties properties = new BinanceProperties();
+        properties.getApi().getProfiles().put("account-a", profile("A", "key-a", "secret-a"));
+        AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
+        DailyTradeStatsStore store = mock(DailyTradeStatsStore.class);
+        AccountTradingRuntime runtime = mock(AccountTradingRuntime.class);
+        com.binance.bot.strategy.HighFrequencyVolumeChurnEngine engine =
+                mock(com.binance.bot.strategy.HighFrequencyVolumeChurnEngine.class);
+        when(runtime.accountId()).thenReturn("account-a");
+        when(runtime.alias()).thenReturn("A");
+        when(runtime.engines()).thenReturn(List.of(engine));
+        when(runtime.canChangeConfiguredSymbols()).thenReturn(false);
+        when(engine.getSymbol()).thenReturn("PROMUSDT");
+        when(factory.create(any())).thenReturn(runtime);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory, store);
+        manager.initialize();
+
+        TradingAccountManager.SymbolsUpdateResult result = manager.updateAccountSymbols(
+                "account-a", List.of("PROMUSDT", "SAHARAUSDT"));
+
+        assertFalse(result.accepted());
+        verify(store, never()).saveAccountSymbols(anyString(), anyList());
+    }
+
     @Test
     void createsEveryEnabledProfileAndNeverAutoStartsTrading() {
         BinanceProperties properties = propertiesWith("account-a", "A", "key-a", "secret-a",
@@ -28,7 +91,7 @@ class TradingAccountManagerTest {
             runtimeById.put(credentials.accountId(), runtime);
             return runtime;
         });
-        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory, mock(DailyTradeStatsStore.class));
 
         manager.initialize();
 
@@ -54,7 +117,7 @@ class TradingAccountManagerTest {
         doThrow(new IllegalStateException("A unavailable")).when(broken).initialize();
         when(factory.create(any())).thenAnswer(invocation ->
                 "account-a".equals(((AccountCredentials) invocation.getArgument(0)).accountId()) ? broken : healthy);
-        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory, mock(DailyTradeStatsStore.class));
 
         manager.initialize();
 
@@ -74,7 +137,7 @@ class TradingAccountManagerTest {
         when(healthy.accountId()).thenReturn("account-b");
         when(healthy.alias()).thenReturn("B");
         when(factory.create(any())).thenReturn(healthy);
-        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory, mock(DailyTradeStatsStore.class));
 
         assertDoesNotThrow(manager::initialize);
 
@@ -107,7 +170,7 @@ class TradingAccountManagerTest {
                 "account-a".equals(((AccountCredentials) invocation.getArgument(0)).accountId()) ? accountA : accountB);
         when(accountA.start("ENSOUSDT")).thenThrow(new IllegalStateException("A failed"));
         when(accountB.start("BTCUSDT")).thenReturn(true);
-        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory, mock(DailyTradeStatsStore.class));
         manager.initialize();
 
         Map<String, TradingAccountManager.OperationResult> result = manager.startAll();
@@ -126,7 +189,7 @@ class TradingAccountManagerTest {
         disabled.setEnabled(false);
         properties.getApi().getProfiles().put("account-a", disabled);
         AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
-        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory, mock(DailyTradeStatsStore.class));
 
         manager.initialize();
 
@@ -144,7 +207,7 @@ class TradingAccountManagerTest {
         AccountTradingRuntime runtime = mock(AccountTradingRuntime.class);
         when(runtime.accountId()).thenReturn("default");
         when(factory.create(any())).thenReturn(runtime);
-        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory, mock(DailyTradeStatsStore.class));
 
         manager.initialize();
 
@@ -174,7 +237,7 @@ class TradingAccountManagerTest {
             when(runtime.alias()).thenReturn(credentials.alias());
             return runtime;
         });
-        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory, mock(DailyTradeStatsStore.class));
 
         manager.initialize();
 
@@ -203,7 +266,7 @@ class TradingAccountManagerTest {
         when(factory.create(any())).thenAnswer(invocation ->
                 "account-a".equals(((AccountCredentials) invocation.getArgument(0)).accountId())
                         ? existing : added);
-        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory, mock(DailyTradeStatsStore.class));
 
         manager.initialize();
         clearInvocations(existing);
@@ -226,7 +289,7 @@ class TradingAccountManagerTest {
         properties.getApi().setApiKey("legacy-key");
         properties.getApi().setSecretKey("legacy-secret");
         AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
-        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory, mock(DailyTradeStatsStore.class));
 
         manager.initialize();
 
@@ -250,7 +313,7 @@ class TradingAccountManagerTest {
         AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
         AccountTradingRuntime runtime = mock(AccountTradingRuntime.class);
         when(factory.create(any())).thenReturn(runtime);
-        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory, mock(DailyTradeStatsStore.class));
 
         manager.initialize();
 
@@ -269,7 +332,7 @@ class TradingAccountManagerTest {
         properties.getApi().getProfiles().put("account-a", profile);
         AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
         when(factory.create(any())).thenReturn(mock(AccountTradingRuntime.class));
-        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory, mock(DailyTradeStatsStore.class));
 
         manager.initialize();
 

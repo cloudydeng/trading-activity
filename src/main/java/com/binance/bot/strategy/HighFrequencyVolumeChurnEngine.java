@@ -2506,6 +2506,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return "USDT";
     }
     public String getSymbol() { return properties.getStrategy().getSymbol(); }
+    public boolean hasActiveOrder() { return activeOrderId.get() != null; }
     public BigDecimal getOrderAmountUsdt() {
         BigDecimal amount = orderAmountUsdt();
         return amount == null ? BigDecimal.ZERO : amount;
@@ -2703,8 +2704,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 ? existing.getEntryTimeoutMs() : requestedEntryTimeoutMs;
         Long exitTimeout = requestedExitTimeoutMs == null && existing != null
                 ? existing.getExitTimeoutMs() : requestedExitTimeoutMs;
-        if (!validStrategyTimeout(entryTimeout) || !validStrategyTimeout(exitTimeout)) {
-            return StrategySwitchResult.rejected(symbol, "超时时间必须在 1 秒到 30 分钟之间");
+        if (!validEntryTimeout(entryTimeout)) {
+            return StrategySwitchResult.rejected(symbol, "买单超时时间必须在 1 秒到 30 分钟之间");
+        }
+        if (!validExitTimeout(exitTimeout)) {
+            return StrategySwitchResult.rejected(symbol, "卖单检查时间必须在 1 秒到 24 小时之间");
         }
         Long postSellEntryDelayMs = requestedPostSellEntryDelayMs == null && existing != null
                 ? existing.getPostSellEntryDelayMs() : requestedPostSellEntryDelayMs;
@@ -2760,8 +2764,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (maxCumulativeEntryAnchorDriftBps == null) {
             maxCumulativeEntryAnchorDriftBps = maxEntryAnchorDriftBps;
         }
-        if (!validBps(maxCumulativeEntryAnchorDriftBps, new BigDecimal("100"))) {
-            return StrategySwitchResult.rejected(symbol, "累计最大追高必须在 0 到 100 bps 之间");
+        if (!validBps(maxCumulativeEntryAnchorDriftBps, new BigDecimal("1000"))) {
+            return StrategySwitchResult.rejected(symbol, "累计最大追高必须在 0 到 1000 bps（10%）之间");
         }
         BigDecimal manualEntryAnchorPrice = requestedManualEntryAnchorPrice;
         if (manualEntryAnchorPrice != null) {
@@ -2850,8 +2854,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         feeAwareEntryCeilingBlockedSince.set(0);
     }
 
-    private boolean validStrategyTimeout(Long timeoutMs) {
+    private boolean validEntryTimeout(Long timeoutMs) {
         return timeoutMs == null || (timeoutMs >= 1_000 && timeoutMs <= 1_800_000);
+    }
+
+    private boolean validExitTimeout(Long timeoutMs) {
+        return timeoutMs == null || (timeoutMs >= 1_000 && timeoutMs <= 86_400_000L);
     }
 
     private boolean validPostSellEntryDelay(Long delayMs) {
