@@ -3,6 +3,7 @@ package com.binance.bot.strategy;
 import com.binance.bot.config.BinanceProperties;
 import com.binance.bot.account.AccountCredentials;
 import com.binance.bot.account.AccountExecutionEvent;
+import com.binance.bot.account.AccountRiskCoordinator;
 import com.binance.bot.manager.SymbolRuleManager;
 import com.binance.bot.notification.TradeNotificationService;
 import com.binance.bot.notification.FillNotification;
@@ -357,7 +358,7 @@ class HighFrequencyVolumeChurnEngineTest {
 
         assertFalse(engine.getIsRunning().get());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
-        assertTrue(engine.getStatusReason().get().contains("已确认空仓并自动停止当前账户"));
+        assertTrue(engine.getStatusReason().get().contains("已确认空仓并自动停止当前币种策略"));
     }
 
     @Test
@@ -2016,6 +2017,11 @@ class HighFrequencyVolumeChurnEngineTest {
     @Test
     void partialMakerBuyCancelsRemainderAndSubmitsOneEntryPriceGtcSell() throws Exception {
         prepareRestingMakerOrder();
+        AccountRiskCoordinator coordinator = (AccountRiskCoordinator)
+                ReflectionTestUtils.getField(engine, "accountRiskCoordinator");
+        String engineKey = (String) ReflectionTestUtils.getField(engine, "accountEngineKey");
+        assertTrue(coordinator.reserveEntry(engineKey, new BigDecimal("6"),
+                new BigDecimal("40"), new BigDecimal("8")).accepted());
         ObjectMapper mapper = new ObjectMapper();
         atomic("lastBestBid", BigDecimal.class).set(new BigDecimal("0.862"));
         atomic("lastBestAsk", BigDecimal.class).set(new BigDecimal("0.863"));
@@ -2059,6 +2065,7 @@ class HighFrequencyVolumeChurnEngineTest {
         verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), any(),
                 any(), any(), anyString());
         assertEquals(1, engine.getAccountingSnapshot().processedTradeCount());
+        assertEquals(0, BigDecimal.ZERO.compareTo(coordinator.snapshot().pendingEntryNotional()));
     }
 
     @Test

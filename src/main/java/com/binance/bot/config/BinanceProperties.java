@@ -6,6 +6,8 @@ import org.springframework.context.annotation.Configuration;
 
 import java.math.BigDecimal;
 import java.util.LinkedHashMap;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 @Data
@@ -44,6 +46,8 @@ public class BinanceProperties {
         private Map<String, BigDecimal> orderAmountsUsdt = new LinkedHashMap<>();
         /** Optional per-symbol strategy overrides; unspecified symbols use the global strategy. */
         private Map<String, SymbolStrategyProfile> symbolStrategies = new LinkedHashMap<>();
+        /** Trading pairs that may run concurrently under this account; empty keeps legacy single-symbol mode. */
+        private List<String> symbols = new ArrayList<>();
         /** Disabled profiles are visible to configuration binding but do not create a runtime. */
         private boolean enabled = true;
     }

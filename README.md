@@ -11,7 +11,8 @@
 - BUY 一旦真实成交（包括达到最小可卖额的部分成交），立即撤销剩余买单并对账，再按当前策略挂第一张卖单：`BID_ASK_MAKER` 使用卖一/买入价上方可配置 tick 底线，`BUY_PRICE_MAKER` 使用实际买入均价，`FEE_AWARE_MAKER` 使用手续费保护价。
 - 每张卖单按配置时间检查（默认 2 分钟）；若原单仍在卖一，则保留原单并重新计时；若不在卖一，则撤单、对账并直接按最新卖一重挂。超时重挂不再使用买入价或手续费保护价底线。
 - 自动交易流程没有价格止损、止损冷却或 MARKET 卖出；MARKET 只保留给人工授权清仓。库存对账与防重复卖出始终是强制保护。
-- 每个 API 账户拥有独立运行时、交易对、订单、持仓、风控和统计；交易对切换前必须停止该账户，并确认无活动订单和当前标的持仓。
+- 每个 API 账户拥有一个账户会话和一条 User Data WebSocket，可配置最多 5 个交易对同时运行。每个交易对拥有独立策略状态机、行情流、订单、持仓恢复和统计；账户余额、BNB 检查、买单提交、总持仓风险与总回撤保护由同一账户共享协调。
+- 多币种账户启动任一币种前只读取一次账户余额，并同时核对全部已配置币种；任何远程持仓与当日本地账本不一致时拒绝新开仓。可用 USDT 与待提交买单也按账户统一预留，避免多个币种争抢同一余额。
 - 所有账户共享服务器公网 IP 的 Binance 请求权重；系统动态读取每分钟上限，在 80% 处暂停新开仓并保留退出、撤单和对账余量。
 - 控制台“全部账号最近 10 条成交记录”只接收账户 WebSocket 成交事件，并通过控制台 WebSocket 实时推送；不轮询 `/api/v3/myTrades`，服务重启后从新成交开始显示。
 - 控制台“所有账户当前买单 / 卖单”在每个账户策略启动成功时用 REST 读取一次初始快照，之后只由账户 WebSocket 订单事件实时更新；账户流重连成功后再用 REST 对账一次，不做固定 30 秒轮询。
@@ -19,8 +20,8 @@
 - 行情流或账户流收到 `1001` 瞬断时先自动重连，不立即停止账户。重连成功后继续运行；重连失败、再次断开或超过健康检查时限才按原有安全逻辑停机。
 - API Key、Secret、管理密码仅从服务器环境变量加载，不通过浏览器提交或返回。
 - 每笔真实成交及每日成交量、手续费、净盈亏和成本按 `稳定账户 ID + UTC 日期 + 交易对` 写入 SQLite。策略启动时分页对账一次，之后由账户 WebSocket 实时增量写入；控制台状态轮询不查询 Binance。
-- 每个账户/交易对可配置“每日成交量上限”，默认 `510 USDT`。达到上限后立即停止新买入；已有仓位继续卖出，确认空仓后自动停止当前账户，不影响其他账户。
-- 每个账户每 30 秒检查一次 BNB 总余额价值；低于 `1 USDT` 时停止新买入，已有仓位完成退出并确认空仓后自动停止当前账户。
+- 每个账户/交易对可配置“每日成交量上限”，默认 `510 USDT`。达到上限后立即停止该币种的新买入；已有仓位继续卖出，确认空仓后自动停止该币种策略，不影响同账户其他币种。
+- 同一账户的 BNB 余额结果由所有币种共享，最多每 30 秒读取一次；低于 `1 USDT` 时，各运行币种都停止新买入，已有仓位完成退出并确认空仓后分别停止。
 
 ## SQLite 持久化结构
 
@@ -39,14 +40,22 @@
 
 ```bash
 BOT_ACCOUNT_PROFILES_JSON='{
-  "account-a":{"alias":"bot-a","apiKey":"...","secretKey":"...","enabled":true},
+  "account-a":{"alias":"bot-a","apiKey":"...","secretKey":"...","enabled":true,
+                "symbols":["ENSOUSDT"]},
   "account-b":{"alias":"bot-b","apiKey":"...","secretKey":"...","enabled":true,
+                "symbols":["ENSOUSDT","BTCUSDT"],
                 "orderAmountsUsdt":{"ENSOUSDT":6,"BTCUSDT":12},
                 "symbolStrategies":{"ENSOUSDT":{"mode":"BID_ASK_MAKER"},
                                      "BTCUSDT":{"mode":"FEE_AWARE_MAKER","orderAmountUsdt":6,
                                                  "entryTimeoutMs":180000,"exitTimeoutMs":600000}}}
 }'
 ```
+
+`symbols` 是该账户要创建的并发交易对清单，按配置顺序展示，当前只接受 USDT 现货交易对，去重后最多 5 个。清单中的每个交易对都可以在控制台独立启动、停止和切换策略。同一账户只建立一条账户成交流；成交和订单事件按 `symbol` 分发给对应策略。未配置 `symbols` 时保持旧版单币种行为：优先恢复该账户保存的活动交易对，否则使用全局 `BINANCE_STRATEGY_SYMBOL`。
+
+多币种账户必须使用带 `symbol` 的启动接口，避免旧账户级接口含义不明确；旧账户级“停止”接口会停止该账户的全部币种，不会只停配置中的第一个币种。
+
+已有账户的热加载不会替换正在运行的账户实例，因此给已有账户新增或删除 `symbols` 后需要重启服务；这避免热加载时误动现有订单。只有单币种账户支持原来的“安全切换交易对”，多币种账户通过修改 `symbols` 清单管理交易对。
 
 `orderAmountsUsdt` 可为每个账户按交易对设置单笔 USDT 名义金额；未配置的交易对回退到全局
 `binance.strategy.order-amount-usdt`。单笔金额仍不能超过 `max-live-order-notional-usdt`，并会在控制台显示当前生效值。
@@ -64,7 +73,7 @@ BOT_ACCOUNT_PROFILES_JSON='{
 `runtime_setting`，重启后优先于环境变量配置恢复；如果当前处于 BUYING 或 SELLING，修改会排队到订单完成并回到
 `IDLE` 后应用，绝不会中途改变正在执行的订单。
 
-对应接口为 `POST /api/accounts/{accountId}/strategy`（旧版默认账户也支持
+多币种控制台使用 `POST /api/accounts/{accountId}/symbols/{symbol}/strategy`；单币种兼容接口仍为 `POST /api/accounts/{accountId}/strategy`（旧版默认账户也支持
 `POST /api/bot/strategy`），请求体字段为 `symbol`、`mode`、`orderAmountUsdt`、`entryTimeoutMs`、
 `exitTimeoutMs`、`postSellEntryDelayMs`、`dailyVolumeLimitUsdt`、`bidAskEntryBookLevel`、`bidAskInitialSellMarkupTicks`、`makerFeeBps`、锚点相关字段和兼容旧请求的
 `targetNetProfitBps`。`makerFeeBps` 留空时按账户和交易对从币安读取
@@ -97,6 +106,13 @@ java -jar target/binance-spot-competition-bot-3.0.0.jar
 - `POST /api/accounts/{accountId}/start`
 - `POST /api/accounts/{accountId}/stop`
 - `POST /api/accounts/{accountId}/symbol`
+- `GET /api/accounts/{accountId}/symbols/{symbol}/status`
+- `GET /api/accounts/{accountId}/symbols/{symbol}/account`
+- `GET /api/accounts/{accountId}/symbols/{symbol}/stats/daily`
+- `POST /api/accounts/{accountId}/symbols/{symbol}/start`
+- `POST /api/accounts/{accountId}/symbols/{symbol}/stop`
+- `POST /api/accounts/{accountId}/symbols/{symbol}/strategy`
+- `POST /api/accounts/{accountId}/symbols/{symbol}/liquidate`
 - `POST /api/accounts/start-all`
 - `POST /api/accounts/stop-all`
 - `POST /api/accounts/reload`（从服务器受保护环境文件热加载新增账户；不会替换或停止已有账户）

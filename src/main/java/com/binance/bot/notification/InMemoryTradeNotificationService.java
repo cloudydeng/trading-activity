@@ -20,7 +20,7 @@ public class InMemoryTradeNotificationService implements TradeNotificationServic
     private static final int MAX_PER_ACCOUNT = 200;
     private final ConcurrentMap<String, Deque<FillNotification>> fillsByAccount = new ConcurrentHashMap<>();
     private final CopyOnWriteArrayList<Consumer<FillNotification>> listeners = new CopyOnWriteArrayList<>();
-    private final ConcurrentMap<String, Map<Long, OpenOrderNotification>> openOrdersByAccount =
+    private final ConcurrentMap<String, Map<String, OpenOrderNotification>> openOrdersByAccount =
             new ConcurrentHashMap<>();
     private final CopyOnWriteArrayList<Consumer<List<OpenOrderNotification>>> openOrderListeners =
             new CopyOnWriteArrayList<>();
@@ -80,11 +80,11 @@ public class InMemoryTradeNotificationService implements TradeNotificationServic
     @Override
     public void replaceOpenOrders(String accountId, List<OpenOrderNotification> orders) {
         if (accountId == null || accountId.isBlank()) return;
-        Map<Long, OpenOrderNotification> replacement = new HashMap<>();
+        Map<String, OpenOrderNotification> replacement = new HashMap<>();
         if (orders != null) {
             for (OpenOrderNotification order : orders) {
                 if (order != null && order.valid() && accountId.equals(order.accountId()) && order.active()) {
-                    replacement.put(order.orderId(), order);
+                    replacement.put(orderKey(order), order);
                 }
             }
         }
@@ -103,10 +103,10 @@ public class InMemoryTradeNotificationService implements TradeNotificationServic
     public void notifyOrderUpdate(OpenOrderNotification order) {
         if (order == null || !order.valid()) return;
         openOrdersByAccount.compute(order.accountId(), (ignored, current) -> {
-            Map<Long, OpenOrderNotification> updated = new HashMap<>(
+            Map<String, OpenOrderNotification> updated = new HashMap<>(
                     current == null ? Map.of() : current);
-            if (order.active()) updated.put(order.orderId(), order);
-            else updated.remove(order.orderId());
+            if (order.active()) updated.put(orderKey(order), order);
+            else updated.remove(orderKey(order));
             return Map.copyOf(updated);
         });
         publishOpenOrders();
@@ -115,7 +115,7 @@ public class InMemoryTradeNotificationService implements TradeNotificationServic
     @Override
     public List<OpenOrderNotification> currentOpenOrders() {
         List<OpenOrderNotification> snapshot = new ArrayList<>();
-        for (Map<Long, OpenOrderNotification> accountOrders : openOrdersByAccount.values()) {
+        for (Map<String, OpenOrderNotification> accountOrders : openOrdersByAccount.values()) {
             if (accountOrders == null) continue;
             for (OpenOrderNotification order : accountOrders.values()) {
                 if (order != null && order.valid()) snapshot.add(order);
@@ -142,5 +142,9 @@ public class InMemoryTradeNotificationService implements TradeNotificationServic
                 // Dashboard listeners must never interfere with order handling.
             }
         }
+    }
+
+    private String orderKey(OpenOrderNotification order) {
+        return order.symbol().toUpperCase() + ":" + order.orderId();
     }
 }

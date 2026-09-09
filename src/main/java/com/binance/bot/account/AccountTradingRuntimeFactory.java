@@ -18,6 +18,9 @@ import org.springframework.stereotype.Component;
 
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -45,36 +48,71 @@ public class AccountTradingRuntimeFactory {
     }
 
     public AccountTradingRuntime create(AccountCredentials credentials) {
-        BinanceProperties accountProperties = copyProperties();
-        accountProperties.getStrategy().setOrderAmountsUsdt(credentials.orderAmountsUsdt());
         Map<String, BinanceProperties.SymbolStrategyProfile> strategies = new LinkedHashMap<>(
                 credentials.symbolStrategies());
         Map<String, BinanceProperties.SymbolStrategyProfile> persistedStrategies =
                 dailyStatsStore.loadStrategyOverrides(credentials.accountId());
         if (persistedStrategies != null) strategies.putAll(persistedStrategies);
-        accountProperties.getStrategy().setSymbolStrategies(strategies);
-        dailyStatsStore.loadActiveSymbol(credentials.accountId())
-                .ifPresent(accountProperties.getStrategy()::setSymbol);
-
+        List<String> symbols = configuredSymbols(credentials);
+        BinanceProperties streamProperties = copyProperties();
         BinanceAccountTradeClient tradeClient =
-                new BinanceAccountTradeClient(accountProperties, signer, credentials, rateLimitCoordinator);
-        MarketSignalEvaluator signalEvaluator = new MarketSignalEvaluator();
-        TradingRiskGuard riskGuard = new TradingRiskGuard();
-        String journalPath = accountObservationPath(accountProperties.getStrategy().getObservationOutputFile(),
-                credentials.accountId());
-        PostFillOutcomeTracker outcomeTracker = new PostFillOutcomeTracker(new ObservationJournal(journalPath));
+                new BinanceAccountTradeClient(streamProperties, signer, credentials, rateLimitCoordinator);
+        AccountRiskCoordinator accountRiskCoordinator = new AccountRiskCoordinator();
         AtomicReference<AccountUserDataStream> streamRef = new AtomicReference<>();
-        HighFrequencyVolumeChurnEngine engine = new HighFrequencyVolumeChurnEngine(
-                credentials.accountId(), credentials.alias(), credentials, accountProperties, tradeClient,
-                ruleManager, () -> {
-                    AccountUserDataStream stream = streamRef.get();
-                    return stream != null && stream.isReady();
-                }, signalEvaluator, outcomeTracker, riskGuard, dailyStatsStore, notificationService);
-        AccountUserDataStream stream = new AccountUserDataStream(accountProperties, signer, credentials,
-                engine::onOrderUpdate, engine::handleUserStreamLoss,
-                engine::handleUserStreamReady, notificationService::notifyOrderUpdate);
+        List<HighFrequencyVolumeChurnEngine> engines = new ArrayList<>();
+        Map<String, TradingRiskGuard> riskGuards = new LinkedHashMap<>();
+        Map<String, PostFillOutcomeTracker> outcomeTrackers = new LinkedHashMap<>();
+        for (String symbol : symbols) {
+            BinanceProperties accountProperties = copyProperties();
+            accountProperties.getStrategy().setSymbol(symbol);
+            accountProperties.getStrategy().setOrderAmountsUsdt(credentials.orderAmountsUsdt());
+            accountProperties.getStrategy().setSymbolStrategies(new LinkedHashMap<>(strategies));
+            MarketSignalEvaluator signalEvaluator = new MarketSignalEvaluator();
+            TradingRiskGuard riskGuard = new TradingRiskGuard();
+            String journalPath = accountObservationPath(
+                    accountProperties.getStrategy().getObservationOutputFile(), credentials.accountId(), symbol);
+            PostFillOutcomeTracker outcomeTracker = new PostFillOutcomeTracker(new ObservationJournal(journalPath));
+            HighFrequencyVolumeChurnEngine engine = new HighFrequencyVolumeChurnEngine(
+                    credentials.accountId(), credentials.alias(), credentials, accountProperties, tradeClient,
+                    ruleManager, () -> {
+                        AccountUserDataStream stream = streamRef.get();
+                        return stream != null && stream.isReady();
+                    }, signalEvaluator, outcomeTracker, riskGuard, dailyStatsStore, notificationService,
+                    accountRiskCoordinator);
+            engines.add(engine);
+            riskGuards.put(symbol, riskGuard);
+            outcomeTrackers.put(symbol, outcomeTracker);
+        }
+        AtomicReference<AccountTradingRuntime> runtimeRef = new AtomicReference<>();
+        AccountUserDataStream stream = new AccountUserDataStream(streamProperties, signer, credentials,
+                update -> {
+                    AccountTradingRuntime runtime = runtimeRef.get();
+                    if (runtime != null) runtime.onOrderUpdate(update);
+                }, reason -> {
+                    AccountTradingRuntime runtime = runtimeRef.get();
+                    if (runtime != null) runtime.handleUserStreamLoss(reason);
+                }, () -> {
+                    AccountTradingRuntime runtime = runtimeRef.get();
+                    if (runtime != null) runtime.handleUserStreamReady();
+                }, notificationService::notifyOrderUpdate);
         streamRef.set(stream);
-        return new AccountTradingRuntime(credentials, tradeClient, stream, engine, riskGuard, outcomeTracker);
+        AccountTradingRuntime runtime = new AccountTradingRuntime(
+                credentials, tradeClient, stream, engines, riskGuards, outcomeTrackers, accountRiskCoordinator);
+        runtimeRef.set(runtime);
+        return runtime;
+    }
+
+    private List<String> configuredSymbols(AccountCredentials credentials) {
+        LinkedHashSet<String> symbols = new LinkedHashSet<>(credentials.symbols());
+        if (symbols.isEmpty()) {
+            dailyStatsStore.loadActiveSymbol(credentials.accountId()).ifPresent(symbols::add);
+        }
+        if (symbols.isEmpty() && applicationProperties.getStrategy().getSymbol() != null) {
+            symbols.add(applicationProperties.getStrategy().getSymbol().trim().toUpperCase());
+        }
+        if (symbols.isEmpty()) throw new IllegalArgumentException("account has no configured symbol");
+        if (symbols.size() > 5) throw new IllegalArgumentException("an account supports at most 5 concurrent symbols");
+        return List.copyOf(symbols);
     }
 
     private BinanceProperties copyProperties() {
@@ -87,13 +125,13 @@ public class AccountTradingRuntimeFactory {
         return copy;
     }
 
-    private String accountObservationPath(String configured, String accountId) {
+    private String accountObservationPath(String configured, String accountId, String symbol) {
         Path path = Path.of(configured);
         String name = path.getFileName().toString();
         int dot = name.lastIndexOf('.');
         String scopedName = dot < 0
-                ? name + "-" + accountId
-                : name.substring(0, dot) + "-" + accountId + name.substring(dot);
+                ? name + "-" + accountId + "-" + symbol.toLowerCase()
+                : name.substring(0, dot) + "-" + accountId + "-" + symbol.toLowerCase() + name.substring(dot);
         Path parent = path.getParent();
         return (parent == null ? Path.of(scopedName) : parent.resolve(scopedName)).toString();
     }

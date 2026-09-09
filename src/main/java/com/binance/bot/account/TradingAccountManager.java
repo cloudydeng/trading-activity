@@ -139,7 +139,7 @@ public class TradingAccountManager {
                 if (profile == null || !profile.isEnabled()) return;
                 AccountCredentials credentials = new AccountCredentials(accountId,
                         displayAlias(profile.getAlias(), accountId), profile.getApiKey(), profile.getSecretKey(),
-                        profile.getOrderAmountsUsdt(), profile.getSymbolStrategies());
+                        profile.getOrderAmountsUsdt(), profile.getSymbolStrategies(), profile.getSymbols());
                 if (credentials.complete()) result.put(accountId, credentials);
             } catch (Exception ignored) {
                 // Caller returns a redacted validation error for this profile.
@@ -166,47 +166,50 @@ public class TradingAccountManager {
 
     public List<AccountSummary> summaries() {
         List<AccountSummary> result = new ArrayList<>();
-        runtimes().forEach(runtime -> result.add(new AccountSummary(runtime.accountId(), runtime.alias(),
-                runtime.initialized(), runtime.engine().getIsRunning().get(),
-                runtime.engine().getCurrentStatus().get().name(),
-                runtime.engine().getStrategyMode(), runtime.engine().getSymbol(),
-                runtime.engine().isAccountStreamReady(), null)));
-        initializationErrors.forEach((id, error) -> result.add(new AccountSummary(id, id, false, false,
-                "INITIALIZATION_FAILED", null, null, false, error)));
-        result.sort(Comparator.comparing(AccountSummary::accountId));
+        runtimes().forEach(runtime -> runtime.engines().forEach(engine -> result.add(new AccountSummary(
+                runtime.accountId() + "::" + engine.getSymbol(), runtime.accountId(), runtime.alias(),
+                runtime.symbolCount(), runtime.initialized(), engine.getIsRunning().get(),
+                engine.getCurrentStatus().get().name(), engine.getStrategyMode(), engine.getSymbol(),
+                engine.isAccountStreamReady(), null))));
+        initializationErrors.forEach((id, error) -> result.add(new AccountSummary(id, id, id, 0,
+                false, false, "INITIALIZATION_FAILED", null, null, false, error)));
+        result.sort(Comparator.comparing(AccountSummary::accountId)
+                .thenComparing(summary -> Optional.ofNullable(summary.symbol()).orElse("")));
         return result;
     }
 
     public Map<String, OperationResult> startAll() {
         Map<String, OperationResult> results = new LinkedHashMap<>();
-        runtimes().forEach(runtime -> {
+        runtimes().forEach(runtime -> runtime.engines().forEach(engine -> {
+            String key = operationKey(runtime, engine.getSymbol());
             try {
-                boolean accepted = runtime.start();
-                results.put(runtime.accountId(), new OperationResult(accepted,
-                        accepted ? "started" : runtime.engine().getStatusReason().get()));
+                boolean accepted = runtime.start(engine.getSymbol());
+                results.put(key, new OperationResult(accepted,
+                        accepted ? "started" : engine.getStatusReason().get()));
             } catch (Exception e) {
-                results.put(runtime.accountId(), new OperationResult(false, safeMessage(e)));
-                log.error("[accountId={}] 批量启动失败；继续处理其他账号: {}",
-                        runtime.accountId(), safeMessage(e));
+                results.put(key, new OperationResult(false, safeMessage(e)));
+                log.error("[accountId={} symbol={}] 批量启动失败；继续处理其他实例: {}",
+                        runtime.accountId(), engine.getSymbol(), safeMessage(e));
             }
-        });
+        }));
         initializationErrors.forEach((id, error) -> results.put(id, new OperationResult(false, error)));
         return results;
     }
 
     public Map<String, OperationResult> stopAll() {
         Map<String, OperationResult> results = new LinkedHashMap<>();
-        runtimes().forEach(runtime -> {
+        runtimes().forEach(runtime -> runtime.engines().forEach(engine -> {
+            String key = operationKey(runtime, engine.getSymbol());
             try {
-                boolean clean = runtime.stop();
-                results.put(runtime.accountId(), new OperationResult(clean,
-                        clean ? "stopped" : runtime.engine().getStatusReason().get()));
+                boolean clean = runtime.stop(engine.getSymbol());
+                results.put(key, new OperationResult(clean,
+                        clean ? "stopped" : engine.getStatusReason().get()));
             } catch (Exception e) {
-                results.put(runtime.accountId(), new OperationResult(false, safeMessage(e)));
-                log.error("[accountId={}] 批量停止失败；继续处理其他账号: {}",
-                        runtime.accountId(), safeMessage(e));
+                results.put(key, new OperationResult(false, safeMessage(e)));
+                log.error("[accountId={} symbol={}] 批量停止失败；继续处理其他实例: {}",
+                        runtime.accountId(), engine.getSymbol(), safeMessage(e));
             }
-        });
+        }));
         initializationErrors.forEach((id, error) -> results.put(id, new OperationResult(false, error)));
         return results;
     }
@@ -223,7 +226,7 @@ public class TradingAccountManager {
                 if (!profile.isEnabled()) return;
                 AccountCredentials credentials = new AccountCredentials(accountId,
                         displayAlias(profile.getAlias(), accountId), profile.getApiKey(), profile.getSecretKey(),
-                        profile.getOrderAmountsUsdt(), profile.getSymbolStrategies());
+                        profile.getOrderAmountsUsdt(), profile.getSymbolStrategies(), profile.getSymbols());
                 if (credentials.complete()) result.put(accountId, credentials);
                 else if (hasAnyCredentialValue(profile)) {
                     initializationErrors.put(errorId, "API credentials are incomplete");
@@ -276,7 +279,12 @@ public class TradingAccountManager {
         return value == null || value.isBlank() ? e.getClass().getSimpleName() : value;
     }
 
-    public record AccountSummary(String accountId, String alias, boolean initialized, boolean running,
+    private String operationKey(AccountTradingRuntime runtime, String symbol) {
+        return runtime.symbolCount() == 1 ? runtime.accountId() : runtime.accountId() + "/" + symbol;
+    }
+
+    public record AccountSummary(String runtimeId, String accountId, String alias, int symbolCount,
+                                 boolean initialized, boolean running,
                                  String status, String strategyMode, String symbol,
                                  boolean accountStreamReady, String error) { }
     public record OperationResult(boolean success, String reason) { }

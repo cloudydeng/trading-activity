@@ -78,6 +78,25 @@ class InMemoryTradeNotificationServiceTest {
     }
 
     @Test
+    void sameAccountCanTrackEqualNumericOrderIdsForDifferentSymbols() {
+        InMemoryTradeNotificationService service = new InMemoryTradeNotificationService();
+        OpenOrderNotification enso = new OpenOrderNotification(
+                "account-a", "A", "ENSOUSDT", "BUY", "LIMIT_MAKER", "NEW",
+                "0.600000", "10", "0", 42, 100);
+        OpenOrderNotification btc = new OpenOrderNotification(
+                "account-a", "A", "BTCUSDT", "SELL", "LIMIT", "NEW",
+                "60000", "0.001", "0", 42, 101);
+
+        service.replaceOpenOrders("account-a", List.of(enso, btc));
+
+        assertEquals(2, service.currentOpenOrders().size());
+        service.notifyOrderUpdate(new OpenOrderNotification(
+                "account-a", "A", "ENSOUSDT", "BUY", "LIMIT_MAKER", "CANCELED",
+                "0.600000", "10", "0", 42, 102));
+        assertEquals(List.of(btc), service.currentOpenOrders());
+    }
+
+    @Test
     void openOrderListenersReceiveWholeCurrentSnapshot() throws Exception {
         InMemoryTradeNotificationService service = new InMemoryTradeNotificationService();
         List<List<OpenOrderNotification>> received = new ArrayList<>();

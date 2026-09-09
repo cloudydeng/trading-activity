@@ -91,12 +91,22 @@ class TradingAccountManagerTest {
         AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
         AccountTradingRuntime accountA = mock(AccountTradingRuntime.class);
         AccountTradingRuntime accountB = mock(AccountTradingRuntime.class);
+        com.binance.bot.strategy.HighFrequencyVolumeChurnEngine engineA =
+                mock(com.binance.bot.strategy.HighFrequencyVolumeChurnEngine.class);
+        com.binance.bot.strategy.HighFrequencyVolumeChurnEngine engineB =
+                mock(com.binance.bot.strategy.HighFrequencyVolumeChurnEngine.class);
         when(accountA.accountId()).thenReturn("account-a");
         when(accountB.accountId()).thenReturn("account-b");
+        when(accountA.engines()).thenReturn(List.of(engineA));
+        when(accountB.engines()).thenReturn(List.of(engineB));
+        when(accountA.symbolCount()).thenReturn(1);
+        when(accountB.symbolCount()).thenReturn(1);
+        when(engineA.getSymbol()).thenReturn("ENSOUSDT");
+        when(engineB.getSymbol()).thenReturn("BTCUSDT");
         when(factory.create(any())).thenAnswer(invocation ->
                 "account-a".equals(((AccountCredentials) invocation.getArgument(0)).accountId()) ? accountA : accountB);
-        when(accountA.start()).thenThrow(new IllegalStateException("A failed"));
-        when(accountB.start()).thenReturn(true);
+        when(accountA.start("ENSOUSDT")).thenThrow(new IllegalStateException("A failed"));
+        when(accountB.start("BTCUSDT")).thenReturn(true);
         TradingAccountManager manager = new TradingAccountManager(properties, factory);
         manager.initialize();
 
@@ -104,7 +114,7 @@ class TradingAccountManagerTest {
 
         assertFalse(result.get("account-a").success());
         assertTrue(result.get("account-b").success());
-        verify(accountB).start();
+        verify(accountB).start("BTCUSDT");
     }
 
     @Test
@@ -249,6 +259,23 @@ class TradingAccountManagerTest {
         assertEquals("BID_ASK_MAKER", captor.getValue().symbolStrategies().get("BTCUSDT").getMode());
         assertEquals(new java.math.BigDecimal("6"),
                 captor.getValue().symbolStrategies().get("BTCUSDT").getOrderAmountUsdt());
+    }
+
+    @Test
+    void passesNormalizedConcurrentSymbolsToTheAccountRuntime() {
+        BinanceProperties properties = new BinanceProperties();
+        BinanceProperties.CredentialProfile profile = profile("A", "key-a", "secret-a");
+        profile.setSymbols(List.of(" ensousdt ", "BTCUSDT", "ensousdt"));
+        properties.getApi().getProfiles().put("account-a", profile);
+        AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
+        when(factory.create(any())).thenReturn(mock(AccountTradingRuntime.class));
+        TradingAccountManager manager = new TradingAccountManager(properties, factory);
+
+        manager.initialize();
+
+        ArgumentCaptor<AccountCredentials> captor = ArgumentCaptor.forClass(AccountCredentials.class);
+        verify(factory).create(captor.capture());
+        assertEquals(List.of("ENSOUSDT", "BTCUSDT"), captor.getValue().symbols());
     }
 
     private BinanceProperties propertiesWith(String idA, String aliasA, String keyA, String secretA,

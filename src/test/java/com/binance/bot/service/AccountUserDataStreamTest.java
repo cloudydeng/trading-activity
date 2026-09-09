@@ -61,6 +61,19 @@ class AccountUserDataStreamTest {
     }
 
     @Test
+    void forwardsExecutionReportsForEverySymbolOnTheAccountStream() {
+        BinanceProperties properties = properties();
+        AtomicReference<AccountExecutionEvent> update = new AtomicReference<>();
+        AccountUserDataStream service = service("account-a", properties, update::set, reason -> { });
+        WebSocket webSocket = mock(WebSocket.class);
+        activeSocket(service).set(webSocket);
+
+        service.onText(webSocket, executionReport("BTCUSDT", 78, 9002), true);
+
+        assertEquals("BTCUSDT", update.get().symbol());
+    }
+
+    @Test
     void disconnectCallbackOnlyInvokesOwningRuntime() {
         BinanceProperties properties = properties();
         AtomicInteger stoppedA = new AtomicInteger();
@@ -170,7 +183,11 @@ class AccountUserDataStreamTest {
     }
 
     private String executionReport(long orderId, long tradeId) {
-        return "{\"event\":{\"e\":\"executionReport\",\"s\":\"ENSOUSDT\",\"S\":\"SELL\"," +
+        return executionReport("ENSOUSDT", orderId, tradeId);
+    }
+
+    private String executionReport(String symbol, long orderId, long tradeId) {
+        return "{\"event\":{\"e\":\"executionReport\",\"s\":\"" + symbol + "\",\"S\":\"SELL\"," +
                 "\"x\":\"TRADE\",\"X\":\"FILLED\",\"i\":" + orderId + ",\"t\":" + tradeId + "," +
                 "\"c\":\"ta-a-S-1\",\"l\":\"7.08\",\"L\":\"0.85\",\"z\":\"7.08\"," +
                 "\"Z\":\"6.018\",\"n\":\"0.006\",\"N\":\"USDT\"}}";

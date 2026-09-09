@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class BotDashboardControllerTest {
@@ -116,5 +117,24 @@ class BotDashboardControllerTest {
         assertEquals(new BigDecimal("0.02"), result.totalCommissionQuoteEquivalent());
         assertEquals(new BigDecimal("-0.10"), result.netRealizedPnlQuote());
         assertEquals(new BigDecimal("0.10"), result.totalLossQuote());
+    }
+
+    @Test
+    void symbolStartControlsOnlyTheRequestedEngine() {
+        TradingAccountManager accountManager = mock(TradingAccountManager.class);
+        TradeNotificationService notificationService = mock(TradeNotificationService.class);
+        AccountTradingRuntime runtime = mock(AccountTradingRuntime.class);
+        HighFrequencyVolumeChurnEngine btc = mock(HighFrequencyVolumeChurnEngine.class);
+        when(accountManager.find("account-a")).thenReturn(Optional.of(runtime));
+        when(runtime.engine("BTCUSDT")).thenReturn(Optional.of(btc));
+        when(btc.getSymbol()).thenReturn("BTCUSDT");
+        when(runtime.start("BTCUSDT")).thenReturn(true);
+        BotDashboardController controller = new BotDashboardController(
+                accountManager, new BinanceProperties(), notificationService);
+
+        ResponseEntity<?> response = controller.startSymbol("account-a", "BTCUSDT");
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        verify(runtime).start("BTCUSDT");
     }
 }
