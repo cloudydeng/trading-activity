@@ -50,10 +50,13 @@ public class BinanceProperties {
 
     @Data
     public static class SymbolStrategyProfile {
-        /** BID_ASK_MAKER uses bid/ask; FEE_AWARE_MAKER protects fees and is the default. */
+        /**
+         * BID_ASK_MAKER starts at best ask, BUY_PRICE_MAKER starts at the actual buy average,
+         * and FEE_AWARE_MAKER protects fees and remains the default.
+         */
         private String mode = "FEE_AWARE_MAKER";
         private BigDecimal orderAmountUsdt;
-        /** Entry timeout after which a stale bid is canceled; same bid remains working. */
+        /** Entry timeout after which an order outside its configured book level is canceled. */
         private Long entryTimeoutMs;
         /** Exit timeout before canceling and re-placing at the latest ask. */
         private Long exitTimeoutMs;
@@ -69,8 +72,14 @@ public class BinanceProperties {
         private BigDecimal maxCumulativeEntryAnchorDriftBps;
         /** Optional manual cumulative anchor price. Null lets the runtime derive it from recent buys. */
         private BigDecimal manualEntryAnchorPrice;
-        /** BID_ASK_MAKER waits this long after a flat sell before opening the next buy. */
+        /** Maker-entry strategies wait this long after a flat sell before opening the next buy. */
         private Long postSellEntryDelayMs = 60_000L;
+        /** BID_ASK_MAKER initial sell markup above the actual buy average, measured in ticks. */
+        private Integer bidAskInitialSellMarkupTicks = 1;
+        /** BID_ASK_MAKER entry book level: 1=best bid, up to the fifth bid from the depth stream. */
+        private Integer bidAskEntryBookLevel = 1;
+        /** UTC-day real fill volume cap in quote asset; the account stops safely after flattening. */
+        private BigDecimal dailyVolumeLimitUsdt = new BigDecimal("510");
     }
 
     @Data
@@ -83,11 +92,11 @@ public class BinanceProperties {
         private Map<String, BigDecimal> orderAmountsUsdt = new LinkedHashMap<>();
         /** Account-specific strategy overrides copied into each runtime. */
         private Map<String, SymbolStrategyProfile> symbolStrategies = new LinkedHashMap<>();
-        private BigDecimal maxLiveOrderNotionalUsdt = new BigDecimal("11");
+        private BigDecimal maxLiveOrderNotionalUsdt = new BigDecimal("30");
         private int bidDepthOffsetTicks;
         private int askDepthOffsetTicks;
         private long orderTtlMs;
-        /** Cancel an unfilled entry-price sell after this delay and market-sell the remainder. */
+        /** Check a working sell after this delay; keep it at best ask or re-place at latest best ask. */
         private long limitSellTimeoutMs = 120_000;
         /** Soft signal noise cannot cancel a fresh entry before this resting time. */
         private long minEntryOrderRestMs = 800;
@@ -118,11 +127,11 @@ public class BinanceProperties {
         private BigDecimal maxInventoryUsdt = new BigDecimal("40");
         private BigDecimal maxDailyDrawdownUsdt = new BigDecimal("8");
         private long maxInventoryAgeMs = 60_000;
-        /** Desired net profit after the estimated exit commission has been deducted. */
+        /** Legacy compatibility setting; the three current strategies do not use this profit target. */
         private double takeProfitBps = 10;
-        /** Keep the original fee-aware maker target untouched for this recovery window. */
+        /** Legacy compatibility setting; current sell repricing uses the configured sell timeout. */
         private long exitRepriceAfterMs = 15_000;
-        /** Once recovery time expires, only lower a passive sell at this cadence. */
+        /** Legacy compatibility setting; current sell repricing uses the configured sell timeout. */
         private long exitRepriceIntervalMs = 5_000;
         /** A pessimistic fee estimate, until actual commission events are accounted for. */
         private BigDecimal assumedMakerFeeBps = new BigDecimal("10");
@@ -146,7 +155,7 @@ public class BinanceProperties {
 
     @Data
     public static class Storage {
-        /** One compact SQLite file containing daily aggregates and trade-id deduplication state. */
+        /** One SQLite file containing daily aggregates, trade deduplication and runtime settings/state. */
         private String dailyStatsDb = "data/daily-stats.db";
     }
 }

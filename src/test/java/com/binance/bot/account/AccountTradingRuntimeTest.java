@@ -33,6 +33,8 @@ class AccountTradingRuntimeTest {
 
         verify(engineA).startTrading();
         verify(engineB).startTrading();
+        verify(engineA).refreshDashboardOpenOrderSnapshot();
+        verify(engineB).refreshDashboardOpenOrderSnapshot();
         verify(engineA).stopTrading();
         verify(engineB, never()).stopTrading();
     }

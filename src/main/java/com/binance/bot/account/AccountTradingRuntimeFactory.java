@@ -71,7 +71,8 @@ public class AccountTradingRuntimeFactory {
                     return stream != null && stream.isReady();
                 }, signalEvaluator, outcomeTracker, riskGuard, dailyStatsStore, notificationService);
         AccountUserDataStream stream = new AccountUserDataStream(accountProperties, signer, credentials,
-                engine::onOrderUpdate, engine::handleUserStreamLoss);
+                engine::onOrderUpdate, engine::handleUserStreamLoss,
+                engine::handleUserStreamReady, notificationService::notifyOrderUpdate);
         streamRef.set(stream);
         return new AccountTradingRuntime(credentials, tradeClient, stream, engine, riskGuard, outcomeTracker);
     }

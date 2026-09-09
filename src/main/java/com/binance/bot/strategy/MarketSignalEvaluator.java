@@ -9,8 +9,9 @@ import java.util.Deque;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * A conservative entry gate. It never asks the engine to buy; it only rejects
- * new entries when the best-book data indicates stale, weak, or unstable flow.
+ * Collects market diagnostics and retains the legacy conservative evaluator. The three current
+ * maker-entry strategies call {@link #evaluateBestBidMaker(long, BinanceProperties.Strategy)}, which
+ * records these metrics but does not use thin-book, imbalance, taker-flow or volatility as gates.
  */
 public class MarketSignalEvaluator {
     private static final MathContext MC = MathContext.DECIMAL64;

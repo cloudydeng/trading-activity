@@ -3,11 +3,13 @@ package com.binance.bot.controller;
 import com.binance.bot.account.AccountTradingRuntime;
 import com.binance.bot.account.TradingAccountManager;
 import com.binance.bot.config.BinanceProperties;
+import com.binance.bot.notification.FillNotification;
 import com.binance.bot.notification.TradeNotificationService;
 import com.binance.bot.service.BinanceAccountTradeClient;
 import com.binance.bot.strategy.HighFrequencyVolumeChurnEngine;
 import com.binance.bot.strategy.DailyTradeStatsStore;
 import com.fasterxml.jackson.databind.JsonNode;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -15,9 +17,12 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.*;
 
 @RestController
+@Slf4j
 public class BotDashboardController {
     private final TradingAccountManager accountManager;
     private final BinanceProperties properties;
@@ -35,26 +40,7 @@ public class BotDashboardController {
 
     @GetMapping("/api/accounts/open-orders")
     public Map<String, Object> allOpenOrders() {
-        List<OpenOrderView> orders = new ArrayList<>();
-        Map<String, String> errors = new LinkedHashMap<>();
-        accountManager.runtimes().stream()
-                .sorted(Comparator.comparing(AccountTradingRuntime::alias, String.CASE_INSENSITIVE_ORDER)
-                        .thenComparing(AccountTradingRuntime::accountId, String.CASE_INSENSITIVE_ORDER))
-                .forEach(runtime -> {
-                    JsonNode openOrders = runtime.tradeClient().getAllOpenOrders();
-                    if (openOrders == null) {
-                        errors.put(runtime.accountId(), "活动订单读取失败");
-                        return;
-                    }
-                    if (!openOrders.isArray()) return;
-                    for (JsonNode order : openOrders) {
-                        orders.add(openOrderView(runtime, order));
-                    }
-                });
-        orders.sort(Comparator.comparingLong(OpenOrderView::timeMs).reversed()
-                .thenComparing(OpenOrderView::accountAlias, String.CASE_INSENSITIVE_ORDER)
-                .thenComparing(OpenOrderView::symbol, String.CASE_INSENSITIVE_ORDER));
-        return Map.of("orders", List.copyOf(orders), "errors", Map.copyOf(errors),
+        return Map.of("orders", notificationService.currentOpenOrders(), "errors", Map.of(),
                 "updatedAtMs", System.currentTimeMillis());
     }
 
@@ -74,6 +60,77 @@ public class BotDashboardController {
                 .toList();
     }
 
+    /**
+     * UTC-today dashboard summary backed only by the durable aggregate store. Each account is read
+     * independently so a damaged account row cannot hide every other account from the page.
+     */
+    @GetMapping("/api/accounts/stats/today")
+    public TodayTradingSummary todayTradingSummary() {
+        List<TodayAccountTradingSummary> accounts = new ArrayList<>();
+        for (AccountTradingRuntime runtime : accountManager.runtimes()) {
+            try {
+                List<DailyTradeStatsStore.AccountSymbolVolumeSummary> symbols =
+                        Optional.ofNullable(runtime.engine().getAccountSymbolVolumeSummaries(1))
+                                .orElseGet(List::of).stream()
+                                .filter(Objects::nonNull)
+                                .sorted(Comparator.comparing(summary ->
+                                                Objects.toString(summary.symbol(), ""),
+                                        String.CASE_INSENSITIVE_ORDER))
+                                .toList();
+                accounts.add(todayAccountSummary(runtime.accountId(), runtime.alias(), symbols, null));
+            } catch (RuntimeException e) {
+                log.warn("[accountId={} alias={}] 读取今日账户交易汇总失败，其他账户继续显示: {}",
+                        runtime.accountId(), runtime.alias(), e.getMessage());
+                accounts.add(todayAccountSummary(runtime.accountId(), runtime.alias(), List.of(),
+                        "今日统计暂时不可用"));
+            }
+        }
+        accounts.sort(Comparator.comparing(TodayAccountTradingSummary::accountAlias,
+                        String.CASE_INSENSITIVE_ORDER)
+                .thenComparing(TodayAccountTradingSummary::accountId, String.CASE_INSENSITIVE_ORDER));
+
+        BigDecimal volume = BigDecimal.ZERO;
+        BigDecimal commission = BigDecimal.ZERO;
+        BigDecimal netPnl = BigDecimal.ZERO;
+        BigDecimal loss = BigDecimal.ZERO;
+        for (TodayAccountTradingSummary account : accounts) {
+            volume = volume.add(account.totalVolumeQuote());
+            commission = commission.add(account.totalCommissionQuoteEquivalent());
+            netPnl = netPnl.add(account.netRealizedPnlQuote());
+            loss = loss.add(account.lossQuote());
+        }
+        return new TodayTradingSummary(LocalDate.now(ZoneOffset.UTC), List.copyOf(accounts),
+                volume, commission, netPnl, loss, System.currentTimeMillis());
+    }
+
+    private TodayAccountTradingSummary todayAccountSummary(
+            String accountId, String accountAlias,
+            List<DailyTradeStatsStore.AccountSymbolVolumeSummary> symbols, String error) {
+        BigDecimal buy = BigDecimal.ZERO;
+        BigDecimal sell = BigDecimal.ZERO;
+        BigDecimal total = BigDecimal.ZERO;
+        BigDecimal commission = BigDecimal.ZERO;
+        BigDecimal netPnl = BigDecimal.ZERO;
+        boolean commissionComplete = true;
+        for (DailyTradeStatsStore.AccountSymbolVolumeSummary symbol : symbols) {
+            buy = buy.add(orZero(symbol.buyVolumeQuote()));
+            sell = sell.add(orZero(symbol.sellVolumeQuote()));
+            total = total.add(orZero(symbol.totalVolumeQuote()));
+            commission = commission.add(orZero(symbol.totalCommissionQuoteEquivalent()));
+            netPnl = netPnl.add(orZero(symbol.netRealizedPnlQuote()));
+            commissionComplete &= symbol.commissionConversionComplete();
+        }
+        BigDecimal loss = netPnl.signum() < 0 ? netPnl.negate() : BigDecimal.ZERO;
+        String safeAccountId = Objects.toString(accountId, "");
+        String safeAlias = accountAlias == null || accountAlias.isBlank() ? safeAccountId : accountAlias;
+        return new TodayAccountTradingSummary(safeAccountId, safeAlias, List.copyOf(symbols), buy, sell,
+                total, commission, netPnl, loss, commissionComplete, error);
+    }
+
+    private static BigDecimal orZero(BigDecimal value) {
+        return value == null ? BigDecimal.ZERO : value;
+    }
+
     @GetMapping("/api/accounts/{accountId}/status")
     public ResponseEntity<?> status(@PathVariable String accountId) {
         return runtime(accountId).<ResponseEntity<?>>map(value -> ResponseEntity.ok(statusOf(value)))
@@ -89,8 +146,9 @@ public class BotDashboardController {
     }
 
     @GetMapping("/api/accounts/notifications")
-    public List<?> allNotifications(@RequestParam(defaultValue = "10") int limit) {
-        return notificationService.recentFills(Math.max(1, Math.min(500, limit)));
+    public List<FillNotification> allNotifications(@RequestParam(defaultValue = "10") int limit) {
+        int safeLimit = Math.max(1, Math.min(500, limit));
+        return notificationService.recentFills(safeLimit);
     }
 
     @GetMapping("/api/accounts/{accountId}/notifications")
@@ -144,7 +202,8 @@ public class BotDashboardController {
                 request.exitTimeoutMs(), request.makerFeeBps(), request.targetNetProfitBps(),
                 request.entryAnchorWaitMs(), request.maxEntryAnchorDriftBps(),
                 request.maxCumulativeEntryAnchorDriftBps(), request.manualEntryAnchorPrice(),
-                request.postSellEntryDelayMs());
+                request.postSellEntryDelayMs(), request.dailyVolumeLimitUsdt(),
+                request.bidAskInitialSellMarkupTicks(), request.bidAskEntryBookLevel());
         return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
     }
 
@@ -219,7 +278,8 @@ public class BotDashboardController {
 
     private Map<String, Object> statusOf(AccountTradingRuntime runtime) {
         HighFrequencyVolumeChurnEngine engine = runtime.engine();
-        HighFrequencyVolumeChurnEngine.RemoteTodayStatusSnapshot remoteToday = engine.getRemoteTodayStatusSnapshot();
+        HighFrequencyVolumeChurnEngine.RemoteTodayStatusSnapshot remoteToday =
+                engine.getRemoteTodayStatusSnapshotForMonitoring();
         return Map.ofEntries(
                 Map.entry("accountId", runtime.accountId()), Map.entry("apiKeyAlias", runtime.alias()),
                 Map.entry("running", engine.getIsRunning().get()),
@@ -230,6 +290,7 @@ public class BotDashboardController {
                 Map.entry("symbol", engine.getSymbol()),
                 Map.entry("strategyMode", engine.getStrategyMode()),
                 Map.entry("strategyProfile", engine.getStrategyProfile()),
+                Map.entry("tickSize", engine.getTickSize()),
                 Map.entry("feeAwareRecommendedEntryAnchorPrice", engine.getFeeAwareRecommendedEntryAnchorPrice()),
                 Map.entry("strategyChangePending", engine.hasPendingStrategyChange()),
                 Map.entry("orderAmountUsdt", engine.getOrderAmountUsdt()),
@@ -238,6 +299,9 @@ public class BotDashboardController {
                 Map.entry("usedApiWeight1m", engine.getUsedApiWeight()),
                 Map.entry("apiWeightLimit1m", engine.getApiWeightLimit()),
                 Map.entry("apiWeightEntrySafeLimit1m", engine.getApiWeightEntrySafeLimit()),
+                Map.entry("bnbBalance", Optional.ofNullable(engine.getBnbBalanceSnapshotForMonitoring()).orElse(
+                        new HighFrequencyVolumeChurnEngine.BnbBalanceSnapshot(
+                                BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, false, 0L))),
                 Map.entry("marketData", engine.getMarketDataSnapshot()),
                 Map.entry("entrySignal", engine.getLastEntryDecision()),
                 Map.entry("sellability", engine.getSellabilitySnapshot()),
@@ -252,6 +316,10 @@ public class BotDashboardController {
 
     private ResponseEntity<?> accountSnapshot(AccountTradingRuntime runtime) {
         HighFrequencyVolumeChurnEngine engine = runtime.engine();
+        if (!engine.getIsRunning().get()) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "message", "策略未运行，未向交易所查询账户详情；启动策略后将自动刷新"));
+        }
         BinanceAccountTradeClient tradeService = runtime.tradeClient();
         JsonNode account = tradeService.getAccountInfo();
         JsonNode allOrders = tradeService.getAllOrders(engine.getSymbol(), 100);
@@ -265,6 +333,19 @@ public class BotDashboardController {
     }
 
     private Optional<AccountTradingRuntime> runtime(String accountId) { return accountManager.find(accountId); }
+
+    public record TodayTradingSummary(LocalDate date, List<TodayAccountTradingSummary> accounts,
+                                      BigDecimal totalVolumeQuote,
+                                      BigDecimal totalCommissionQuoteEquivalent,
+                                      BigDecimal netRealizedPnlQuote, BigDecimal totalLossQuote,
+                                      long updatedAtMs) { }
+
+    public record TodayAccountTradingSummary(
+            String accountId, String accountAlias,
+            List<DailyTradeStatsStore.AccountSymbolVolumeSummary> symbols,
+            BigDecimal buyVolumeQuote, BigDecimal sellVolumeQuote, BigDecimal totalVolumeQuote,
+            BigDecimal totalCommissionQuoteEquivalent, BigDecimal netRealizedPnlQuote,
+            BigDecimal lossQuote, boolean commissionConversionComplete, String error) { }
     private Optional<AccountTradingRuntime> defaultRuntime() { return accountManager.runtimes().stream().findFirst(); }
     private ResponseEntity<?> noAccount() {
         return ResponseEntity.status(503).body(Map.of("message", "没有可用账号"));
@@ -312,14 +393,6 @@ public class BotDashboardController {
                 order.path("time").asLong(order.path("updateTime").asLong(0)));
     }
 
-    private OpenOrderView openOrderView(AccountTradingRuntime runtime, JsonNode order) {
-        return new OpenOrderView(runtime.accountId(), runtime.alias(), order.path("symbol").asText(""),
-                order.path("side").asText(""), order.path("type").asText(""),
-                order.path("status").asText(""), order.path("price").asText("0"),
-                order.path("origQty").asText("0"), order.path("orderId").asLong(0),
-                order.path("time").asLong(order.path("updateTime").asLong(0)));
-    }
-
     private boolean passwordMatches(String provided) {
         String expected = properties.getSecurity().getAdminPassword();
         return expected != null && provided != null && MessageDigest.isEqual(
@@ -338,13 +411,14 @@ public class BotDashboardController {
                                         BigDecimal maxEntryAnchorDriftBps,
                                         BigDecimal maxCumulativeEntryAnchorDriftBps,
                                         BigDecimal manualEntryAnchorPrice,
-                                        Long postSellEntryDelayMs) { }
+                                        Long postSellEntryDelayMs,
+                                        BigDecimal dailyVolumeLimitUsdt,
+                                        Integer bidAskInitialSellMarkupTicks,
+                                        Integer bidAskEntryBookLevel) { }
     public record AccountSnapshot(String accountId, String symbol, String apiKeyAlias, String accountType,
                                   boolean canTrade, long accountUpdateTimeMs, List<BalanceView> balances,
                                   List<OrderView> filledOrders, List<OrderView> openOrders, int usedApiWeight1m) { }
     public record BalanceView(String asset, String free, String locked, String total) { }
     public record OrderView(long orderId, String clientOrderId, String side, String type, String status,
                             String price, String originalQty, String executedQty, String quoteQty, long timeMs) { }
-    public record OpenOrderView(String accountId, String accountAlias, String symbol, String side, String type,
-                                String status, String price, String originalQty, long orderId, long timeMs) { }
 }

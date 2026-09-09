@@ -3,6 +3,7 @@ package com.binance.bot.service;
 import com.binance.bot.account.AccountCredentials;
 import com.binance.bot.account.AccountExecutionEvent;
 import com.binance.bot.config.BinanceProperties;
+import com.binance.bot.notification.OpenOrderNotification;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -24,6 +25,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 @Slf4j
 public class AccountUserDataStream implements WebSocket.Listener {
@@ -39,6 +41,7 @@ public class AccountUserDataStream implements WebSocket.Listener {
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean(false);
     private final AtomicBoolean acceptingConnections = new AtomicBoolean(true);
     private final AtomicBoolean terminalAuthenticationFailure = new AtomicBoolean(false);
+    private final AtomicBoolean transientCloseRecoveryPending = new AtomicBoolean(false);
     private final AtomicInteger reconnectAttempts = new AtomicInteger(0);
     private final AtomicBoolean ready = new AtomicBoolean(false);
     private final AtomicReference<WebSocket> activeWebSocket = new AtomicReference<>();
@@ -49,6 +52,8 @@ public class AccountUserDataStream implements WebSocket.Listener {
     private final StringBuilder inboundMessage = new StringBuilder();
     private final ExecutionCallback executionCallback;
     private final StreamLifecycleCallback streamLifecycleCallback;
+    private final Runnable streamReadyCallback;
+    private final Consumer<OpenOrderNotification> openOrderCallback;
 
     @FunctionalInterface
     public interface ExecutionCallback {
@@ -63,11 +68,22 @@ public class AccountUserDataStream implements WebSocket.Listener {
     public AccountUserDataStream(BinanceProperties properties, BinanceSigner signer,
                                  AccountCredentials credentials, ExecutionCallback executionCallback,
                                  StreamLifecycleCallback streamLifecycleCallback) {
+        this(properties, signer, credentials, executionCallback, streamLifecycleCallback,
+                () -> { }, ignored -> { });
+    }
+
+    public AccountUserDataStream(BinanceProperties properties, BinanceSigner signer,
+                                 AccountCredentials credentials, ExecutionCallback executionCallback,
+                                 StreamLifecycleCallback streamLifecycleCallback,
+                                 Runnable streamReadyCallback,
+                                 Consumer<OpenOrderNotification> openOrderCallback) {
         this.properties = properties;
         this.signer = signer;
         this.credentials = credentials;
         this.executionCallback = executionCallback;
         this.streamLifecycleCallback = streamLifecycleCallback;
+        this.streamReadyCallback = streamReadyCallback;
+        this.openOrderCallback = openOrderCallback;
         this.watchdog = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread thread = new Thread(r, "binance-user-stream-watchdog-" + credentials.accountId());
             thread.setDaemon(true);
@@ -102,6 +118,7 @@ public class AccountUserDataStream implements WebSocket.Listener {
                     connectingGeneration.compareAndSet(generation, -1);
                     if (generation == streamGeneration.get()) {
                         readinessFuture.get().complete(false);
+                        failTransientRecoveryIfPending("账户流 1001 重连失败: " + ex.getMessage());
                         scheduleReconnect("连接异常: " + ex.getMessage());
                     }
                     return null;
@@ -142,10 +159,17 @@ public class AccountUserDataStream implements WebSocket.Listener {
             if (root.has("id") && "account-events".equals(root.get("id").asText())) {
                 if (root.path("status").asInt() == 200) {
                     ready.set(true);
+                    transientCloseRecoveryPending.set(false);
                     reconnectAttempts.set(0);
                     readinessFuture.get().complete(true);
                     log.info("[accountId={} alias={}] 已成功订阅币安账户 User Data Stream",
                             credentials.accountId(), credentials.alias());
+                    try {
+                        streamReadyCallback.run();
+                    } catch (RuntimeException e) {
+                        log.warn("[accountId={} alias={}] 账户流恢复后的活动订单对账失败: {}",
+                                credentials.accountId(), credentials.alias(), e.getMessage());
+                    }
                 } else {
                     int status = root.path("status").asInt(500);
                     String reason = "账户流签名订阅失败: "
@@ -179,6 +203,18 @@ public class AccountUserDataStream implements WebSocket.Listener {
                 BigDecimal commission = new BigDecimal(node.path("n").asText("0"));
                 String commissionAsset = node.path("N").asText("");
                 long tradeTimeMs = node.path("T").asLong(node.path("E").asLong(System.currentTimeMillis()));
+                long orderTimeMs = node.path("O").asLong(node.path("E").asLong(tradeTimeMs));
+
+                try {
+                    openOrderCallback.accept(new OpenOrderNotification(
+                            credentials.accountId(), credentials.alias(), symbol, side,
+                            node.path("o").asText(""), orderStatus,
+                            node.path("p").asText("0"), node.path("q").asText("0"),
+                            cumulativeFilledQty.toPlainString(), orderId, orderTimeMs));
+                } catch (RuntimeException e) {
+                    log.warn("[accountId={} alias={}] 控制台活动订单事件处理失败: {}",
+                            credentials.accountId(), credentials.alias(), e.getMessage());
+                }
 
                 if ("TRADE".equals(currentExecutionType) && lastFilledQty.compareTo(BigDecimal.ZERO) > 0) {
                     log.info("[accountId={} alias={}] 【订单成交】{} {} | 数量: {} @ 价格: {}",
@@ -202,7 +238,11 @@ public class AccountUserDataStream implements WebSocket.Listener {
 
     @Override
     public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
-        markUnavailable(webSocket, "账户流关闭 " + statusCode + ": " + reason);
+        if (statusCode == 1001) {
+            beginTransientRecovery(webSocket, "账户流关闭 1001: " + reason);
+        } else {
+            markUnavailable(webSocket, "账户流关闭 " + statusCode + ": " + reason);
+        }
         return CompletableFuture.completedFuture(null);
     }
 
@@ -227,16 +267,37 @@ public class AccountUserDataStream implements WebSocket.Listener {
         if (source != null && !activeWebSocket.compareAndSet(source, null)) return;
         if (source != null) source.abort();
         boolean wasReady = ready.getAndSet(false);
+        boolean transientRecoveryFailed = transientCloseRecoveryPending.getAndSet(false);
         readinessFuture.get().complete(false);
-        if (wasReady) {
-            try {
-                streamLifecycleCallback.onUnavailable(reason);
-            } catch (Exception e) {
-                log.error("[accountId={} alias={}] 账户流断线保护回调异常",
-                        credentials.accountId(), credentials.alias(), e);
-            }
+        if (wasReady || transientRecoveryFailed) notifyUnavailable(reason);
+        scheduleReconnect(reason);
+    }
+
+    private void beginTransientRecovery(WebSocket source, String reason) {
+        if (source != null && !activeWebSocket.compareAndSet(source, null)) return;
+        if (source != null) source.abort();
+        boolean wasReady = ready.getAndSet(false);
+        if (!wasReady && transientCloseRecoveryPending.get()) {
+            failTransientRecoveryIfPending(reason + "；重连连接再次关闭");
+        } else if (wasReady) {
+            transientCloseRecoveryPending.set(true);
+            log.warn("[accountId={} alias={}] 账户流 1001 瞬断，先自动重连；重连失败才停机",
+                    credentials.accountId(), credentials.alias());
         }
         scheduleReconnect(reason);
+    }
+
+    private void failTransientRecoveryIfPending(String reason) {
+        if (transientCloseRecoveryPending.compareAndSet(true, false)) notifyUnavailable(reason);
+    }
+
+    private void notifyUnavailable(String reason) {
+        try {
+            streamLifecycleCallback.onUnavailable(reason);
+        } catch (Exception e) {
+            log.error("[accountId={} alias={}] 账户流断线保护回调异常",
+                    credentials.accountId(), credentials.alias(), e);
+        }
     }
 
     private void markAuthenticationRejected(WebSocket source, String reason) {
@@ -244,15 +305,9 @@ public class AccountUserDataStream implements WebSocket.Listener {
         if (source != null) source.abort();
         terminalAuthenticationFailure.set(true);
         boolean wasReady = ready.getAndSet(false);
+        boolean transientRecoveryFailed = transientCloseRecoveryPending.getAndSet(false);
         readinessFuture.get().complete(false);
-        if (wasReady) {
-            try {
-                streamLifecycleCallback.onUnavailable(reason);
-            } catch (Exception e) {
-                log.error("[accountId={} alias={}] 账户流认证失败保护回调异常",
-                        credentials.accountId(), credentials.alias(), e);
-            }
-        }
+        if (wasReady || transientRecoveryFailed) notifyUnavailable(reason);
         log.error("[accountId={} alias={}] {}；停止自动重连，修正凭据后需重启服务",
                 credentials.accountId(), credentials.alias(), reason);
     }
@@ -300,6 +355,7 @@ public class AccountUserDataStream implements WebSocket.Listener {
         CompletableFuture<Boolean> future = new CompletableFuture<>();
         readinessFuture.set(future);
         terminalAuthenticationFailure.set(false);
+        transientCloseRecoveryPending.set(false);
         reconnectAttempts.set(0);
         ready.set(false);
         lastFrameTimestamp.set(0);
@@ -326,6 +382,7 @@ public class AccountUserDataStream implements WebSocket.Listener {
         acceptingConnections.set(false);
         streamGeneration.incrementAndGet();
         ready.set(false);
+        transientCloseRecoveryPending.set(false);
         WebSocket socket = activeWebSocket.getAndSet(null);
         if (socket != null) socket.abort();
         watchdog.shutdownNow();

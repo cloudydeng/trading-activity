@@ -38,7 +38,11 @@ public class AccountTradingRuntime {
         userDataStream.start();
     }
 
-    public boolean start() { return engine.startTrading(); }
+    public boolean start() {
+        boolean started = engine.startTrading();
+        if (started) engine.refreshDashboardOpenOrderSnapshot();
+        return started;
+    }
     public boolean stop() { return engine.stopTrading(); }
 
     public synchronized void shutdown() {
