@@ -366,6 +366,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             halt("无法确认账户余额，拒绝启动");
             return false;
         }
+        // Build/repair today's durable fill cache once at explicit strategy start. Dashboard
+        // polling reads this cache and must never turn into a repeated full-day exchange query.
+        refreshRemoteTodayStatusSnapshot();
         BnbBalanceSnapshot bnb = refreshBnbBalanceSnapshot(true);
         if (bnb != null && bnb.belowMinimum() && holdingInventory.get().signum() <= 0) {
             isRunning.set(false);
@@ -696,7 +699,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     /** A reconnect may have missed order events, so rebuild the dashboard snapshot once. */
     public void handleUserStreamReady() {
-        if (isRunning.get() || userStreamOrderReconcilePending.getAndSet(false)) {
+        boolean reconciliationPending = userStreamOrderReconcilePending.getAndSet(false);
+        if (isRunning.get() || reconciliationPending) {
+            reconcileRemoteTodayTradesIncrementally();
             refreshDashboardOpenOrderSnapshot();
         }
         statusReason.compareAndSet("账户成交流暂不可用，等待自动重连", statusForCurrentState());
@@ -949,6 +954,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 || (clientOrderId != null && pendingClientOrderIds.contains(clientOrderId));
         if (!knownEvent) {
             if ("TRADE".equals(executionType) && update.lastExecutedQty().signum() > 0) {
+                recordUntrackedExecutionForDailyStats(update);
                 halt("收到未关联订单的成交回报 " + orderId + "，需人工对账");
             }
             return;
@@ -1012,6 +1018,37 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 update.clientOrderId(), update.eventTime());
     }
 
+    /**
+     * Account trade history is broader than the strategy's in-memory order set. Preserve an
+     * untracked fill in the durable daily ledger before the existing safety halt asks for manual
+     * reconciliation. This does not mutate strategy inventory or submit follow-up orders.
+     */
+    private void recordUntrackedExecutionForDailyStats(AccountExecutionEvent update) {
+        BigDecimal quantity = update.lastExecutedQty();
+        BigDecimal price = update.lastExecutedPrice();
+        BigDecimal quoteQuantity = quantity.multiply(price);
+        BigDecimal commissionQuote = commissionQuoteEquivalent(
+                update.commission(), update.commissionAsset(), price);
+        boolean baseCommission = baseAsset().equalsIgnoreCase(update.commissionAsset());
+        BigDecimal inventoryQuantity = quantity;
+        if (baseCommission) {
+            inventoryQuantity = "BUY".equalsIgnoreCase(update.side())
+                    ? quantity.subtract(update.commission()).max(BigDecimal.ZERO)
+                    : quantity.add(update.commission());
+        }
+        BigDecimal economicFeeQuote = baseCommission ? BigDecimal.ZERO : commissionQuote;
+        DailyTradeStatsStore.RecordResult result = dailyStatsStore.recordTrade(
+                accountId, accountAlias, update.symbol(), update.orderId(), update.tradeId(), update.side(),
+                inventoryQuantity, quantity, price, quoteQuantity, update.commission(),
+                update.commissionAsset(), commissionQuote, economicFeeQuote, update.eventTime());
+        if (result == DailyTradeStatsStore.RecordResult.FAILED) {
+            log.error("[accountId={} alias={}] 未关联成交写入每日统计失败: orderId={} tradeId={}",
+                    accountId, accountAlias, update.orderId(), update.tradeId());
+        } else {
+            syncDailyCounters();
+        }
+    }
+
     private TradeAccountingLedger.AppliedTrade applyTrade(long orderId, long tradeId, String side,
                                                           BigDecimal quantity, BigDecimal price,
                                                           BigDecimal quoteQuantity, BigDecimal commission,
@@ -1032,8 +1069,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         BigDecimal cashCommissionQuote = baseCommission ? BigDecimal.ZERO : commissionQuote;
         DailyTradeStatsStore.RecordResult persistentResult = dailyStatsStore.recordTrade(
                 accountId, accountAlias, properties.getStrategy().getSymbol(), orderId, tradeId,
-                side, inventoryQuantity, trade.quoteQuantity(), trade.commission(), commissionQuote,
-                cashCommissionQuote, tradeTimeMs);
+                side, inventoryQuantity, trade.quantity(), price, trade.quoteQuantity(), trade.commission(),
+                trade.commissionAsset(), commissionQuote, cashCommissionQuote, tradeTimeMs);
         if (persistentResult == DailyTradeStatsStore.RecordResult.FAILED) {
             halt("每日交易统计写入失败，已停止真实交易");
             return TradeAccountingLedger.AppliedTrade.ignored();
@@ -3062,27 +3099,33 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
     }
 
-    /** Returns cached/local values while stopped so dashboard polling consumes no Binance REST weight. */
+    private RemoteTodayStatusSnapshot refreshRemoteTodayStatusSnapshot() {
+        synchronized (remoteTodayAccountingLock) {
+            long now = System.currentTimeMillis();
+            RemoteTodayStatusSnapshot refreshed = fetchRemoteTodayStatusSnapshot(now);
+            if (refreshed != null) remoteTodayAccountingCache.set(refreshed);
+            return refreshed;
+        }
+    }
+
+    /** Dashboard polling is cache-only; exchange reconciliation happens at start and stream recovery. */
     public RemoteTodayStatusSnapshot getRemoteTodayStatusSnapshotForMonitoring() {
-        if (isRunning.get()) return getRemoteTodayStatusSnapshot();
-        RemoteTodayStatusSnapshot cached = remoteTodayAccountingCache.get();
-        return cached == null ? localTodayStatusSnapshot(System.currentTimeMillis()) : cached;
+        return localTodayStatusSnapshot(System.currentTimeMillis());
     }
 
     private RemoteTodayStatusSnapshot fetchRemoteTodayStatusSnapshot(long nowMs) {
         String symbol = properties.getStrategy().getSymbol();
         LocalDate today = LocalDate.now(ZoneOffset.UTC);
         long startMs = today.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
-        JsonNode trades = tradeService.getMyTrades(symbol, startMs, nowMs, 1000);
+        RemoteTradePage remoteTrades = fetchAllRemoteTrades(symbol, startMs, nowMs);
         BinanceAccountTradeClient.AssetBalance balance = tradeService.getAssetBalance(baseAsset());
         JsonNode openOrders = tradeService.getOpenOrders(symbol);
-        if (trades == null || !trades.isArray() || balance == null || openOrders == null || !openOrders.isArray()) {
+        if (remoteTrades == null || balance == null || openOrders == null || !openOrders.isArray()) {
             log.warn("[accountId={} alias={}] 今日远程成交/余额快照暂不可用，继续使用上一份状态缓存", accountId, accountAlias);
             return null;
         }
         RemoteTodayAccumulator accumulator = new RemoteTodayAccumulator(today, accountId, accountAlias, symbol);
-        List<JsonNode> sortedTrades = new ArrayList<>();
-        trades.forEach(sortedTrades::add);
+        List<JsonNode> sortedTrades = new ArrayList<>(remoteTrades.trades());
         sortedTrades.sort(Comparator
                 .comparingLong((JsonNode trade) -> trade.path("time").asLong(0))
                 .thenComparingLong(trade -> trade.path("id").asLong(0)));
@@ -3107,6 +3150,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             accumulator.record(side, trade.path("orderId").asLong(-1), trade.path("id").asLong(-1),
                     inventoryQuantity, quantity, price, quote, commission, commissionAsset,
                     commissionQuote, economicFeeQuote, tradeTime);
+            DailyTradeStatsStore.RecordResult stored = dailyStatsStore.recordTrade(
+                    accountId, accountAlias, symbol, trade.path("orderId").asLong(-1),
+                    trade.path("id").asLong(-1), side, inventoryQuantity, quantity, price, quote,
+                    commission, commissionAsset, commissionQuote, economicFeeQuote, tradeTime);
+            if (stored == DailyTradeStatsStore.RecordResult.FAILED) return null;
         }
 
         SymbolRuleManager.SymbolRule rule = ruleManager.getRule(symbol);
@@ -3122,7 +3170,88 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         dailyVolumeCounterDate.set(balanceAlignedDaily.date());
         dailyVolumeStopPending.set(dailyVolumeLimitReached());
         return new RemoteTodayStatusSnapshot(risk, accounting, balanceAlignedDaily, true,
-                sortedTrades.size() >= 1000, nowMs);
+                remoteTrades.truncated(), nowMs);
+    }
+
+    private RemoteTradePage fetchAllRemoteTrades(String symbol, long startMs, long endMs) {
+        JsonNode first = tradeService.getMyTrades(symbol, startMs, endMs, 1000);
+        if (first == null || !first.isArray()) return null;
+        List<JsonNode> trades = new ArrayList<>();
+        first.forEach(trades::add);
+        JsonNode page = first;
+        int pages = 1;
+        while (page.size() >= 1000) {
+            if (pages++ >= 250) {
+                log.error("[accountId={} alias={}] 今日成交分页超过安全上限，拒绝使用不完整统计", accountId, accountAlias);
+                return null;
+            }
+            long lastId = page.get(page.size() - 1).path("id").asLong(-1);
+            if (lastId < 0) return null;
+            page = tradeService.getMyTradesFromId(symbol, lastId + 1, 1000);
+            if (page == null || !page.isArray()) return null;
+            long previousId = lastId;
+            for (JsonNode trade : page) {
+                long tradeId = trade.path("id").asLong(-1);
+                long tradeTime = trade.path("time").asLong(0);
+                if (tradeId <= previousId || tradeTime < startMs || tradeTime > endMs) continue;
+                trades.add(trade);
+            }
+            if (page.size() > 0 && page.get(page.size() - 1).path("id").asLong(-1) <= previousId) {
+                log.error("[accountId={} alias={}] 今日成交分页未向前推进，拒绝使用不完整统计", accountId, accountAlias);
+                return null;
+            }
+        }
+        return new RemoteTradePage(List.copyOf(trades), false);
+    }
+
+    private void reconcileRemoteTodayTradesIncrementally() {
+        String symbol = properties.getStrategy().getSymbol();
+        LocalDate today = LocalDate.now(ZoneOffset.UTC);
+        java.util.OptionalLong latest = dailyStatsStore.latestTradeId(accountId, symbol, today);
+        if (latest.isEmpty()) {
+            refreshRemoteTodayStatusSnapshot();
+            syncDailyCounters();
+            return;
+        }
+        long startMs = today.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
+        long nowMs = System.currentTimeMillis();
+        long nextId = latest.getAsLong() + 1;
+        for (int pageNumber = 0; pageNumber < 250; pageNumber++) {
+            JsonNode page = tradeService.getMyTradesFromId(symbol, nextId, 1000);
+            if (page == null || !page.isArray()) return;
+            long previousId = nextId - 1;
+            for (JsonNode trade : page) {
+                long tradeId = trade.path("id").asLong(-1);
+                long tradeTime = trade.path("time").asLong(0);
+                if (tradeId < nextId || tradeTime < startMs || tradeTime > nowMs) continue;
+                persistRemoteTrade(symbol, trade);
+                previousId = Math.max(previousId, tradeId);
+            }
+            if (page.size() < 1000) break;
+            if (previousId < nextId) return;
+            nextId = previousId + 1;
+        }
+        syncDailyCounters();
+    }
+
+    private void persistRemoteTrade(String symbol, JsonNode trade) {
+        long tradeTime = trade.path("time").asLong(System.currentTimeMillis());
+        BigDecimal quantity = decimalOrZero(trade.path("qty").asText("0"));
+        BigDecimal price = decimalOrZero(trade.path("price").asText("0"));
+        BigDecimal quote = decimalOrZero(trade.path("quoteQty").asText(quantity.multiply(price).toPlainString()));
+        BigDecimal commission = decimalOrZero(trade.path("commission").asText("0"));
+        String commissionAsset = trade.path("commissionAsset").asText("");
+        BigDecimal commissionQuote = commissionQuoteEquivalent(commission, commissionAsset, price);
+        String side = trade.path("isBuyer").asBoolean(false) ? "BUY" : "SELL";
+        boolean baseCommission = baseAsset().equalsIgnoreCase(commissionAsset);
+        BigDecimal inventoryQuantity = baseCommission
+                ? ("BUY".equals(side) ? quantity.subtract(commission).max(BigDecimal.ZERO) : quantity.add(commission))
+                : quantity;
+        BigDecimal economicFeeQuote = baseCommission ? BigDecimal.ZERO : commissionQuote;
+        dailyStatsStore.recordTrade(accountId, accountAlias, symbol,
+                trade.path("orderId").asLong(-1), trade.path("id").asLong(-1), side,
+                inventoryQuantity, quantity, price, quote, commission, commissionAsset,
+                commissionQuote, economicFeeQuote, tradeTime);
     }
 
     private RemoteTodayStatusSnapshot localTodayStatusSnapshot(long nowMs) {
@@ -3369,6 +3498,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                             boolean remote,
                                             boolean truncated,
                                             long updatedAtMs) { }
+    private record RemoteTradePage(List<JsonNode> trades, boolean truncated) { }
     public record BnbBalanceSnapshot(BigDecimal quantity, BigDecimal priceUsdt, BigDecimal valueUsdt,
                                      boolean belowMinimum, long updatedAtMs) { }
     public enum DustReason {

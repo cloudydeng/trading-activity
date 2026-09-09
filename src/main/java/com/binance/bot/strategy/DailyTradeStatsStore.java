@@ -77,6 +77,30 @@ public class DailyTradeStatsStore {
                       PRIMARY KEY (account_id, symbol, trade_identity)
                     )
                     """);
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS trade_fill (
+                      account_id TEXT NOT NULL,
+                      account_alias TEXT NOT NULL,
+                      symbol TEXT NOT NULL,
+                      trade_identity TEXT NOT NULL,
+                      trade_id INTEGER NOT NULL,
+                      order_id INTEGER NOT NULL,
+                      side TEXT NOT NULL,
+                      price TEXT NOT NULL,
+                      quantity TEXT NOT NULL,
+                      quote_quantity TEXT NOT NULL,
+                      commission TEXT NOT NULL,
+                      commission_asset TEXT NOT NULL,
+                      commission_quote TEXT,
+                      trade_date TEXT NOT NULL,
+                      trade_time INTEGER NOT NULL,
+                      PRIMARY KEY (account_id, symbol, trade_identity)
+                    )
+                    """);
+            statement.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_trade_fill_account_date
+                    ON trade_fill(account_id, trade_date, symbol, trade_id)
+                    """);
         }
         if (tableExists("daily_trade_stats") && !columnExists("daily_trade_stats", "account_id")) {
             migrateLegacyDailyStats();
@@ -294,6 +318,27 @@ public class DailyTradeStatsStore {
                 delete.executeUpdate();
             }
         }
+        try (PreparedStatement copy = connection.prepareStatement("""
+                INSERT OR IGNORE INTO trade_fill
+                  (account_id, account_alias, symbol, trade_identity, trade_id, order_id, side,
+                   price, quantity, quote_quantity, commission, commission_asset,
+                   commission_quote, trade_date, trade_time)
+                SELECT ?, account_alias, symbol, trade_identity, trade_id, order_id, side,
+                       price, quantity, quote_quantity, commission, commission_asset,
+                       commission_quote, trade_date, trade_time
+                FROM trade_fill WHERE account_id=?
+                """);
+             PreparedStatement delete = connection.prepareStatement(
+                     "DELETE FROM trade_fill WHERE account_id=?")) {
+            for (Map.Entry<String, String> mapping : aliasToAccountId.entrySet()) {
+                if (mapping.getKey().equals(mapping.getValue())) continue;
+                copy.setString(1, mapping.getValue());
+                copy.setString(2, mapping.getKey());
+                copy.executeUpdate();
+                delete.setString(1, mapping.getKey());
+                delete.executeUpdate();
+            }
+        }
     }
 
     private Map<String, String> legacyAliasMappings(BinanceProperties properties) {
@@ -346,7 +391,24 @@ public class DailyTradeStatsStore {
                                                   BigDecimal quoteQuantity, BigDecimal commission,
                                                   BigDecimal commissionQuoteEquivalent,
                                                   BigDecimal economicFeeQuote, long tradeTimeMs) {
+        BigDecimal price = inventoryQuantity == null || inventoryQuantity.signum() <= 0 || quoteQuantity == null
+                ? BigDecimal.ZERO : quoteQuantity.divide(inventoryQuantity, MC);
+        return recordTrade(accountId, accountAlias, symbol, orderId, tradeId, side,
+                inventoryQuantity, inventoryQuantity, price, quoteQuantity, commission,
+                "", commissionQuoteEquivalent, economicFeeQuote, tradeTimeMs);
+    }
+
+    public synchronized RecordResult recordTrade(String accountId, String accountAlias, String symbol,
+                                                  long orderId, long tradeId,
+                                                  String side, BigDecimal inventoryQuantity,
+                                                  BigDecimal executionQuantity, BigDecimal price,
+                                                  BigDecimal quoteQuantity, BigDecimal commission,
+                                                  String commissionAsset,
+                                                  BigDecimal commissionQuoteEquivalent,
+                                                  BigDecimal economicFeeQuote, long tradeTimeMs) {
         if (inventoryQuantity == null || inventoryQuantity.signum() <= 0
+                || executionQuantity == null || executionQuantity.signum() <= 0
+                || price == null || price.signum() <= 0
                 || quoteQuantity == null || quoteQuantity.signum() <= 0) return RecordResult.IGNORED;
         LocalDate date = Instant.ofEpochMilli(tradeTimeMs > 0 ? tradeTimeMs : System.currentTimeMillis())
                 .atZone(ZoneOffset.UTC).toLocalDate();
@@ -358,8 +420,14 @@ public class DailyTradeStatsStore {
                 + ":" + (commission == null ? "0" : commission.toPlainString()));
         try {
             connection.setAutoCommit(false);
-            if (!insertProcessedTrade(normalizedAccountId, normalizedSymbol, tradeIdentity, date, tradeTimeMs)) {
-                connection.rollback();
+            boolean firstProcessing = insertProcessedTrade(
+                    normalizedAccountId, normalizedSymbol, tradeIdentity, date, tradeTimeMs);
+            insertTradeFill(normalizedAccountId, alias, normalizedSymbol, tradeIdentity, tradeId, orderId,
+                    side, price, executionQuantity, quoteQuantity, commission, commissionAsset,
+                    commissionQuoteEquivalent,
+                    date, tradeTimeMs);
+            if (!firstProcessing) {
+                connection.commit();
                 return RecordResult.DUPLICATE;
             }
             MutableStats stats = load(date, normalizedAccountId, normalizedSymbol);
@@ -377,6 +445,60 @@ public class DailyTradeStatsStore {
             return RecordResult.FAILED;
         } finally {
             setAutoCommitQuietly(true);
+        }
+    }
+
+    private void insertTradeFill(String accountId, String accountAlias, String symbol,
+                                 String tradeIdentity, long tradeId, long orderId, String side,
+                                 BigDecimal price, BigDecimal quantity, BigDecimal quoteQuantity,
+                                 BigDecimal commission, String commissionAsset,
+                                 BigDecimal commissionQuoteEquivalent,
+                                 LocalDate tradeDate, long tradeTimeMs) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                INSERT OR IGNORE INTO trade_fill
+                  (account_id, account_alias, symbol, trade_identity, trade_id, order_id, side,
+                   price, quantity, quote_quantity, commission, commission_asset,
+                   commission_quote, trade_date, trade_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            int i = 1;
+            statement.setString(i++, accountId);
+            statement.setString(i++, accountAlias);
+            statement.setString(i++, symbol);
+            statement.setString(i++, tradeIdentity);
+            statement.setLong(i++, tradeId);
+            statement.setLong(i++, orderId);
+            statement.setString(i++, side == null ? "" : side.toUpperCase());
+            statement.setString(i++, price.toPlainString());
+            statement.setString(i++, quantity.toPlainString());
+            statement.setString(i++, quoteQuantity.toPlainString());
+            statement.setString(i++, commission == null ? "0" : commission.toPlainString());
+            statement.setString(i++, commissionAsset == null ? "" : commissionAsset.toUpperCase());
+            if (commissionQuoteEquivalent == null) statement.setNull(i++, java.sql.Types.VARCHAR);
+            else statement.setString(i++, commissionQuoteEquivalent.toPlainString());
+            statement.setString(i++, tradeDate.toString());
+            statement.setLong(i, tradeTimeMs > 0 ? tradeTimeMs : System.currentTimeMillis());
+            statement.executeUpdate();
+        }
+    }
+
+    public synchronized java.util.OptionalLong latestTradeId(String accountId, String symbol, LocalDate date) {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT MAX(trade_id) FROM trade_fill
+                WHERE account_id=? AND symbol=? AND trade_date=? AND trade_id>=0
+                """)) {
+            statement.setString(1, normalizeAccountId(accountId));
+            statement.setString(2, normalizeSymbol(symbol));
+            statement.setString(3, date.toString());
+            try (ResultSet row = statement.executeQuery()) {
+                if (row.next()) {
+                    long value = row.getLong(1);
+                    if (!row.wasNull()) return java.util.OptionalLong.of(value);
+                }
+            }
+            return java.util.OptionalLong.empty();
+        } catch (SQLException e) {
+            throw new IllegalStateException("读取最后成交 ID 失败", e);
         }
     }
 

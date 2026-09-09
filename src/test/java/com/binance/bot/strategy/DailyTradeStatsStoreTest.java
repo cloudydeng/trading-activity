@@ -72,6 +72,40 @@ class DailyTradeStatsStoreTest {
     }
 
     @Test
+    void persistsCompleteFillDetailsAndExposesLatestTradeId() throws Exception {
+        BinanceProperties properties = properties();
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties);
+        long now = System.currentTimeMillis();
+
+        assertEquals(DailyTradeStatsStore.RecordResult.APPLIED, store.recordTrade(
+                "account-a", "yanzi", "PROMUSDT", 9001, 7001, "SELL",
+                new BigDecimal("2.5"), new BigDecimal("2.5"), new BigDecimal("5.61"),
+                new BigDecimal("14.025"), new BigDecimal("0.00001"), "BNB",
+                new BigDecimal("0.006"), new BigDecimal("0.006"), now));
+        assertEquals(7001L, store.latestTradeId("account-a", "PROMUSDT",
+                LocalDate.now(ZoneOffset.UTC)).orElseThrow());
+
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + tempDir.resolve("daily.db"));
+             var row = connection.createStatement().executeQuery("""
+                     SELECT order_id, trade_id, side, price, quantity, quote_quantity,
+                            commission, commission_asset, commission_quote
+                     FROM trade_fill
+                     """)) {
+            assertEquals(true, row.next());
+            assertEquals(9001L, row.getLong("order_id"));
+            assertEquals(7001L, row.getLong("trade_id"));
+            assertEquals("SELL", row.getString("side"));
+            assertEquals("5.61", row.getString("price"));
+            assertEquals("2.5", row.getString("quantity"));
+            assertEquals("14.025", row.getString("quote_quantity"));
+            assertEquals("0.00001", row.getString("commission"));
+            assertEquals("BNB", row.getString("commission_asset"));
+            assertEquals("0.006", row.getString("commission_quote"));
+        }
+        store.close();
+    }
+
+    @Test
     void exchangeFlatReconciliationNormalizesSubStepDust() {
         BinanceProperties properties = properties();
         DailyTradeStatsStore store = new DailyTradeStatsStore(properties);

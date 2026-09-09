@@ -86,6 +86,9 @@ class HighFrequencyVolumeChurnEngineTest {
         when(dailyStatsStore.recordTrade(anyString(), anyString(), anyString(), anyLong(), anyLong(), anyString(),
                 any(), any(), any(), any(), any(), anyLong()))
                 .thenReturn(DailyTradeStatsStore.RecordResult.APPLIED);
+        when(dailyStatsStore.recordTrade(anyString(), anyString(), anyString(), anyLong(), anyLong(), anyString(),
+                any(), any(), any(), any(), any(), anyString(), any(), any(), anyLong()))
+                .thenReturn(DailyTradeStatsStore.RecordResult.APPLIED);
         when(dailyStatsStore.reconcileFlatDust(anyString(), anyString(), any())).thenReturn(true);
         when(dailyStatsStore.loadRuntimeState(anyString(), anyString())).thenReturn(Optional.empty());
         when(dailyStatsStore.today(anyString(), anyString(), anyString())).thenReturn(new DailyTradeStatsStore.DailyStatsSnapshot(
@@ -1095,6 +1098,70 @@ class HighFrequencyVolumeChurnEngineTest {
         verify(tradeService, never()).getMyTrades(anyString(), anyLong(), anyLong(), anyInt());
         verify(tradeService, never()).getAssetBalance("BNB");
         verify(tradeService, never()).getOpenOrders(anyString());
+    }
+
+    @Test
+    void runningStrategyMonitoringAlsoUsesLocalCacheWithoutExchangeQueries() {
+        engine.getIsRunning().set(true);
+
+        HighFrequencyVolumeChurnEngine.RemoteTodayStatusSnapshot snapshot =
+                engine.getRemoteTodayStatusSnapshotForMonitoring();
+
+        assertFalse(snapshot.remote());
+        verify(tradeService, never()).getMyTrades(anyString(), anyLong(), anyLong(), anyInt());
+        verify(tradeService, never()).getOpenOrders(anyString());
+    }
+
+    @Test
+    void userStreamRecoveryFetchesOnlyTradesAfterCachedTradeId() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        long now = System.currentTimeMillis();
+        when(dailyStatsStore.latestTradeId(eq("test-account"), eq("ENSOUSDT"), any()))
+                .thenReturn(java.util.OptionalLong.of(1000));
+        when(tradeService.getMyTradesFromId("ENSOUSDT", 1001, 1000)).thenReturn(mapper.readTree("""
+                [{"id":1001,"orderId":9001,"price":"0.6","qty":"10","quoteQty":"6",
+                  "commission":"0","commissionAsset":"USDT","isBuyer":false,"time":%d}]
+                """.formatted(now)));
+        when(tradeService.getAllOpenOrders()).thenReturn(mapper.readTree("[]"));
+        engine.getIsRunning().set(true);
+
+        engine.handleUserStreamReady();
+
+        verify(tradeService).getMyTradesFromId("ENSOUSDT", 1001, 1000);
+        verify(tradeService, never()).getMyTrades(anyString(), anyLong(), anyLong(), anyInt());
+    }
+
+    @Test
+    void remoteTodayReconciliationPagesPastOneThousandTrades() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        long now = System.currentTimeMillis();
+        var firstPage = mapper.createArrayNode();
+        for (int i = 1; i <= 1000; i++) {
+            firstPage.addObject().put("id", i).put("orderId", 10_000L + i)
+                    .put("price", "1").put("qty", "1").put("quoteQty", "1")
+                    .put("commission", "0").put("commissionAsset", "USDT")
+                    .put("isBuyer", true).put("time", now - 1_000);
+        }
+        var secondPage = mapper.createArrayNode();
+        secondPage.addObject().put("id", 1001).put("orderId", 11_001)
+                .put("price", "1").put("qty", "1").put("quoteQty", "1")
+                .put("commission", "0").put("commissionAsset", "USDT")
+                .put("isBuyer", true).put("time", now - 500);
+        when(tradeService.getMyTrades(eq("ENSOUSDT"), anyLong(), anyLong(), eq(1000)))
+                .thenReturn(firstPage);
+        when(tradeService.getMyTradesFromId("ENSOUSDT", 1001, 1000)).thenReturn(secondPage);
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "ENSO", new BigDecimal("1001"), BigDecimal.ZERO, new BigDecimal("1001")));
+        when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
+
+        HighFrequencyVolumeChurnEngine.RemoteTodayStatusSnapshot snapshot =
+                engine.getRemoteTodayStatusSnapshot();
+
+        assertTrue(snapshot.remote());
+        assertFalse(snapshot.truncated());
+        assertEquals(1001, snapshot.dailyStats().tradeCount());
+        assertEquals(0, new BigDecimal("1001").compareTo(snapshot.dailyStats().totalVolumeQuote()));
+        verify(tradeService).getMyTradesFromId("ENSOUSDT", 1001, 1000);
     }
 
     @Test

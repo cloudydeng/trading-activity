@@ -342,6 +342,16 @@ public class BinanceAccountTradeClient {
         return getSignedJson("/api/v3/myTrades", params, "查询今日成交明细失败");
     }
 
+    /** Authoritative fills starting at one trade id, used only for paged startup/reconnect reconciliation. */
+    public JsonNode getMyTradesFromId(String symbol, long fromId, int limit) {
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("symbol", symbol.toUpperCase());
+        params.put("fromId", String.valueOf(Math.max(0, fromId)));
+        params.put("limit", String.valueOf(Math.max(1, Math.min(limit, 1000))));
+        params.put("timestamp", String.valueOf(System.currentTimeMillis()));
+        return getSignedJson("/api/v3/myTrades", params, "按成交 ID 查询成交明细失败");
+    }
+
     /** Public conversion price used only to value commissions charged in a third asset such as BNB. */
     public BigDecimal getTickerPrice(String symbol) {
         try {
