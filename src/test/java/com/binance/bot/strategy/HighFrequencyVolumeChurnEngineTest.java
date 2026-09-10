@@ -318,6 +318,7 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(1_800_000L, profile.getValue().getEntryAnchorWaitMs());
         assertEquals(0, new BigDecimal("8").compareTo(profile.getValue().getMaxEntryAnchorDriftBps()));
         assertEquals(0, new BigDecimal("8").compareTo(profile.getValue().getMaxCumulativeEntryAnchorDriftBps()));
+        assertEquals(300_000L, profile.getValue().getEntryTimeoutCooldownMs());
         assertEquals(60_000L, profile.getValue().getPostSellEntryDelayMs());
         assertEquals(0, new BigDecimal("510").compareTo(profile.getValue().getDailyVolumeLimitUsdt()));
     }
@@ -342,6 +343,18 @@ class HighFrequencyVolumeChurnEngineTest {
                 null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 1, 1);
         assertFalse(excessiveBuy.accepted());
         assertTrue(excessiveBuy.message().contains("买单超时时间"));
+
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult disabledCooldown = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 1_800_000L, 86_400_000L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 1, 1, 0L);
+        assertTrue(disabledCooldown.accepted());
+        assertEquals(0L, engine.getStrategyProfile().getEntryTimeoutCooldownMs());
+
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult excessiveCooldown = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 1_800_000L, 86_400_000L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 1, 1, 86_400_001L);
+        assertFalse(excessiveCooldown.accepted());
+        assertTrue(excessiveCooldown.message().contains("买单超时冷静期"));
     }
 
     @Test
@@ -2089,6 +2102,14 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
         assertNull(atomic("activeOrderId", Long.class).get());
         assertTrue(engine.getIsRunning().get());
+
+        clearInvocations(tradeService);
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.862"), new BigDecimal("0.863"));
+
+        verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                any(), any(), isNull(), anyString());
+        assertTrue(engine.getStatusReason().get().contains("买单超时撤单后冷静"));
     }
 
     @Test

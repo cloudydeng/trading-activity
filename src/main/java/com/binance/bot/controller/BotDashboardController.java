@@ -255,7 +255,8 @@ public class BotDashboardController {
                 request.entryAnchorWaitMs(), request.maxEntryAnchorDriftBps(),
                 request.maxCumulativeEntryAnchorDriftBps(), request.manualEntryAnchorPrice(),
                 request.postSellEntryDelayMs(), request.dailyVolumeLimitUsdt(),
-                request.bidAskInitialSellMarkupTicks(), request.bidAskEntryBookLevel());
+                request.bidAskInitialSellMarkupTicks(), request.bidAskEntryBookLevel(),
+                request.entryTimeoutCooldownMs());
         return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
     }
 
@@ -274,7 +275,8 @@ public class BotDashboardController {
                 request.entryAnchorWaitMs(), request.maxEntryAnchorDriftBps(),
                 request.maxCumulativeEntryAnchorDriftBps(), request.manualEntryAnchorPrice(),
                 request.postSellEntryDelayMs(), request.dailyVolumeLimitUsdt(),
-                request.bidAskInitialSellMarkupTicks(), request.bidAskEntryBookLevel());
+                request.bidAskInitialSellMarkupTicks(), request.bidAskEntryBookLevel(),
+                request.entryTimeoutCooldownMs());
         return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
     }
 
@@ -530,7 +532,8 @@ public class BotDashboardController {
                                         Long postSellEntryDelayMs,
                                         BigDecimal dailyVolumeLimitUsdt,
                                         Integer bidAskInitialSellMarkupTicks,
-                                        Integer bidAskEntryBookLevel) { }
+                                        Integer bidAskEntryBookLevel,
+                                        Long entryTimeoutCooldownMs) { }
     public record AccountSnapshot(String accountId, String symbol, String apiKeyAlias, String accountType,
                                   boolean canTrade, long accountUpdateTimeMs, List<BalanceView> balances,
                                   List<OrderView> filledOrders, List<OrderView> openOrders, int usedApiWeight1m) { }

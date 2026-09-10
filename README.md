@@ -76,9 +76,9 @@ BOT_ACCOUNT_PROFILES_JSON='{
 
 多币种控制台使用 `POST /api/accounts/{accountId}/symbols/{symbol}/strategy`；单币种兼容接口仍为 `POST /api/accounts/{accountId}/strategy`（旧版默认账户也支持
 `POST /api/bot/strategy`），请求体字段为 `symbol`、`mode`、`orderAmountUsdt`、`entryTimeoutMs`、
-`exitTimeoutMs`、`postSellEntryDelayMs`、`dailyVolumeLimitUsdt`、`bidAskEntryBookLevel`、`bidAskInitialSellMarkupTicks`、`makerFeeBps`、锚点相关字段和兼容旧请求的
+`entryTimeoutCooldownMs`、`exitTimeoutMs`、`postSellEntryDelayMs`、`dailyVolumeLimitUsdt`、`bidAskEntryBookLevel`、`bidAskInitialSellMarkupTicks`、`makerFeeBps`、锚点相关字段和兼容旧请求的
 `targetNetProfitBps`。`makerFeeBps` 留空时按账户和交易对从币安读取
-实际 Maker 卖出费率，读取失败才回退到全局保守估值；金额不能超过生产上限。买单超时限制为 1 秒至 30 分钟，卖单检查限制为 1 秒至 24 小时。锚定价格可通过“删除手动值，恢复自动”明确清除，页面会常驻显示保存成功、排队或失败状态。
+实际 Maker 卖出费率，读取失败才回退到全局保守估值；金额不能超过生产上限。买单超时限制为 1 秒至 30 分钟；买单超时撤单后的冷静期默认 5 分钟，可配置为 0 秒至 24 小时；卖单检查限制为 1 秒至 24 小时。锚定价格可通过“删除手动值，恢复自动”明确清除，页面会常驻显示保存成功、排队或失败状态。
 
 单账户旧配置仍作为兼容回退，仅在未配置 `BOT_ACCOUNT_PROFILES_JSON` 时生效：
 

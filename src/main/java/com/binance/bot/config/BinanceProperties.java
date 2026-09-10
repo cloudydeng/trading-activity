@@ -62,6 +62,8 @@ public class BinanceProperties {
         private BigDecimal orderAmountUsdt;
         /** Entry timeout after which an order outside its configured book level is canceled. */
         private Long entryTimeoutMs;
+        /** Cooldown after a timed-out entry order is canceled before the next BUY may be placed. */
+        private Long entryTimeoutCooldownMs = 300_000L;
         /** Exit timeout before canceling and re-placing at the latest ask. */
         private Long exitTimeoutMs;
         /** Optional manual maker fee override in bps; null reads the account/symbol rate from Binance. */

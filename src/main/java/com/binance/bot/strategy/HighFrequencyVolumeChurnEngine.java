@@ -96,6 +96,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final ArrayDeque<BigDecimal> feeAwareRecentBuyPrices = new ArrayDeque<>();
     private final AtomicLong feeAwareEntryCeilingBlockedSince = new AtomicLong(0);
     private final AtomicLong postSellNextEntryAllowedAtMs = new AtomicLong(0);
+    private final AtomicLong entryTimeoutCooldownUntilMs = new AtomicLong(0);
     private final AtomicBoolean dailyVolumeStopPending = new AtomicBoolean(false);
     private final AtomicReference<LocalDate> dailyVolumeCounterDate = new AtomicReference<>();
     private final AtomicBoolean bnbBalanceStopPending = new AtomicBoolean(false);
@@ -886,6 +887,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     updateDustState(residual, "残余库存等待后续 BUY 合并");
                 }
                 if (postSellEntryDelayActive(now)) return;
+                if (entryTimeoutCooldownActive(now)) return;
                 MarketSignalEvaluator.EntryDecision decision = entryDecisionForStrategy(now);
                 activeEntrySignalReason.set(decision.reason());
                 activeEntryContext.set(marketSignalEvaluator.getMarketContext(now));
@@ -940,7 +942,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                 + orderPrice.toPlainString());
                     } else {
                         cancelActiveEntryOrder("Maker 买单已不在" + configuredEntryBookLevelLabel()
-                                + "，撤单等待重新挂单（不转 IOC）");
+                                + "，撤单等待重新挂单（不转 IOC）", true);
                     }
                 }
             }
@@ -1970,10 +1972,15 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     private void cancelActiveEntryOrder(String reason) {
+        cancelActiveEntryOrder(reason, false);
+    }
+
+    private void cancelActiveEntryOrder(String reason, boolean armEntryTimeoutCooldown) {
         Long orderId = activeOrderId.get();
         if (orderId == null || !entryCancellationPending.compareAndSet(false, true)) return;
         JsonNode cancel = tradeService.cancelOrder(properties.getStrategy().getSymbol(), orderId);
         if (cancel != null) {
+            if (armEntryTimeoutCooldown) scheduleEntryTimeoutCooldown();
             log.info("[accountId={} alias={}] 撤销活动买单 {}: {}", accountId, accountAlias, orderId, reason);
             CompletableFuture.delayedExecutor(500, TimeUnit.MILLISECONDS)
                     .execute(() -> reconcileCancelledEntry(orderId));
@@ -2165,6 +2172,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         orderReconcileFailures.clear();
         tradeReconcileFailures.clear();
         replacingOrderId.set(null);
+        entryTimeoutCooldownUntilMs.set(0);
     }
 
     private void resetEntryTarget() {
@@ -2364,6 +2372,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         feeAwareEntryCeilingBlockedSince.set(0);
         postSellNextEntryAllowedAtMs.set(0);
+        entryTimeoutCooldownUntilMs.set(0);
         commissionPriceCache.clear();
         makerSellFeeRateCache.clear();
         lastBestBid.set(null);
@@ -2719,6 +2728,28 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                                               BigDecimal requestedDailyVolumeLimitUsdt,
                                                               Integer requestedBidAskInitialSellMarkupTicks,
                                                               Integer requestedBidAskEntryBookLevel) {
+        return switchStrategy(requestedSymbol, requestedMode, requestedAmount, requestedEntryTimeoutMs,
+                requestedExitTimeoutMs, requestedMakerFeeBps, requestedTargetNetProfitBps,
+                requestedEntryAnchorWaitMs, requestedMaxEntryAnchorDriftBps,
+                requestedMaxCumulativeEntryAnchorDriftBps, requestedManualEntryAnchorPrice,
+                requestedPostSellEntryDelayMs, requestedDailyVolumeLimitUsdt,
+                requestedBidAskInitialSellMarkupTicks, requestedBidAskEntryBookLevel, null);
+    }
+
+    public synchronized StrategySwitchResult switchStrategy(String requestedSymbol, String requestedMode,
+                                                              BigDecimal requestedAmount, Long requestedEntryTimeoutMs,
+                                                              Long requestedExitTimeoutMs,
+                                                              BigDecimal requestedMakerFeeBps,
+                                                              BigDecimal requestedTargetNetProfitBps,
+                                                              Long requestedEntryAnchorWaitMs,
+                                                              BigDecimal requestedMaxEntryAnchorDriftBps,
+                                                              BigDecimal requestedMaxCumulativeEntryAnchorDriftBps,
+                                                              BigDecimal requestedManualEntryAnchorPrice,
+                                                              Long requestedPostSellEntryDelayMs,
+                                                              BigDecimal requestedDailyVolumeLimitUsdt,
+                                                              Integer requestedBidAskInitialSellMarkupTicks,
+                                                              Integer requestedBidAskEntryBookLevel,
+                                                              Long requestedEntryTimeoutCooldownMs) {
         String symbol = normalizeStrategySymbol(requestedSymbol);
         if (symbol.isBlank() || !symbol.endsWith("USDT")) {
             return StrategySwitchResult.rejected(properties.getStrategy().getSymbol(),
@@ -2748,6 +2779,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         if (!validExitTimeout(exitTimeout)) {
             return StrategySwitchResult.rejected(symbol, "卖单检查时间必须在 1 秒到 24 小时之间");
+        }
+        Long entryTimeoutCooldownMs = requestedEntryTimeoutCooldownMs == null && existing != null
+                ? existing.getEntryTimeoutCooldownMs() : requestedEntryTimeoutCooldownMs;
+        if (entryTimeoutCooldownMs == null) entryTimeoutCooldownMs = 300_000L;
+        if (!validEntryTimeoutCooldown(entryTimeoutCooldownMs)) {
+            return StrategySwitchResult.rejected(symbol, "买单超时冷静期必须在 0 秒到 24 小时之间");
         }
         Long postSellEntryDelayMs = requestedPostSellEntryDelayMs == null && existing != null
                 ? existing.getPostSellEntryDelayMs() : requestedPostSellEntryDelayMs;
@@ -2820,6 +2857,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         profile.setMode(mode);
         profile.setOrderAmountUsdt(amount);
         profile.setEntryTimeoutMs(entryTimeout);
+        profile.setEntryTimeoutCooldownMs(entryTimeoutCooldownMs);
         profile.setExitTimeoutMs(exitTimeout);
         profile.setMakerFeeBps(makerFeeBps);
         profile.setTargetNetProfitBps(targetNetProfitBps);
@@ -2901,6 +2939,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return timeoutMs == null || (timeoutMs >= 1_000 && timeoutMs <= 86_400_000L);
     }
 
+    private boolean validEntryTimeoutCooldown(Long cooldownMs) {
+        return cooldownMs == null || (cooldownMs >= 0 && cooldownMs <= 86_400_000L);
+    }
+
     private boolean validPostSellEntryDelay(Long delayMs) {
         return delayMs == null || (delayMs >= 0 && delayMs <= 86_400_000L);
     }
@@ -2927,6 +2969,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         copy.setMode(normalizeStrategyMode(source.getMode()));
         copy.setOrderAmountUsdt(source.getOrderAmountUsdt());
         copy.setEntryTimeoutMs(source.getEntryTimeoutMs());
+        copy.setEntryTimeoutCooldownMs(source.getEntryTimeoutCooldownMs());
         copy.setExitTimeoutMs(source.getExitTimeoutMs());
         copy.setMakerFeeBps(source.getMakerFeeBps());
         copy.setTargetNetProfitBps(source.getTargetNetProfitBps());
@@ -2972,6 +3015,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         var profile = symbolStrategy(properties.getStrategy().getSymbol());
         return profile != null && profile.getEntryTimeoutMs() != null && profile.getEntryTimeoutMs() > 0
                 ? profile.getEntryTimeoutMs() : properties.getStrategy().getOrderTtlMs();
+    }
+
+    private long entryTimeoutCooldownMs() {
+        var profile = symbolStrategy(properties.getStrategy().getSymbol());
+        Long cooldownMs = profile == null ? null : profile.getEntryTimeoutCooldownMs();
+        if (cooldownMs == null) cooldownMs = 300_000L;
+        return Math.max(0, Math.min(86_400_000L, cooldownMs));
     }
 
     private long exitOrderTimeoutMs() {
@@ -3043,6 +3093,24 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return false;
         }
         statusReason.set(getStrategyMode() + " 卖出后冷却中，剩余 "
+                + durationLabel(allowedAtMs - nowMs) + " 再挂下一笔买单");
+        return true;
+    }
+
+    private long scheduleEntryTimeoutCooldown() {
+        long cooldownMs = entryTimeoutCooldownMs();
+        entryTimeoutCooldownUntilMs.set(cooldownMs > 0 ? System.currentTimeMillis() + cooldownMs : 0);
+        return cooldownMs;
+    }
+
+    private boolean entryTimeoutCooldownActive(long nowMs) {
+        long allowedAtMs = entryTimeoutCooldownUntilMs.get();
+        if (allowedAtMs <= 0) return false;
+        if (nowMs >= allowedAtMs) {
+            entryTimeoutCooldownUntilMs.compareAndSet(allowedAtMs, 0);
+            return false;
+        }
+        statusReason.set(getStrategyMode() + " 买单超时撤单后冷静中，剩余 "
                 + durationLabel(allowedAtMs - nowMs) + " 再挂下一笔买单");
         return true;
     }
