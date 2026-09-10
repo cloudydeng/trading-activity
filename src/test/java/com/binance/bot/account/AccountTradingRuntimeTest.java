@@ -175,6 +175,32 @@ class AccountTradingRuntimeTest {
     }
 
     @Test
+    void symbolStartRecoversAnotherConfiguredAssetBeforeFailingAccountRisk() throws Exception {
+        HighFrequencyVolumeChurnEngine enso = mock(HighFrequencyVolumeChurnEngine.class);
+        HighFrequencyVolumeChurnEngine btc = mock(HighFrequencyVolumeChurnEngine.class);
+        when(enso.getSymbol()).thenReturn("ENSOUSDT");
+        when(btc.getSymbol()).thenReturn("BTCUSDT");
+        when(enso.reconcileAccountRiskSnapshot(any())).thenReturn(true);
+        when(btc.reconcileAccountRiskSnapshot(any())).thenReturn(false);
+        when(btc.recoverAccountRiskSnapshotForStart(any())).thenReturn(true);
+        when(enso.startTrading()).thenReturn(true);
+        BinanceAccountTradeClient client = mock(BinanceAccountTradeClient.class);
+        when(client.getAccountInfo()).thenReturn(new ObjectMapper().readTree(
+                "{\"balances\":[{\"asset\":\"USDT\",\"free\":\"30\",\"locked\":\"0\"}]}"));
+        AccountTradingRuntime runtime = new AccountTradingRuntime(
+                new AccountCredentials("account-a", "A", "key", "secret"), client,
+                mock(AccountUserDataStream.class), List.of(enso, btc), Map.of(), Map.of(),
+                new AccountRiskCoordinator());
+
+        assertTrue(runtime.start("ENSOUSDT"));
+
+        verify(client, times(1)).getAccountInfo();
+        verify(btc).recoverAccountRiskSnapshotForStart(any());
+        verify(enso).startTrading();
+        verify(enso, never()).markAccountRiskUnconfirmed(anyString());
+    }
+
+    @Test
     void sharedAccountStreamLifecycleIsAppliedToEverySymbolButSnapshotRunsOnce() {
         HighFrequencyVolumeChurnEngine enso = mock(HighFrequencyVolumeChurnEngine.class);
         HighFrequencyVolumeChurnEngine btc = mock(HighFrequencyVolumeChurnEngine.class);

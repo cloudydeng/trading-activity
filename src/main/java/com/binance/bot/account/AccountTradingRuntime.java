@@ -180,12 +180,18 @@ public class AccountTradingRuntime {
         }
         boolean reconciled = true;
         for (HighFrequencyVolumeChurnEngine engine : engines) {
-            reconciled &= engine.reconcileAccountRiskSnapshot(accountInfo);
+            boolean engineReconciled = engine.reconcileAccountRiskSnapshot(accountInfo);
+            if (!engineReconciled) {
+                engineReconciled = engine.recoverAccountRiskSnapshotForStart(accountInfo);
+            }
+            reconciled &= engineReconciled;
         }
         if (accountRiskCoordinator != null) {
             reconciled &= accountRiskCoordinator.updateQuoteBalance(accountInfo, "USDT");
         }
-        if (!reconciled) target.markAccountRiskUnconfirmed("账户其他币种持仓与本地账本不一致，拒绝启动");
+        if (!reconciled) {
+            target.markAccountRiskUnconfirmed("账户币种持仓无法从交易所历史成交安全恢复，拒绝启动");
+        }
         return reconciled;
     }
 

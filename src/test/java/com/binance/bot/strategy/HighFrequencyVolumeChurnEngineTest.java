@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -1037,8 +1038,11 @@ class HighFrequencyVolumeChurnEngineTest {
                 [{"orderId":77,"clientOrderId":"ta-restore-S-1","side":"SELL","price":"0.6013",
                   "origQty":"10","executedQty":"0","status":"NEW"}]
                 """));
-        when(dailyStatsStore.today(eq("test-account"), eq("test-bot"), eq("ENSOUSDT")))
-                .thenReturn(dailyStatsWithPosition("ENSOUSDT", "10", "6.006"));
+        when(tradeService.getMyTrades(eq("ENSOUSDT"), anyLong(), anyLong(), eq(1000)))
+                .thenReturn(mapper.readTree("""
+                        [{"id":11,"orderId":101,"price":"0.6006","qty":"10","quoteQty":"6.006",
+                          "commission":"0","commissionAsset":"USDT","isBuyer":true,"time":%d}]
+                        """.formatted(now - 1000)));
         when(dailyStatsStore.loadRuntimeState("test-account", "ENSOUSDT")).thenReturn(Optional.of(
                 new DailyTradeStatsStore.RuntimeState("test-account", "ENSOUSDT", "SELLING", 77L,
                         "ta-restore-S-1", "SELL", new BigDecimal("0.6013"), new BigDecimal("10"),
@@ -1086,6 +1090,55 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(88L, atomic("activeOrderId", Long.class).get());
         assertEquals(0, new BigDecimal("10").compareTo(engine.getRiskSnapshot().positionQty()));
         assertEquals(0, new BigDecimal("6.0000").compareTo(engine.getRiskSnapshot().positionCostUsdt()));
+        verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.6001"), anyString());
+    }
+
+    @Test
+    void explicitStartRecoversCrossDayInventoryFromExchangeHistoryAndPlacesSell() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        long now = System.currentTimeMillis();
+        long todayStart = LocalDate.now(ZoneOffset.UTC).atStartOfDay(ZoneOffset.UTC)
+                .toInstant().toEpochMilli();
+        long previousDayTradeTime = todayStart - TimeUnit.HOURS.toMillis(1);
+        engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L);
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp")).set(now);
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp")).set(now);
+        atomic("lastBestAsk", BigDecimal.class).set(new BigDecimal("0.6001"));
+        BinanceAccountTradeClient.AssetBalance balance = new BinanceAccountTradeClient.AssetBalance(
+                "ENSO", new BigDecimal("10"), BigDecimal.ZERO, new BigDecimal("10"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(balance);
+        when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
+        JsonNode previousDayBuy = mapper.readTree("""
+                [{"id":11,"orderId":101,"price":"0.6000","qty":"10","quoteQty":"6.0000",
+                  "commission":"0","commissionAsset":"USDT","isBuyer":true,"time":%d}]
+                """.formatted(previousDayTradeTime));
+        JsonNode noTrades = mapper.readTree("[]");
+        when(tradeService.getMyTrades(eq("ENSOUSDT"), anyLong(), anyLong(), eq(1000)))
+                .thenAnswer(invocation -> {
+                    long startMs = invocation.getArgument(1);
+                    long endMs = invocation.getArgument(2);
+                    return startMs <= previousDayTradeTime && endMs >= previousDayTradeTime
+                            ? previousDayBuy : noTrades;
+                });
+        when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.6001"), anyString()))
+                .thenReturn(mapper.readTree("{\"orderId\":88}"));
+        JsonNode accountInfo = mapper.readTree(
+                "{\"balances\":[{\"asset\":\"ENSO\",\"free\":\"10\",\"locked\":\"0\"}]}"
+        );
+
+        assertFalse(engine.reconcileAccountRiskSnapshot(accountInfo));
+        assertTrue(engine.recoverAccountRiskSnapshotForStart(accountInfo));
+        assertTrue(engine.startTrading());
+
+        assertTrue(engine.getIsRunning().get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
+        assertEquals(88L, atomic("activeOrderId", Long.class).get());
+        assertEquals(0, new BigDecimal("10").compareTo(engine.getRiskSnapshot().positionQty()));
+        assertEquals(0, new BigDecimal("6.0000").compareTo(engine.getRiskSnapshot().positionCostUsdt()));
+        assertEquals(0, engine.getDailyStatsSnapshot().totalVolumeQuote().signum());
         verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
                 decimalEquals("0.6001"), anyString());
     }
@@ -1149,7 +1202,7 @@ class HighFrequencyVolumeChurnEngineTest {
 
         assertFalse(engine.getIsRunning().get());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.HALTED, engine.getCurrentStatus().get());
-        assertTrue(engine.getStatusReason().get().contains("今日远程成交无法还原成本或与交易所余额不一致"));
+        assertTrue(engine.getStatusReason().get().contains("交易所历史成交无法还原成本或与余额不一致"));
         verify(tradeService, never()).placeLimitGtcSell(anyString(), any(), any(), anyString());
         verify(tradeService, never()).cancelAndReplaceOrder(anyString(), eq("SELL"), any(), any(), any(), anyString());
     }
