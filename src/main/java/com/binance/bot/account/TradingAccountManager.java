@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Slf4j
 @Service
@@ -30,6 +31,7 @@ public class TradingAccountManager {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final ConcurrentMap<String, AccountTradingRuntime> runtimes = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, String> initializationErrors = new ConcurrentHashMap<>();
+    private final ReentrantLock lock = new ReentrantLock();
 
     public TradingAccountManager(BinanceProperties properties, AccountTradingRuntimeFactory runtimeFactory,
                                  DailyTradeStatsStore dailyStatsStore) {
@@ -39,24 +41,29 @@ public class TradingAccountManager {
     }
 
     @PostConstruct
-    public synchronized void initialize() {
-        configuredAccounts().forEach((accountId, credentials) -> {
-            AccountTradingRuntime runtime = null;
-            try {
-                runtime = runtimeFactory.create(credentials);
-                AccountTradingRuntime duplicate = runtimes.putIfAbsent(accountId, runtime);
-                if (duplicate != null) throw new IllegalStateException("duplicate accountId");
-                runtime.initialize();
-                log.info("[accountId={} alias={}] 账户运行时初始化完成", accountId, credentials.alias());
-            } catch (Exception e) {
-                AccountTradingRuntime failed = runtimes.remove(accountId);
-                if (failed != null) {
-                    try { failed.shutdown(); } catch (Exception ignored) { }
+    public void initialize() {
+        lock.lock();
+        try {
+            configuredAccounts().forEach((accountId, credentials) -> {
+                AccountTradingRuntime runtime = null;
+                try {
+                    runtime = runtimeFactory.create(credentials);
+                    AccountTradingRuntime duplicate = runtimes.putIfAbsent(accountId, runtime);
+                    if (duplicate != null) throw new IllegalStateException("duplicate accountId");
+                    runtime.initialize();
+                    log.info("[accountId={} alias={}] 账户运行时初始化完成", accountId, credentials.alias());
+                } catch (Exception e) {
+                    AccountTradingRuntime failed = runtimes.remove(accountId);
+                    if (failed != null) {
+                        try { failed.shutdown(); } catch (Exception ignored) { }
+                    }
+                    initializationErrors.put(accountId, safeMessage(e));
+                    log.error("[accountId={}] 账户运行时初始化失败；其他账号继续运行: {}", accountId, safeMessage(e));
                 }
-                initializationErrors.put(accountId, safeMessage(e));
-                log.error("[accountId={}] 账户运行时初始化失败；其他账号继续运行: {}", accountId, safeMessage(e));
-            }
-        });
+            });
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -64,41 +71,46 @@ public class TradingAccountManager {
      * already present. Existing runtimes are deliberately never replaced or stopped: a reload
      * must not disturb an active SELL order or an account's LIVE state.
      */
-    public synchronized ReloadResult reloadProfiles() {
-        Map<String, BinanceProperties.CredentialProfile> profiles = profilesFromEnvironmentFile();
-        if (profiles == null) return new ReloadResult(0, List.of(), Map.of("profiles-json", "无法读取或解析账户配置"));
-        Map<String, AccountCredentials> candidates = credentialsFromProfiles(profiles);
-        List<String> added = new ArrayList<>();
-        Map<String, String> errors = new LinkedHashMap<>();
-        profiles.forEach((accountId, profile) -> {
-            if (profile == null || !profile.isEnabled() || runtimes.containsKey(accountId)) return;
-            if (!candidates.containsKey(accountId)) {
-                errors.put(safeProfileId(accountId), "API credentials are incomplete or invalid");
-                return;
-            }
-            AccountTradingRuntime runtime = null;
-            try {
-                runtime = runtimeFactory.create(candidates.get(accountId));
-                AccountTradingRuntime duplicate = runtimes.putIfAbsent(accountId, runtime);
-                if (duplicate != null) {
-                    runtime.shutdown();
+    public ReloadResult reloadProfiles() {
+        lock.lock();
+        try {
+            Map<String, BinanceProperties.CredentialProfile> profiles = profilesFromEnvironmentFile();
+            if (profiles == null) return new ReloadResult(0, List.of(), Map.of("profiles-json", "无法读取或解析账户配置"));
+            Map<String, AccountCredentials> candidates = credentialsFromProfiles(profiles);
+            List<String> added = new ArrayList<>();
+            Map<String, String> errors = new LinkedHashMap<>();
+            profiles.forEach((accountId, profile) -> {
+                if (profile == null || !profile.isEnabled() || runtimes.containsKey(accountId)) return;
+                if (!candidates.containsKey(accountId)) {
+                    errors.put(safeProfileId(accountId), "API credentials are incomplete or invalid");
                     return;
                 }
-                runtime.initialize();
-                added.add(accountId);
-                initializationErrors.remove(accountId);
-                log.info("[accountId={} alias={}] 热加载账户运行时完成（默认停止）",
-                        accountId, candidates.get(accountId).alias());
-            } catch (Exception e) {
-                if (runtime != null) runtimes.remove(accountId, runtime);
-                if (runtime != null) try { runtime.shutdown(); } catch (Exception ignored) { }
-                String message = safeMessage(e);
-                errors.put(safeProfileId(accountId), message);
-                initializationErrors.put(safeProfileId(accountId), message);
-                log.error("[accountId={}] 热加载账户失败；不影响已有账户: {}", safeProfileId(accountId), message);
-            }
-        });
-        return new ReloadResult(added.size(), List.copyOf(added), Map.copyOf(errors));
+                AccountTradingRuntime runtime = null;
+                try {
+                    runtime = runtimeFactory.create(candidates.get(accountId));
+                    AccountTradingRuntime duplicate = runtimes.putIfAbsent(accountId, runtime);
+                    if (duplicate != null) {
+                        runtime.shutdown();
+                        return;
+                    }
+                    runtime.initialize();
+                    added.add(accountId);
+                    initializationErrors.remove(accountId);
+                    log.info("[accountId={} alias={}] 热加载账户运行时完成（默认停止）",
+                            accountId, candidates.get(accountId).alias());
+                } catch (Exception e) {
+                    if (runtime != null) runtimes.remove(accountId, runtime);
+                    if (runtime != null) try { runtime.shutdown(); } catch (Exception ignored) { }
+                    String message = safeMessage(e);
+                    errors.put(safeProfileId(accountId), message);
+                    initializationErrors.put(safeProfileId(accountId), message);
+                    log.error("[accountId={}] 热加载账户失败；不影响已有账户: {}", safeProfileId(accountId), message);
+                }
+            });
+            return new ReloadResult(added.size(), List.copyOf(added), Map.copyOf(errors));
+        } finally {
+            lock.unlock();
+        }
     }
 
     private Map<String, BinanceProperties.CredentialProfile> profilesFromEnvironmentFile() {
@@ -180,27 +192,32 @@ public class TradingAccountManager {
                 editable ? "" : "请先停止该账户的全部币种，并确认没有活动订单"));
     }
 
-    public synchronized SymbolsUpdateResult updateAccountSymbols(String accountId, List<String> symbols) {
-        AccountTradingRuntime runtime = runtimes.get(accountId);
-        if (runtime == null) return new SymbolsUpdateResult(false, "账户不存在或未初始化", null);
-        if (!runtime.canChangeConfiguredSymbols()) {
-            return new SymbolsUpdateResult(false, "请先停止该账户的全部币种，并确认没有活动订单",
-                    accountSymbolsConfiguration(accountId).orElse(null));
-        }
+    public SymbolsUpdateResult updateAccountSymbols(String accountId, List<String> symbols) {
+        lock.lock();
         try {
-            dailyStatsStore.saveAccountSymbols(accountId, symbols);
-            List<String> configuredSymbols = dailyStatsStore.loadAccountSymbols(accountId).orElse(symbols);
-            HotApplySymbolsResult hotApply = hotApplyAccountSymbols(runtime, configuredSymbols);
-            AccountSymbolsConfiguration configuration = accountSymbolsConfiguration(accountId).orElseThrow();
-            String message = hotApply.applied()
-                    ? "交易对配置已保存并热应用"
-                    : "交易对配置已保存到 SQLite，" + hotApply.message() + "；需重启服务生效";
-            return new SymbolsUpdateResult(true, message, configuration);
-        } catch (IllegalArgumentException e) {
-            return new SymbolsUpdateResult(false, safeMessage(e), safeAccountSymbolsConfiguration(accountId));
-        } catch (RuntimeException e) {
-            log.error("[accountId={}] 保存账户交易对配置失败: {}", safeProfileId(accountId), safeMessage(e));
-            return new SymbolsUpdateResult(false, "保存交易对配置失败", safeAccountSymbolsConfiguration(accountId));
+            AccountTradingRuntime runtime = runtimes.get(accountId);
+            if (runtime == null) return new SymbolsUpdateResult(false, "账户不存在或未初始化", null);
+            if (!runtime.canChangeConfiguredSymbols()) {
+                return new SymbolsUpdateResult(false, "请先停止该账户的全部币种，并确认没有活动订单",
+                        accountSymbolsConfiguration(accountId).orElse(null));
+            }
+            try {
+                dailyStatsStore.saveAccountSymbols(accountId, symbols);
+                List<String> configuredSymbols = dailyStatsStore.loadAccountSymbols(accountId).orElse(symbols);
+                HotApplySymbolsResult hotApply = hotApplyAccountSymbols(runtime, configuredSymbols);
+                AccountSymbolsConfiguration configuration = accountSymbolsConfiguration(accountId).orElseThrow();
+                String message = hotApply.applied()
+                        ? "交易对配置已保存并热应用"
+                        : "交易对配置已保存到 SQLite，" + hotApply.message() + "；需重启服务生效";
+                return new SymbolsUpdateResult(true, message, configuration);
+            } catch (IllegalArgumentException e) {
+                return new SymbolsUpdateResult(false, safeMessage(e), safeAccountSymbolsConfiguration(accountId));
+            } catch (RuntimeException e) {
+                log.error("[accountId={}] 保存账户交易对配置失败: {}", safeProfileId(accountId), safeMessage(e));
+                return new SymbolsUpdateResult(false, "保存交易对配置失败", safeAccountSymbolsConfiguration(accountId));
+            }
+        } finally {
+            lock.unlock();
         }
     }
 

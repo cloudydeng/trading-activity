@@ -26,6 +26,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 
 /**
  * Durable, UTC-day aggregates for the small set of production metrics the bot needs.
@@ -42,6 +44,7 @@ public class DailyTradeStatsStore {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Connection connection;
+    private final ReentrantLock lock = new ReentrantLock();
 
     public DailyTradeStatsStore(BinanceProperties properties) {
         try {
@@ -53,6 +56,24 @@ public class DailyTradeStatsStore {
             log.info("每日交易统计已启用: {}", dbPath);
         } catch (Exception e) {
             throw new IllegalStateException("无法初始化每日交易统计数据库", e);
+        }
+    }
+
+    private <T> T withLock(Supplier<T> supplier) {
+        lock.lock();
+        try {
+            return supplier.get();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void withLock(Runnable action) {
+        lock.lock();
+        try {
+            action.run();
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -386,67 +407,71 @@ public class DailyTradeStatsStore {
         return result;
     }
 
-    public synchronized RecordResult recordTrade(String accountId, String accountAlias, String symbol,
-                                                  long orderId, long tradeId,
-                                                  String side, BigDecimal inventoryQuantity,
-                                                  BigDecimal quoteQuantity, BigDecimal commission,
-                                                  BigDecimal commissionQuoteEquivalent,
-                                                  BigDecimal economicFeeQuote, long tradeTimeMs) {
-        BigDecimal price = inventoryQuantity == null || inventoryQuantity.signum() <= 0 || quoteQuantity == null
-                ? BigDecimal.ZERO : quoteQuantity.divide(inventoryQuantity, MC);
-        return recordTrade(accountId, accountAlias, symbol, orderId, tradeId, side,
-                inventoryQuantity, inventoryQuantity, price, quoteQuantity, commission,
-                "", commissionQuoteEquivalent, economicFeeQuote, tradeTimeMs);
+    public RecordResult recordTrade(String accountId, String accountAlias, String symbol,
+                                    long orderId, long tradeId,
+                                    String side, BigDecimal inventoryQuantity,
+                                    BigDecimal quoteQuantity, BigDecimal commission,
+                                    BigDecimal commissionQuoteEquivalent,
+                                    BigDecimal economicFeeQuote, long tradeTimeMs) {
+        return withLock(() -> {
+            BigDecimal price = inventoryQuantity == null || inventoryQuantity.signum() <= 0 || quoteQuantity == null
+                    ? BigDecimal.ZERO : quoteQuantity.divide(inventoryQuantity, MC);
+            return recordTrade(accountId, accountAlias, symbol, orderId, tradeId, side,
+                    inventoryQuantity, inventoryQuantity, price, quoteQuantity, commission,
+                    "", commissionQuoteEquivalent, economicFeeQuote, tradeTimeMs);
+        });
     }
 
-    public synchronized RecordResult recordTrade(String accountId, String accountAlias, String symbol,
-                                                  long orderId, long tradeId,
-                                                  String side, BigDecimal inventoryQuantity,
-                                                  BigDecimal executionQuantity, BigDecimal price,
-                                                  BigDecimal quoteQuantity, BigDecimal commission,
-                                                  String commissionAsset,
-                                                  BigDecimal commissionQuoteEquivalent,
-                                                  BigDecimal economicFeeQuote, long tradeTimeMs) {
-        if (inventoryQuantity == null || inventoryQuantity.signum() <= 0
-                || executionQuantity == null || executionQuantity.signum() <= 0
-                || price == null || price.signum() <= 0
-                || quoteQuantity == null || quoteQuantity.signum() <= 0) return RecordResult.IGNORED;
-        LocalDate date = Instant.ofEpochMilli(tradeTimeMs > 0 ? tradeTimeMs : System.currentTimeMillis())
-                .atZone(ZoneOffset.UTC).toLocalDate();
-        String normalizedAccountId = normalizeAccountId(accountId);
-        String alias = normalizeAlias(accountAlias);
-        String normalizedSymbol = symbol.toUpperCase();
-        String tradeIdentity = orderId + ":" + (tradeId >= 0 ? Long.toString(tradeId)
-                : side + ":" + inventoryQuantity.toPlainString() + ":" + quoteQuantity.toPlainString()
-                + ":" + (commission == null ? "0" : commission.toPlainString()));
-        try {
-            connection.setAutoCommit(false);
-            boolean firstProcessing = insertProcessedTrade(
-                    normalizedAccountId, normalizedSymbol, tradeIdentity, date, tradeTimeMs);
-            insertTradeFill(normalizedAccountId, alias, normalizedSymbol, tradeIdentity, tradeId, orderId,
-                    side, price, executionQuantity, quoteQuantity, commission, commissionAsset,
-                    commissionQuoteEquivalent,
-                    date, tradeTimeMs);
-            if (!firstProcessing) {
+    public RecordResult recordTrade(String accountId, String accountAlias, String symbol,
+                                    long orderId, long tradeId,
+                                    String side, BigDecimal inventoryQuantity,
+                                    BigDecimal executionQuantity, BigDecimal price,
+                                    BigDecimal quoteQuantity, BigDecimal commission,
+                                    String commissionAsset,
+                                    BigDecimal commissionQuoteEquivalent,
+                                    BigDecimal economicFeeQuote, long tradeTimeMs) {
+        return withLock(() -> {
+            if (inventoryQuantity == null || inventoryQuantity.signum() <= 0
+                    || executionQuantity == null || executionQuantity.signum() <= 0
+                    || price == null || price.signum() <= 0
+                    || quoteQuantity == null || quoteQuantity.signum() <= 0) return RecordResult.IGNORED;
+            LocalDate date = Instant.ofEpochMilli(tradeTimeMs > 0 ? tradeTimeMs : System.currentTimeMillis())
+                    .atZone(ZoneOffset.UTC).toLocalDate();
+            String normalizedAccountId = normalizeAccountId(accountId);
+            String alias = normalizeAlias(accountAlias);
+            String normalizedSymbol = symbol.toUpperCase();
+            String tradeIdentity = orderId + ":" + (tradeId >= 0 ? Long.toString(tradeId)
+                    : side + ":" + inventoryQuantity.toPlainString() + ":" + quoteQuantity.toPlainString()
+                    + ":" + (commission == null ? "0" : commission.toPlainString()));
+            try {
+                connection.setAutoCommit(false);
+                boolean firstProcessing = insertProcessedTrade(
+                        normalizedAccountId, normalizedSymbol, tradeIdentity, date, tradeTimeMs);
+                insertTradeFill(normalizedAccountId, alias, normalizedSymbol, tradeIdentity, tradeId, orderId,
+                        side, price, executionQuantity, quoteQuantity, commission, commissionAsset,
+                        commissionQuoteEquivalent,
+                        date, tradeTimeMs);
+                if (!firstProcessing) {
+                    connection.commit();
+                    return RecordResult.DUPLICATE;
+                }
+                MutableStats stats = load(date, normalizedAccountId, normalizedSymbol);
+                if (stats == null) stats = newStats(date, normalizedAccountId, alias, normalizedSymbol);
+                stats.accountAlias = alias;
+                applyTrade(stats, side, inventoryQuantity, quoteQuantity, commission,
+                        commissionQuoteEquivalent, economicFeeQuote);
+                upsert(stats);
                 connection.commit();
-                return RecordResult.DUPLICATE;
+                return RecordResult.APPLIED;
+            } catch (Exception e) {
+                rollbackQuietly();
+                log.error("持久化每日交易统计失败: accountId={} alias={} symbol={} orderId={} tradeId={}",
+                        normalizedAccountId, alias, normalizedSymbol, orderId, tradeId, e);
+                return RecordResult.FAILED;
+            } finally {
+                setAutoCommitQuietly(true);
             }
-            MutableStats stats = load(date, normalizedAccountId, normalizedSymbol);
-            if (stats == null) stats = newStats(date, normalizedAccountId, alias, normalizedSymbol);
-            stats.accountAlias = alias;
-            applyTrade(stats, side, inventoryQuantity, quoteQuantity, commission,
-                    commissionQuoteEquivalent, economicFeeQuote);
-            upsert(stats);
-            connection.commit();
-            return RecordResult.APPLIED;
-        } catch (Exception e) {
-            rollbackQuietly();
-            log.error("持久化每日交易统计失败: accountId={} alias={} symbol={} orderId={} tradeId={}",
-                    normalizedAccountId, alias, normalizedSymbol, orderId, tradeId, e);
-            return RecordResult.FAILED;
-        } finally {
-            setAutoCommitQuietly(true);
-        }
+        });
     }
 
     private void insertTradeFill(String accountId, String accountAlias, String symbol,
@@ -483,24 +508,26 @@ public class DailyTradeStatsStore {
         }
     }
 
-    public synchronized java.util.OptionalLong latestTradeId(String accountId, String symbol, LocalDate date) {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT MAX(trade_id) FROM trade_fill
-                WHERE account_id=? AND symbol=? AND trade_date=? AND trade_id>=0
-                """)) {
-            statement.setString(1, normalizeAccountId(accountId));
-            statement.setString(2, normalizeSymbol(symbol));
-            statement.setString(3, date.toString());
-            try (ResultSet row = statement.executeQuery()) {
-                if (row.next()) {
-                    long value = row.getLong(1);
-                    if (!row.wasNull()) return java.util.OptionalLong.of(value);
+    public java.util.OptionalLong latestTradeId(String accountId, String symbol, LocalDate date) {
+        return withLock(() -> {
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT MAX(trade_id) FROM trade_fill
+                    WHERE account_id=? AND symbol=? AND trade_date=? AND trade_id>=0
+                    """)) {
+                statement.setString(1, normalizeAccountId(accountId));
+                statement.setString(2, normalizeSymbol(symbol));
+                statement.setString(3, date.toString());
+                try (ResultSet row = statement.executeQuery()) {
+                    if (row.next()) {
+                        long value = row.getLong(1);
+                        if (!row.wasNull()) return java.util.OptionalLong.of(value);
+                    }
                 }
+                return java.util.OptionalLong.empty();
+            } catch (SQLException e) {
+                throw new IllegalStateException("读取最后成交 ID 失败", e);
             }
-            return java.util.OptionalLong.empty();
-        } catch (SQLException e) {
-            throw new IllegalStateException("读取最后成交 ID 失败", e);
-        }
+        });
     }
 
     private boolean insertProcessedTrade(String accountId, String symbol, String tradeIdentity,
@@ -561,12 +588,12 @@ public class DailyTradeStatsStore {
         }
     }
 
-    public synchronized DailyStatsSnapshot today(String accountId, String accountAlias, String symbol) {
+    public DailyStatsSnapshot today(String accountId, String accountAlias, String symbol) {
         return snapshot(LocalDate.now(ZoneOffset.UTC), accountId, accountAlias, symbol);
     }
 
     /** Legacy-compatible lookup where the old alias becomes both immutable id and display alias. */
-    public synchronized DailyStatsSnapshot today(String accountId, String symbol) {
+    public DailyStatsSnapshot today(String accountId, String symbol) {
         return today(accountId, accountId, symbol);
     }
 
@@ -574,69 +601,75 @@ public class DailyTradeStatsStore {
      * Normalizes the durable position ledger after the exchange has proved the account flat.
      * Any remaining cost is conservatively realized as a loss instead of blocking the engine.
      */
-    public synchronized boolean reconcileFlatDust(String accountId, String symbol, BigDecimal stepSize) {
-        LocalDate date = LocalDate.now(ZoneOffset.UTC);
-        String normalizedAccountId = normalizeAccountId(accountId);
-        String normalizedSymbol = symbol.toUpperCase();
-        try {
-            connection.setAutoCommit(false);
-            MutableStats stats = load(date, normalizedAccountId, normalizedSymbol);
-            if (stats == null || stats.positionQty.signum() == 0) {
-                connection.rollback();
-                return true;
-            }
-            if (stepSize != null && stepSize.signum() > 0 && stats.positionQty.compareTo(stepSize) >= 0) {
-                log.warn("交易所已确认空仓，但每日账本仍记录可交易持仓；按残余成本记亏并归零: accountId={} symbol={} qty={} cost={}",
-                        normalizedAccountId, normalizedSymbol, stats.positionQty, stats.positionCostQuote);
-            }
-            stats.realizedGrossPnl = stats.realizedGrossPnl.subtract(stats.positionCostQuote);
-            stats.positionQty = BigDecimal.ZERO;
-            stats.positionCostQuote = BigDecimal.ZERO;
-            stats.roundTrips++;
-            upsert(stats);
-            connection.commit();
-            return true;
-        } catch (Exception e) {
-            rollbackQuietly();
-            log.error("每日账本粉尘归零失败: accountId={} symbol={}", normalizedAccountId, normalizedSymbol, e);
-            return false;
-        } finally {
-            setAutoCommitQuietly(true);
-        }
-    }
-
-    public synchronized DailyStatsSnapshot snapshot(LocalDate date, String accountId, String accountAlias,
-                                                    String symbol) {
-        try {
+    public boolean reconcileFlatDust(String accountId, String symbol, BigDecimal stepSize) {
+        return withLock(() -> {
+            LocalDate date = LocalDate.now(ZoneOffset.UTC);
             String normalizedAccountId = normalizeAccountId(accountId);
-            MutableStats stats = load(date, normalizedAccountId, symbol.toUpperCase());
-            return stats == null ? DailyStatsSnapshot.empty(date, normalizedAccountId,
-                    normalizeAlias(accountAlias), symbol.toUpperCase())
-                    : stats.snapshot();
-        } catch (Exception e) {
-            throw new IllegalStateException("读取每日交易统计失败", e);
-        }
+            String normalizedSymbol = symbol.toUpperCase();
+            try {
+                connection.setAutoCommit(false);
+                MutableStats stats = load(date, normalizedAccountId, normalizedSymbol);
+                if (stats == null || stats.positionQty.signum() == 0) {
+                    connection.rollback();
+                    return true;
+                }
+                if (stepSize != null && stepSize.signum() > 0 && stats.positionQty.compareTo(stepSize) >= 0) {
+                    log.warn("交易所已确认空仓，但每日账本仍记录可交易持仓；按残余成本记亏并归零: accountId={} symbol={} qty={} cost={}",
+                            normalizedAccountId, normalizedSymbol, stats.positionQty, stats.positionCostQuote);
+                }
+                stats.realizedGrossPnl = stats.realizedGrossPnl.subtract(stats.positionCostQuote);
+                stats.positionQty = BigDecimal.ZERO;
+                stats.positionCostQuote = BigDecimal.ZERO;
+                stats.roundTrips++;
+                upsert(stats);
+                connection.commit();
+                return true;
+            } catch (Exception e) {
+                rollbackQuietly();
+                log.error("每日账本粉尘归零失败: accountId={} symbol={}", normalizedAccountId, normalizedSymbol, e);
+                return false;
+            } finally {
+                setAutoCommitQuietly(true);
+            }
+        });
     }
 
-    public synchronized DailyStatsSnapshot snapshot(LocalDate date, String accountId, String symbol) {
+    public DailyStatsSnapshot snapshot(LocalDate date, String accountId, String accountAlias,
+                                       String symbol) {
+        return withLock(() -> {
+            try {
+                String normalizedAccountId = normalizeAccountId(accountId);
+                MutableStats stats = load(date, normalizedAccountId, symbol.toUpperCase());
+                return stats == null ? DailyStatsSnapshot.empty(date, normalizedAccountId,
+                        normalizeAlias(accountAlias), symbol.toUpperCase())
+                        : stats.snapshot();
+            } catch (Exception e) {
+                throw new IllegalStateException("读取每日交易统计失败", e);
+            }
+        });
+    }
+
+    public DailyStatsSnapshot snapshot(LocalDate date, String accountId, String symbol) {
         return snapshot(date, accountId, accountId, symbol);
     }
 
-    public synchronized List<DailyStatsSnapshot> recent(String accountId, String symbol, int limit) {
-        int safeLimit = Math.max(1, Math.min(limit, 90));
-        List<DailyStatsSnapshot> result = new ArrayList<>();
-        String sql = "SELECT * FROM daily_trade_stats WHERE account_id=? AND symbol=? ORDER BY trade_date DESC LIMIT ?";
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, normalizeAccountId(accountId));
-            statement.setString(2, symbol.toUpperCase());
-            statement.setInt(3, safeLimit);
-            try (ResultSet rows = statement.executeQuery()) {
-                while (rows.next()) result.add(fromRow(rows).snapshot());
+    public List<DailyStatsSnapshot> recent(String accountId, String symbol, int limit) {
+        return withLock(() -> {
+            int safeLimit = Math.max(1, Math.min(limit, 90));
+            List<DailyStatsSnapshot> result = new ArrayList<>();
+            String sql = "SELECT * FROM daily_trade_stats WHERE account_id=? AND symbol=? ORDER BY trade_date DESC LIMIT ?";
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, normalizeAccountId(accountId));
+                statement.setString(2, symbol.toUpperCase());
+                statement.setInt(3, safeLimit);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) result.add(fromRow(rows).snapshot());
+                }
+                return result;
+            } catch (Exception e) {
+                throw new IllegalStateException("读取历史每日交易统计失败", e);
             }
-            return result;
-        } catch (Exception e) {
-            throw new IllegalStateException("读取历史每日交易统计失败", e);
-        }
+        });
     }
 
     /**
@@ -644,244 +677,266 @@ public class DailyTradeStatsStore {
      * days that contain a fill, so the dashboard must not mistake a sparse result for a shorter
      * reporting period.
      */
-    public synchronized List<DailyStatsSnapshot> recentCalendar(String accountId, String accountAlias,
-                                                                  String symbol, int days) {
-        int safeDays = Math.max(1, Math.min(days, 90));
-        String normalizedAccountId = normalizeAccountId(accountId);
-        String normalizedAlias = normalizeAlias(accountAlias);
-        String normalizedSymbol = symbol.toUpperCase();
-        LocalDate end = LocalDate.now(ZoneOffset.UTC);
-        LocalDate start = end.minusDays(safeDays - 1L);
-        Map<LocalDate, DailyStatsSnapshot> stored = new HashMap<>();
-        String sql = "SELECT * FROM daily_trade_stats WHERE account_id=? AND symbol=? "
-                + "AND trade_date>=? AND trade_date<=? ORDER BY trade_date DESC";
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, normalizedAccountId);
-            statement.setString(2, normalizedSymbol);
-            statement.setString(3, start.toString());
-            statement.setString(4, end.toString());
-            try (ResultSet rows = statement.executeQuery()) {
-                while (rows.next()) {
-                    DailyStatsSnapshot snapshot = fromRow(rows).snapshot();
-                    stored.put(snapshot.date(), snapshot);
+    public List<DailyStatsSnapshot> recentCalendar(String accountId, String accountAlias,
+                                                   String symbol, int days) {
+        return withLock(() -> {
+            int safeDays = Math.max(1, Math.min(days, 90));
+            String normalizedAccountId = normalizeAccountId(accountId);
+            String normalizedAlias = normalizeAlias(accountAlias);
+            String normalizedSymbol = symbol.toUpperCase();
+            LocalDate end = LocalDate.now(ZoneOffset.UTC);
+            LocalDate start = end.minusDays(safeDays - 1L);
+            Map<LocalDate, DailyStatsSnapshot> stored = new HashMap<>();
+            String sql = "SELECT * FROM daily_trade_stats WHERE account_id=? AND symbol=? "
+                    + "AND trade_date>=? AND trade_date<=? ORDER BY trade_date DESC";
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, normalizedAccountId);
+                statement.setString(2, normalizedSymbol);
+                statement.setString(3, start.toString());
+                statement.setString(4, end.toString());
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        DailyStatsSnapshot snapshot = fromRow(rows).snapshot();
+                        stored.put(snapshot.date(), snapshot);
+                    }
                 }
+            } catch (Exception e) {
+                throw new IllegalStateException("读取日历交易统计失败", e);
             }
-        } catch (Exception e) {
-            throw new IllegalStateException("读取日历交易统计失败", e);
-        }
-        List<DailyStatsSnapshot> result = new ArrayList<>(safeDays);
-        for (int i = 0; i < safeDays; i++) {
-            LocalDate date = end.minusDays(i);
-            result.add(stored.getOrDefault(date,
-                    DailyStatsSnapshot.empty(date, normalizedAccountId, normalizedAlias, normalizedSymbol)));
-        }
-        return result;
+            List<DailyStatsSnapshot> result = new ArrayList<>(safeDays);
+            for (int i = 0; i < safeDays; i++) {
+                LocalDate date = end.minusDays(i);
+                result.add(stored.getOrDefault(date,
+                        DailyStatsSnapshot.empty(date, normalizedAccountId, normalizedAlias, normalizedSymbol)));
+            }
+            return result;
+        });
     }
 
     /** Aggregates every symbol traded by one account during the requested UTC-day window. */
-    public synchronized AccountVolumeSummary accountVolumeSummary(String accountId, String accountAlias,
-                                                                    int days) {
-        int safeDays = Math.max(1, Math.min(days, 90));
-        String normalizedAccountId = normalizeAccountId(accountId);
-        String normalizedAlias = normalizeAlias(accountAlias);
-        LocalDate end = LocalDate.now(ZoneOffset.UTC);
-        LocalDate start = end.minusDays(safeDays - 1L);
-        BigDecimal buy = BigDecimal.ZERO;
-        BigDecimal sell = BigDecimal.ZERO;
-        BigDecimal total = BigDecimal.ZERO;
-        BigDecimal commission = BigDecimal.ZERO;
-        BigDecimal economicFee = BigDecimal.ZERO;
-        BigDecimal grossPnl = BigDecimal.ZERO;
-        int tradeCount = 0;
-        int roundTrips = 0;
-        boolean commissionComplete = true;
-        Set<String> symbols = new LinkedHashSet<>();
-        String sql = "SELECT * FROM daily_trade_stats WHERE account_id=? AND trade_date>=? "
-                + "AND trade_date<=? ORDER BY trade_date DESC, symbol";
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, normalizedAccountId);
-            statement.setString(2, start.toString());
-            statement.setString(3, end.toString());
-            try (ResultSet rows = statement.executeQuery()) {
-                while (rows.next()) {
-                    MutableStats stats = fromRow(rows);
-                    symbols.add(stats.symbol);
-                    buy = buy.add(stats.buyVolume);
-                    sell = sell.add(stats.sellVolume);
-                    total = total.add(stats.totalVolume);
-                    commission = commission.add(stats.commissionQuote);
-                    economicFee = economicFee.add(stats.economicFeeQuote);
-                    grossPnl = grossPnl.add(stats.realizedGrossPnl);
-                    tradeCount += stats.tradeCount;
-                    roundTrips += stats.roundTrips;
-                    commissionComplete &= stats.commissionComplete;
+    public AccountVolumeSummary accountVolumeSummary(String accountId, String accountAlias, int days) {
+        return withLock(() -> {
+            int safeDays = Math.max(1, Math.min(days, 90));
+            String normalizedAccountId = normalizeAccountId(accountId);
+            String normalizedAlias = normalizeAlias(accountAlias);
+            LocalDate end = LocalDate.now(ZoneOffset.UTC);
+            LocalDate start = end.minusDays(safeDays - 1L);
+            BigDecimal buy = BigDecimal.ZERO;
+            BigDecimal sell = BigDecimal.ZERO;
+            BigDecimal total = BigDecimal.ZERO;
+            BigDecimal commission = BigDecimal.ZERO;
+            BigDecimal economicFee = BigDecimal.ZERO;
+            BigDecimal grossPnl = BigDecimal.ZERO;
+            int tradeCount = 0;
+            int roundTrips = 0;
+            boolean commissionComplete = true;
+            Set<String> symbols = new LinkedHashSet<>();
+            String sql = "SELECT * FROM daily_trade_stats WHERE account_id=? AND trade_date>=? "
+                    + "AND trade_date<=? ORDER BY trade_date DESC, symbol";
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, normalizedAccountId);
+                statement.setString(2, start.toString());
+                statement.setString(3, end.toString());
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        MutableStats stats = fromRow(rows);
+                        symbols.add(stats.symbol);
+                        buy = buy.add(stats.buyVolume);
+                        sell = sell.add(stats.sellVolume);
+                        total = total.add(stats.totalVolume);
+                        commission = commission.add(stats.commissionQuote);
+                        economicFee = economicFee.add(stats.economicFeeQuote);
+                        grossPnl = grossPnl.add(stats.realizedGrossPnl);
+                        tradeCount += stats.tradeCount;
+                        roundTrips += stats.roundTrips;
+                        commissionComplete &= stats.commissionComplete;
+                    }
                 }
+            } catch (Exception e) {
+                throw new IllegalStateException("读取账户交易量汇总失败", e);
             }
-        } catch (Exception e) {
-            throw new IllegalStateException("读取账户交易量汇总失败", e);
-        }
-        BigDecimal costPerMillion = commissionComplete && total.signum() > 0
-                ? commission.multiply(ONE_MILLION).divide(total, MC) : null;
-        return new AccountVolumeSummary(normalizedAccountId, normalizedAlias, start, end,
-                List.copyOf(symbols), buy, sell, total, commission, costPerMillion,
-                grossPnl, grossPnl.subtract(economicFee), tradeCount, roundTrips, commissionComplete);
+            BigDecimal costPerMillion = commissionComplete && total.signum() > 0
+                    ? commission.multiply(ONE_MILLION).divide(total, MC) : null;
+            return new AccountVolumeSummary(normalizedAccountId, normalizedAlias, start, end,
+                    List.copyOf(symbols), buy, sell, total, commission, costPerMillion,
+                    grossPnl, grossPnl.subtract(economicFee), tradeCount, roundTrips, commissionComplete);
+        });
     }
 
     /** Returns one ten-day volume row per account and symbol, excluding symbols with no fills. */
-    public synchronized List<AccountSymbolVolumeSummary> accountSymbolVolumeSummaries(String accountId,
-                                                                                        String accountAlias,
-                                                                                        int days) {
-        int safeDays = Math.max(1, Math.min(days, 90));
-        String normalizedAccountId = normalizeAccountId(accountId);
-        String normalizedAlias = normalizeAlias(accountAlias);
-        LocalDate end = LocalDate.now(ZoneOffset.UTC);
-        LocalDate start = end.minusDays(safeDays - 1L);
-        Map<String, MutableSymbolSummary> grouped = new LinkedHashMap<>();
-        String sql = "SELECT * FROM daily_trade_stats WHERE account_id=? AND trade_date>=? "
-                + "AND trade_date<=? ORDER BY symbol, trade_date DESC";
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, normalizedAccountId);
-            statement.setString(2, start.toString());
-            statement.setString(3, end.toString());
-            try (ResultSet rows = statement.executeQuery()) {
-                while (rows.next()) {
-                    MutableStats stats = fromRow(rows);
-                    MutableSymbolSummary summary = grouped.computeIfAbsent(stats.symbol,
-                            symbol -> new MutableSymbolSummary(normalizedAccountId, normalizedAlias,
-                                    start, end, symbol));
-                    summary.add(stats);
+    public List<AccountSymbolVolumeSummary> accountSymbolVolumeSummaries(String accountId,
+                                                                         String accountAlias,
+                                                                         int days) {
+        return withLock(() -> {
+            int safeDays = Math.max(1, Math.min(days, 90));
+            String normalizedAccountId = normalizeAccountId(accountId);
+            String normalizedAlias = normalizeAlias(accountAlias);
+            LocalDate end = LocalDate.now(ZoneOffset.UTC);
+            LocalDate start = end.minusDays(safeDays - 1L);
+            Map<String, MutableSymbolSummary> grouped = new LinkedHashMap<>();
+            String sql = "SELECT * FROM daily_trade_stats WHERE account_id=? AND trade_date>=? "
+                    + "AND trade_date<=? ORDER BY symbol, trade_date DESC";
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, normalizedAccountId);
+                statement.setString(2, start.toString());
+                statement.setString(3, end.toString());
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        MutableStats stats = fromRow(rows);
+                        MutableSymbolSummary summary = grouped.computeIfAbsent(stats.symbol,
+                                symbol -> new MutableSymbolSummary(normalizedAccountId, normalizedAlias,
+                                        start, end, symbol));
+                        summary.add(stats);
+                    }
                 }
+            } catch (Exception e) {
+                throw new IllegalStateException("读取账户交易对成交量汇总失败", e);
             }
-        } catch (Exception e) {
-            throw new IllegalStateException("读取账户交易对成交量汇总失败", e);
-        }
-        return grouped.values().stream().filter(summary -> summary.total.signum() > 0)
-                .map(MutableSymbolSummary::snapshot).toList();
+            return grouped.values().stream().filter(summary -> summary.total.signum() > 0)
+                    .map(MutableSymbolSummary::snapshot).toList();
+        });
     }
 
-    public synchronized void saveActiveSymbol(String accountId, String symbol) {
-        saveSetting("active_symbol:" + normalizeAccountId(accountId), symbol.toUpperCase(), "保存当前交易对失败");
+    public void saveActiveSymbol(String accountId, String symbol) {
+        withLock(() -> saveSetting("active_symbol:" + normalizeAccountId(accountId),
+                symbol.toUpperCase(), "保存当前交易对失败"));
     }
 
-    public synchronized java.util.Optional<String> loadActiveSymbol(String accountId) {
-        try {
-            java.util.Optional<String> scoped = loadSetting("active_symbol:" + normalizeAccountId(accountId));
-            return scoped.isPresent() ? scoped : loadSetting("active_symbol");
-        } catch (SQLException e) {
-            throw new IllegalStateException("读取当前交易对失败", e);
-        }
+    public java.util.Optional<String> loadActiveSymbol(String accountId) {
+        return withLock(() -> {
+            try {
+                java.util.Optional<String> scoped = loadSetting("active_symbol:" + normalizeAccountId(accountId));
+                return scoped.isPresent() ? scoped : loadSetting("active_symbol");
+            } catch (SQLException e) {
+                throw new IllegalStateException("读取当前交易对失败", e);
+            }
+        });
     }
 
     /** Stores the non-secret account symbol list edited from the dashboard. */
-    public synchronized void saveAccountSymbols(String accountId, List<String> symbols) {
-        List<String> normalized = normalizeSymbols(symbols);
-        try {
-            saveSetting(ACCOUNT_SYMBOLS_PREFIX + normalizeAccountId(accountId),
-                    objectMapper.writeValueAsString(normalized), "保存账户交易对配置失败");
-        } catch (Exception e) {
-            if (e instanceof IllegalStateException state) throw state;
-            throw new IllegalStateException("保存账户交易对配置失败", e);
-        }
+    public void saveAccountSymbols(String accountId, List<String> symbols) {
+        withLock(() -> {
+            List<String> normalized = normalizeSymbols(symbols);
+            try {
+                saveSetting(ACCOUNT_SYMBOLS_PREFIX + normalizeAccountId(accountId),
+                        objectMapper.writeValueAsString(normalized), "保存账户交易对配置失败");
+            } catch (Exception e) {
+                if (e instanceof IllegalStateException state) throw state;
+                throw new IllegalStateException("保存账户交易对配置失败", e);
+            }
+        });
     }
 
     /** A persisted dashboard override takes precedence over the credential profile's initial symbols. */
-    public synchronized java.util.Optional<List<String>> loadAccountSymbols(String accountId) {
-        try {
-            java.util.Optional<String> payload = loadSetting(
-                    ACCOUNT_SYMBOLS_PREFIX + normalizeAccountId(accountId));
-            if (payload.isEmpty()) return java.util.Optional.empty();
-            List<String> values = objectMapper.readValue(payload.get(), objectMapper.getTypeFactory()
-                    .constructCollectionType(List.class, String.class));
-            return java.util.Optional.of(normalizeSymbols(values));
-        } catch (Exception e) {
-            throw new IllegalStateException("读取账户交易对配置失败", e);
-        }
+    public java.util.Optional<List<String>> loadAccountSymbols(String accountId) {
+        return withLock(() -> {
+            try {
+                java.util.Optional<String> payload = loadSetting(
+                        ACCOUNT_SYMBOLS_PREFIX + normalizeAccountId(accountId));
+                if (payload.isEmpty()) return java.util.Optional.empty();
+                List<String> values = objectMapper.readValue(payload.get(), objectMapper.getTypeFactory()
+                        .constructCollectionType(List.class, String.class));
+                return java.util.Optional.of(normalizeSymbols(values));
+            } catch (Exception e) {
+                throw new IllegalStateException("读取账户交易对配置失败", e);
+            }
+        });
     }
 
     /** Persists only the non-secret strategy profile for one account and symbol. */
-    public synchronized void saveStrategyOverride(String accountId, String symbol,
-                                                   BinanceProperties.SymbolStrategyProfile profile) {
-        if (profile == null) throw new IllegalArgumentException("策略配置不能为空");
-        String normalizedSymbol = normalizeSymbol(symbol);
-        try {
-            saveSetting(STRATEGY_OVERRIDE_PREFIX + normalizeAccountId(accountId) + ":" + normalizedSymbol,
-                    objectMapper.writeValueAsString(profile), "保存策略配置失败");
-        } catch (Exception e) {
-            if (e instanceof IllegalStateException state) throw state;
-            throw new IllegalStateException("保存策略配置失败", e);
-        }
+    public void saveStrategyOverride(String accountId, String symbol,
+                                     BinanceProperties.SymbolStrategyProfile profile) {
+        withLock(() -> {
+            if (profile == null) throw new IllegalArgumentException("策略配置不能为空");
+            String normalizedSymbol = normalizeSymbol(symbol);
+            try {
+                saveSetting(STRATEGY_OVERRIDE_PREFIX + normalizeAccountId(accountId) + ":" + normalizedSymbol,
+                        objectMapper.writeValueAsString(profile), "保存策略配置失败");
+            } catch (Exception e) {
+                if (e instanceof IllegalStateException state) throw state;
+                throw new IllegalStateException("保存策略配置失败", e);
+            }
+        });
     }
 
     /** Loads persisted strategy overrides without ever logging their JSON contents. */
-    public synchronized Map<String, BinanceProperties.SymbolStrategyProfile> loadStrategyOverrides(
+    public Map<String, BinanceProperties.SymbolStrategyProfile> loadStrategyOverrides(
             String accountId) {
-        String prefix = STRATEGY_OVERRIDE_PREFIX + normalizeAccountId(accountId) + ":";
-        Map<String, BinanceProperties.SymbolStrategyProfile> result = new LinkedHashMap<>();
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT setting_key, setting_value FROM runtime_setting WHERE setting_key LIKE ? ESCAPE '\\'")) {
-            String escapedPrefix = prefix.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%");
-            statement.setString(1, escapedPrefix + "%");
-            try (ResultSet rows = statement.executeQuery()) {
-                while (rows.next()) {
-                    String key = rows.getString("setting_key");
-                    String symbol = key.substring(prefix.length()).toUpperCase();
-                    if (!symbol.matches("[A-Z0-9]{5,20}") || !symbol.endsWith("USDT")) continue;
-                    try {
-                        BinanceProperties.SymbolStrategyProfile profile = objectMapper.readValue(
-                                rows.getString("setting_value"), BinanceProperties.SymbolStrategyProfile.class);
-                        if (profile != null) result.put(symbol, profile);
-                    } catch (Exception invalid) {
-                        log.warn("忽略无效的持久化策略配置: accountId={} symbol={}",
-                                normalizeAccountId(accountId), symbol);
+        return withLock(() -> {
+            String prefix = STRATEGY_OVERRIDE_PREFIX + normalizeAccountId(accountId) + ":";
+            Map<String, BinanceProperties.SymbolStrategyProfile> result = new LinkedHashMap<>();
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT setting_key, setting_value FROM runtime_setting WHERE setting_key LIKE ? ESCAPE '\\'")) {
+                String escapedPrefix = prefix.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%");
+                statement.setString(1, escapedPrefix + "%");
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        String key = rows.getString("setting_key");
+                        String symbol = key.substring(prefix.length()).toUpperCase();
+                        if (!symbol.matches("[A-Z0-9]{5,20}") || !symbol.endsWith("USDT")) continue;
+                        try {
+                            BinanceProperties.SymbolStrategyProfile profile = objectMapper.readValue(
+                                    rows.getString("setting_value"), BinanceProperties.SymbolStrategyProfile.class);
+                            if (profile != null) result.put(symbol, profile);
+                        } catch (Exception invalid) {
+                            log.warn("忽略无效的持久化策略配置: accountId={} symbol={}",
+                                    normalizeAccountId(accountId), symbol);
+                        }
                     }
                 }
+                return Map.copyOf(result);
+            } catch (SQLException e) {
+                throw new IllegalStateException("读取持久化策略配置失败", e);
             }
-            return Map.copyOf(result);
-        } catch (SQLException e) {
-            throw new IllegalStateException("读取持久化策略配置失败", e);
-        }
+        });
     }
 
     /** Persists non-secret handoff state so a restarted process can resume its own active sell order. */
-    public synchronized void saveRuntimeState(String accountId, String symbol, RuntimeState state) {
-        if (state == null) throw new IllegalArgumentException("运行状态不能为空");
-        String normalizedAccountId = normalizeAccountId(accountId);
-        String normalizedSymbol = normalizeSymbol(symbol);
-        try {
-            saveSetting(RUNTIME_STATE_PREFIX + normalizedAccountId + ":" + normalizedSymbol,
-                    objectMapper.writeValueAsString(state), "保存运行状态失败");
-        } catch (Exception e) {
-            if (e instanceof IllegalStateException stateException) throw stateException;
-            throw new IllegalStateException("保存运行状态失败", e);
-        }
+    public void saveRuntimeState(String accountId, String symbol, RuntimeState state) {
+        withLock(() -> {
+            if (state == null) throw new IllegalArgumentException("运行状态不能为空");
+            String normalizedAccountId = normalizeAccountId(accountId);
+            String normalizedSymbol = normalizeSymbol(symbol);
+            try {
+                saveSetting(RUNTIME_STATE_PREFIX + normalizedAccountId + ":" + normalizedSymbol,
+                        objectMapper.writeValueAsString(state), "保存运行状态失败");
+            } catch (Exception e) {
+                if (e instanceof IllegalStateException stateException) throw stateException;
+                throw new IllegalStateException("保存运行状态失败", e);
+            }
+        });
     }
 
-    public synchronized java.util.Optional<RuntimeState> loadRuntimeState(String accountId, String symbol) {
-        String normalizedAccountId = normalizeAccountId(accountId);
-        String normalizedSymbol = normalizeSymbol(symbol);
-        try {
-            java.util.Optional<String> payload = loadSetting(
-                    RUNTIME_STATE_PREFIX + normalizedAccountId + ":" + normalizedSymbol);
-            if (payload.isEmpty()) return java.util.Optional.empty();
-            RuntimeState state = objectMapper.readValue(payload.get(), RuntimeState.class);
-            if (state == null || !normalizedAccountId.equals(normalizeAccountId(state.accountId()))
-                    || !normalizedSymbol.equals(normalizeSymbol(state.symbol()))) {
-                log.warn("忽略账号或交易对不匹配的运行状态快照: accountId={} symbol={}",
-                        normalizedAccountId, normalizedSymbol);
+    public java.util.Optional<RuntimeState> loadRuntimeState(String accountId, String symbol) {
+        return withLock(() -> {
+            String normalizedAccountId = normalizeAccountId(accountId);
+            String normalizedSymbol = normalizeSymbol(symbol);
+            try {
+                java.util.Optional<String> payload = loadSetting(
+                        RUNTIME_STATE_PREFIX + normalizedAccountId + ":" + normalizedSymbol);
+                if (payload.isEmpty()) return java.util.Optional.empty();
+                RuntimeState state = objectMapper.readValue(payload.get(), RuntimeState.class);
+                if (state == null || !normalizedAccountId.equals(normalizeAccountId(state.accountId()))
+                        || !normalizedSymbol.equals(normalizeSymbol(state.symbol()))) {
+                    log.warn("忽略账号或交易对不匹配的运行状态快照: accountId={} symbol={}",
+                            normalizedAccountId, normalizedSymbol);
+                    return java.util.Optional.empty();
+                }
+                return java.util.Optional.of(state);
+            } catch (Exception e) {
+                log.warn("忽略无效的运行状态快照: accountId={} symbol={}", normalizedAccountId, normalizedSymbol);
                 return java.util.Optional.empty();
             }
-            return java.util.Optional.of(state);
-        } catch (Exception e) {
-            log.warn("忽略无效的运行状态快照: accountId={} symbol={}", normalizedAccountId, normalizedSymbol);
-            return java.util.Optional.empty();
-        }
+        });
     }
 
-    public synchronized void clearRuntimeState(String accountId, String symbol) {
-        String normalizedAccountId = normalizeAccountId(accountId);
-        String normalizedSymbol = normalizeSymbol(symbol);
-        deleteSetting(RUNTIME_STATE_PREFIX + normalizedAccountId + ":" + normalizedSymbol,
-                "清除运行状态失败");
+    public void clearRuntimeState(String accountId, String symbol) {
+        withLock(() -> {
+            String normalizedAccountId = normalizeAccountId(accountId);
+            String normalizedSymbol = normalizeSymbol(symbol);
+            deleteSetting(RUNTIME_STATE_PREFIX + normalizedAccountId + ":" + normalizedSymbol,
+                    "清除运行状态失败");
+        });
     }
 
     private String normalizeSymbol(String symbol) {
@@ -1039,8 +1094,10 @@ public class DailyTradeStatsStore {
     private void setAutoCommitQuietly(boolean value) { try { connection.setAutoCommit(value); } catch (SQLException ignored) { } }
 
     @PreDestroy
-    public synchronized void close() {
-        try { connection.close(); } catch (SQLException e) { log.warn("关闭每日统计数据库失败", e); }
+    public void close() {
+        withLock(() -> {
+            try { connection.close(); } catch (SQLException e) { log.warn("关闭每日统计数据库失败", e); }
+        });
     }
 
     public enum RecordResult { APPLIED, DUPLICATE, IGNORED, FAILED }

@@ -6,6 +6,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 
 import java.util.function.LongSupplier;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Coordinates Binance REQUEST_WEIGHT for every API key using this JVM's public IP.
@@ -17,7 +18,7 @@ public class BinanceIpRateLimitCoordinator {
     static final int DEFAULT_LIMIT_1M = 6_000;
     static final double ENTRY_SAFETY_RATIO = 0.80;
 
-    private final Object monitor = new Object();
+    private final ReentrantLock lock = new ReentrantLock();
     private final LongSupplier clock;
     private long minuteBucket = -1;
     private int usedWeight1m;
@@ -34,7 +35,8 @@ public class BinanceIpRateLimitCoordinator {
     /** New entries stop at 80% capacity, preserving headroom for exits and reconciliation. */
     public Permit tryAcquireEntryRequest(int weight) {
         int normalizedWeight = Math.max(1, weight);
-        synchronized (monitor) {
+        lock.lock();
+        try {
             long now = clock.getAsLong();
             rotateWindow(now);
             int safeLimit = safeLimit(requestWeightLimit1m);
@@ -44,14 +46,19 @@ public class BinanceIpRateLimitCoordinator {
             }
             usedWeight1m += normalizedWeight;
             return new Permit(true, usedWeight1m, requestWeightLimit1m, safeLimit, 0);
+        } finally {
+            lock.unlock();
         }
     }
 
     /** Safety-critical exits and reconciliation are never blocked by the entry reserve. */
     public void reserveSafetyRequest(int weight) {
-        synchronized (monitor) {
+        lock.lock();
+        try {
             rotateWindow(clock.getAsLong());
             usedWeight1m += Math.max(1, weight);
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -66,9 +73,12 @@ public class BinanceIpRateLimitCoordinator {
     }
 
     void recordExchangeWeight(int weight) {
-        synchronized (monitor) {
+        lock.lock();
+        try {
             rotateWindow(clock.getAsLong());
             usedWeight1m = Math.max(usedWeight1m, Math.max(0, weight));
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -80,21 +90,27 @@ public class BinanceIpRateLimitCoordinator {
                     || rateLimit.path("intervalNum").asInt() != 1) continue;
             int discovered = rateLimit.path("limit").asInt(0);
             if (discovered <= 0) return;
-            synchronized (monitor) {
+            lock.lock();
+            try {
                 if (requestWeightLimit1m != discovered) {
                     log.info("Binance IP 请求权重上限更新: {}/min -> {}/min",
                             requestWeightLimit1m, discovered);
                     requestWeightLimit1m = discovered;
                 }
+            } finally {
+                lock.unlock();
             }
             return;
         }
     }
 
     public Snapshot snapshot() {
-        synchronized (monitor) {
+        lock.lock();
+        try {
             rotateWindow(clock.getAsLong());
             return new Snapshot(usedWeight1m, requestWeightLimit1m, safeLimit(requestWeightLimit1m));
+        } finally {
+            lock.unlock();
         }
     }
 
