@@ -1127,10 +1127,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 ? currentEntryAverageExecutionPrice() : null;
         BigDecimal notificationEntryQuote = notificationEntryPrice == null
                 ? null : notificationEntryPrice.multiply(quantity);
+        TradingRiskGuard.RiskSnapshot preFillRisk = notificationEntryPrice == null ? null : riskGuard.snapshot();
+        Long notificationEntryTime = preFillRisk != null && preFillRisk.positionOpenedAtMs() > 0
+                ? preFillRisk.positionOpenedAtMs() : null;
         notificationService.notifyFill(new FillNotification(accountId, accountAlias,
                 properties.getStrategy().getSymbol(), side, orderId, tradeId,
                 clientOrderId == null ? "" : clientOrderId, quantity, price,
-                quoteQuantity, notificationEntryPrice, notificationEntryQuote,
+                quoteQuantity, notificationEntryPrice, notificationEntryQuote, notificationEntryTime,
                 commission, commissionAsset, tradeTimeMs));
         if ("BUY".equalsIgnoreCase(side)) {
             filledEntryQuantity.accumulateAndGet(trade.quantity(), BigDecimal::add);
