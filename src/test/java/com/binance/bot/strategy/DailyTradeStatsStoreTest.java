@@ -13,9 +13,34 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class DailyTradeStatsStoreTest {
     @TempDir Path tempDir;
+
+    @Test
+    void persistsNormalizedAccountSymbolsAcrossRestart() {
+        BinanceProperties properties = properties();
+        DailyTradeStatsStore first = new DailyTradeStatsStore(properties);
+        first.saveAccountSymbols("account-a", List.of(" promusdt ", "SAHARAUSDT", "PROMUSDT"));
+        first.close();
+
+        DailyTradeStatsStore restarted = new DailyTradeStatsStore(properties());
+        assertEquals(List.of("PROMUSDT", "SAHARAUSDT"),
+                restarted.loadAccountSymbols("account-a").orElseThrow());
+        assertEquals(true, restarted.loadAccountSymbols("account-b").isEmpty());
+        restarted.close();
+    }
+
+    @Test
+    void rejectsEmptyOrOversizedAccountSymbolLists() {
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
+
+        assertThrows(IllegalArgumentException.class, () -> store.saveAccountSymbols("account-a", List.of()));
+        assertThrows(IllegalArgumentException.class, () -> store.saveAccountSymbols("account-a",
+                List.of("AUSDT", "BUSDT", "CUSDT", "DUSDT", "EUSDT", "FUSDT")));
+        store.close();
+    }
 
     @Test
     void persistsDailyEconomicsAndDeduplicatesTradesAcrossRestart() throws Exception {

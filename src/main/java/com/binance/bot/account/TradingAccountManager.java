@@ -1,6 +1,7 @@
 package com.binance.bot.account;
 
 import com.binance.bot.config.BinanceProperties;
+import com.binance.bot.strategy.DailyTradeStatsStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
@@ -25,13 +26,16 @@ import java.util.concurrent.ConcurrentMap;
 public class TradingAccountManager {
     private final BinanceProperties properties;
     private final AccountTradingRuntimeFactory runtimeFactory;
+    private final DailyTradeStatsStore dailyStatsStore;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final ConcurrentMap<String, AccountTradingRuntime> runtimes = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, String> initializationErrors = new ConcurrentHashMap<>();
 
-    public TradingAccountManager(BinanceProperties properties, AccountTradingRuntimeFactory runtimeFactory) {
+    public TradingAccountManager(BinanceProperties properties, AccountTradingRuntimeFactory runtimeFactory,
+                                 DailyTradeStatsStore dailyStatsStore) {
         this.properties = properties;
         this.runtimeFactory = runtimeFactory;
+        this.dailyStatsStore = dailyStatsStore;
     }
 
     @PostConstruct
@@ -139,7 +143,7 @@ public class TradingAccountManager {
                 if (profile == null || !profile.isEnabled()) return;
                 AccountCredentials credentials = new AccountCredentials(accountId,
                         displayAlias(profile.getAlias(), accountId), profile.getApiKey(), profile.getSecretKey(),
-                        profile.getOrderAmountsUsdt(), profile.getSymbolStrategies());
+                        profile.getOrderAmountsUsdt(), profile.getSymbolStrategies(), profile.getSymbols());
                 if (credentials.complete()) result.put(accountId, credentials);
             } catch (Exception ignored) {
                 // Caller returns a redacted validation error for this profile.
@@ -164,49 +168,129 @@ public class TradingAccountManager {
         return runtimes.values().stream().sorted(Comparator.comparing(AccountTradingRuntime::accountId)).toList();
     }
 
+    public Optional<AccountSymbolsConfiguration> accountSymbolsConfiguration(String accountId) {
+        AccountTradingRuntime runtime = runtimes.get(accountId);
+        if (runtime == null) return Optional.empty();
+        List<String> activeSymbols = runtime.engines().stream()
+                .map(engine -> engine.getSymbol().toUpperCase()).toList();
+        List<String> configuredSymbols = dailyStatsStore.loadAccountSymbols(accountId).orElse(activeSymbols);
+        boolean editable = runtime.canChangeConfiguredSymbols();
+        return Optional.of(new AccountSymbolsConfiguration(runtime.accountId(), runtime.alias(),
+                configuredSymbols, activeSymbols, !configuredSymbols.equals(activeSymbols), editable,
+                editable ? "" : "请先停止该账户的全部币种，并确认没有活动订单"));
+    }
+
+    public synchronized SymbolsUpdateResult updateAccountSymbols(String accountId, List<String> symbols) {
+        AccountTradingRuntime runtime = runtimes.get(accountId);
+        if (runtime == null) return new SymbolsUpdateResult(false, "账户不存在或未初始化", null);
+        if (!runtime.canChangeConfiguredSymbols()) {
+            return new SymbolsUpdateResult(false, "请先停止该账户的全部币种，并确认没有活动订单",
+                    accountSymbolsConfiguration(accountId).orElse(null));
+        }
+        try {
+            dailyStatsStore.saveAccountSymbols(accountId, symbols);
+            List<String> configuredSymbols = dailyStatsStore.loadAccountSymbols(accountId).orElse(symbols);
+            HotApplySymbolsResult hotApply = hotApplyAccountSymbols(runtime, configuredSymbols);
+            AccountSymbolsConfiguration configuration = accountSymbolsConfiguration(accountId).orElseThrow();
+            String message = hotApply.applied()
+                    ? "交易对配置已保存并热应用"
+                    : "交易对配置已保存到 SQLite，" + hotApply.message() + "；需重启服务生效";
+            return new SymbolsUpdateResult(true, message, configuration);
+        } catch (IllegalArgumentException e) {
+            return new SymbolsUpdateResult(false, safeMessage(e), safeAccountSymbolsConfiguration(accountId));
+        } catch (RuntimeException e) {
+            log.error("[accountId={}] 保存账户交易对配置失败: {}", safeProfileId(accountId), safeMessage(e));
+            return new SymbolsUpdateResult(false, "保存交易对配置失败", safeAccountSymbolsConfiguration(accountId));
+        }
+    }
+
+    private HotApplySymbolsResult hotApplyAccountSymbols(AccountTradingRuntime runtime, List<String> configuredSymbols) {
+        if (!runtime.canChangeConfiguredSymbols()) {
+            return new HotApplySymbolsResult(false, "当前账户状态已变化，无法安全热应用");
+        }
+        Map<String, AccountTradingRuntimeFactory.AccountSymbolRuntime> additions = new LinkedHashMap<>();
+        boolean applied = false;
+        try {
+            for (String symbol : configuredSymbols) {
+                String normalized = symbol == null ? "" : symbol.trim().toUpperCase();
+                if (normalized.isBlank() || runtime.engine(normalized).isPresent()) continue;
+                AccountTradingRuntimeFactory.AccountSymbolRuntime addition = runtimeFactory.createSymbolRuntime(
+                        runtime.credentials(), runtime.tradeClient(), runtime.userDataStream(),
+                        runtime.accountRiskCoordinator(), normalized);
+                addition.engine().initialize();
+                additions.put(normalized, addition);
+            }
+            AccountTradingRuntime.ApplySymbolsResult result =
+                    runtime.applyConfiguredSymbols(configuredSymbols, additions);
+            applied = result.applied();
+            return new HotApplySymbolsResult(result.applied(), result.message());
+        } catch (RuntimeException e) {
+            log.error("[accountId={}] 交易对配置热应用失败，已保留 SQLite 配置等待重启生效: {}",
+                    runtime.accountId(), safeMessage(e));
+            return new HotApplySymbolsResult(false, "热应用失败: " + safeMessage(e));
+        } finally {
+            if (!applied) {
+                additions.values().forEach(addition -> {
+                    try { addition.engine().shutdown(); } catch (RuntimeException ignored) { }
+                });
+            }
+        }
+    }
+
+    private AccountSymbolsConfiguration safeAccountSymbolsConfiguration(String accountId) {
+        try {
+            return accountSymbolsConfiguration(accountId).orElse(null);
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
     public List<AccountSummary> summaries() {
         List<AccountSummary> result = new ArrayList<>();
-        runtimes().forEach(runtime -> result.add(new AccountSummary(runtime.accountId(), runtime.alias(),
-                runtime.initialized(), runtime.engine().getIsRunning().get(),
-                runtime.engine().getCurrentStatus().get().name(),
-                runtime.engine().getStrategyMode(), runtime.engine().getSymbol(),
-                runtime.engine().isAccountStreamReady(), null)));
-        initializationErrors.forEach((id, error) -> result.add(new AccountSummary(id, id, false, false,
-                "INITIALIZATION_FAILED", null, null, false, error)));
-        result.sort(Comparator.comparing(AccountSummary::accountId));
+        runtimes().forEach(runtime -> runtime.engines().forEach(engine -> result.add(new AccountSummary(
+                runtime.accountId() + "::" + engine.getSymbol(), runtime.accountId(), runtime.alias(),
+                runtime.symbolCount(), runtime.initialized(), engine.getIsRunning().get(),
+                engine.getCurrentStatus().get().name(), engine.getStrategyMode(), engine.getSymbol(),
+                engine.isAccountStreamReady(), null))));
+        initializationErrors.forEach((id, error) -> result.add(new AccountSummary(id, id, id, 0,
+                false, false, "INITIALIZATION_FAILED", null, null, false, error)));
+        result.sort(Comparator.comparing(AccountSummary::accountId)
+                .thenComparing(summary -> Optional.ofNullable(summary.symbol()).orElse("")));
         return result;
     }
 
     public Map<String, OperationResult> startAll() {
         Map<String, OperationResult> results = new LinkedHashMap<>();
-        runtimes().forEach(runtime -> {
+        runtimes().forEach(runtime -> runtime.engines().forEach(engine -> {
+            String key = operationKey(runtime, engine.getSymbol());
             try {
-                boolean accepted = runtime.start();
-                results.put(runtime.accountId(), new OperationResult(accepted,
-                        accepted ? "started" : runtime.engine().getStatusReason().get()));
+                boolean accepted = runtime.start(engine.getSymbol());
+                results.put(key, new OperationResult(accepted,
+                        accepted ? "started" : engine.getStatusReason().get()));
             } catch (Exception e) {
-                results.put(runtime.accountId(), new OperationResult(false, safeMessage(e)));
-                log.error("[accountId={}] 批量启动失败；继续处理其他账号: {}",
-                        runtime.accountId(), safeMessage(e));
+                results.put(key, new OperationResult(false, safeMessage(e)));
+                log.error("[accountId={} symbol={}] 批量启动失败；继续处理其他实例: {}",
+                        runtime.accountId(), engine.getSymbol(), safeMessage(e));
             }
-        });
+        }));
         initializationErrors.forEach((id, error) -> results.put(id, new OperationResult(false, error)));
         return results;
     }
 
     public Map<String, OperationResult> stopAll() {
         Map<String, OperationResult> results = new LinkedHashMap<>();
-        runtimes().forEach(runtime -> {
+        runtimes().forEach(runtime -> runtime.engines().forEach(engine -> {
+            String key = operationKey(runtime, engine.getSymbol());
             try {
-                boolean clean = runtime.stop();
-                results.put(runtime.accountId(), new OperationResult(clean,
-                        clean ? "stopped" : runtime.engine().getStatusReason().get()));
+                boolean clean = runtime.stop(engine.getSymbol());
+                results.put(key, new OperationResult(clean,
+                        clean ? "stopped" : engine.getStatusReason().get()));
             } catch (Exception e) {
-                results.put(runtime.accountId(), new OperationResult(false, safeMessage(e)));
-                log.error("[accountId={}] 批量停止失败；继续处理其他账号: {}",
-                        runtime.accountId(), safeMessage(e));
+                results.put(key, new OperationResult(false, safeMessage(e)));
+                log.error("[accountId={} symbol={}] 批量停止失败；继续处理其他实例: {}",
+                        runtime.accountId(), engine.getSymbol(), safeMessage(e));
             }
-        });
+        }));
         initializationErrors.forEach((id, error) -> results.put(id, new OperationResult(false, error)));
         return results;
     }
@@ -223,7 +307,7 @@ public class TradingAccountManager {
                 if (!profile.isEnabled()) return;
                 AccountCredentials credentials = new AccountCredentials(accountId,
                         displayAlias(profile.getAlias(), accountId), profile.getApiKey(), profile.getSecretKey(),
-                        profile.getOrderAmountsUsdt(), profile.getSymbolStrategies());
+                        profile.getOrderAmountsUsdt(), profile.getSymbolStrategies(), profile.getSymbols());
                 if (credentials.complete()) result.put(accountId, credentials);
                 else if (hasAnyCredentialValue(profile)) {
                     initializationErrors.put(errorId, "API credentials are incomplete");
@@ -276,9 +360,21 @@ public class TradingAccountManager {
         return value == null || value.isBlank() ? e.getClass().getSimpleName() : value;
     }
 
-    public record AccountSummary(String accountId, String alias, boolean initialized, boolean running,
+    private String operationKey(AccountTradingRuntime runtime, String symbol) {
+        return runtime.symbolCount() == 1 ? runtime.accountId() : runtime.accountId() + "/" + symbol;
+    }
+
+    public record AccountSummary(String runtimeId, String accountId, String alias, int symbolCount,
+                                 boolean initialized, boolean running,
                                  String status, String strategyMode, String symbol,
                                  boolean accountStreamReady, String error) { }
     public record OperationResult(boolean success, String reason) { }
     public record ReloadResult(int added, List<String> addedAccounts, Map<String, String> errors) { }
+    public record AccountSymbolsConfiguration(String accountId, String accountAlias,
+                                              List<String> configuredSymbols, List<String> activeSymbols,
+                                              boolean restartRequired, boolean editable,
+                                              String editBlockReason) { }
+    public record SymbolsUpdateResult(boolean accepted, String message,
+                                      AccountSymbolsConfiguration configuration) { }
+    private record HotApplySymbolsResult(boolean applied, String message) { }
 }

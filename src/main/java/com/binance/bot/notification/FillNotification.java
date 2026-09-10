@@ -16,6 +16,7 @@ public record FillNotification(
         BigDecimal quoteAmount,
         BigDecimal entryPrice,
         BigDecimal entryQuoteAmount,
+        Long entryTime,
         BigDecimal commission,
         String commissionAsset,
         long eventTime
@@ -26,6 +27,6 @@ public record FillNotification(
                             BigDecimal quantity, BigDecimal price, BigDecimal quoteAmount,
                             BigDecimal commission, String commissionAsset, long eventTime) {
         this(accountId, accountAlias, symbol, side, orderId, tradeId, clientOrderId,
-                quantity, price, quoteAmount, null, null, commission, commissionAsset, eventTime);
+                quantity, price, quoteAmount, null, null, null, commission, commissionAsset, eventTime);
     }
 }

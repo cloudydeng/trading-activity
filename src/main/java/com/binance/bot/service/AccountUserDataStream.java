@@ -220,12 +220,10 @@ public class AccountUserDataStream implements WebSocket.Listener {
                     log.info("[accountId={} alias={}] 【订单成交】{} {} | 数量: {} @ 价格: {}",
                             credentials.accountId(), credentials.alias(), symbol, side, lastFilledQty, lastFilledPrice);
                 }
-                if (properties.getStrategy().getSymbol().equalsIgnoreCase(symbol)) {
-                    executionCallback.onOrderUpdate(new AccountExecutionEvent(credentials.accountId(), symbol,
-                            orderId, tradeId, clientOrderId, side, currentExecutionType, orderStatus,
-                            lastFilledQty, lastFilledPrice, cumulativeFilledQty, cumulativeQuoteQty,
-                            commission, commissionAsset, node.path("m").asBoolean(false), tradeTimeMs));
-                }
+                executionCallback.onOrderUpdate(new AccountExecutionEvent(credentials.accountId(), symbol,
+                        orderId, tradeId, clientOrderId, side, currentExecutionType, orderStatus,
+                        lastFilledQty, lastFilledPrice, cumulativeFilledQty, cumulativeQuoteQty,
+                        commission, commissionAsset, node.path("m").asBoolean(false), tradeTimeMs));
             } else if ("eventStreamTerminated".equals(eventType)) {
                 markUnavailable(webSocket, "账户事件流已终止");
             }

@@ -6,6 +6,8 @@ import org.springframework.context.annotation.Configuration;
 
 import java.math.BigDecimal;
 import java.util.LinkedHashMap;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 @Data
@@ -44,6 +46,8 @@ public class BinanceProperties {
         private Map<String, BigDecimal> orderAmountsUsdt = new LinkedHashMap<>();
         /** Optional per-symbol strategy overrides; unspecified symbols use the global strategy. */
         private Map<String, SymbolStrategyProfile> symbolStrategies = new LinkedHashMap<>();
+        /** Trading pairs that may run concurrently under this account; empty keeps legacy single-symbol mode. */
+        private List<String> symbols = new ArrayList<>();
         /** Disabled profiles are visible to configuration binding but do not create a runtime. */
         private boolean enabled = true;
     }
@@ -58,6 +62,8 @@ public class BinanceProperties {
         private BigDecimal orderAmountUsdt;
         /** Entry timeout after which an order outside its configured book level is canceled. */
         private Long entryTimeoutMs;
+        /** Cooldown after a timed-out entry order is canceled before the next BUY may be placed. */
+        private Long entryTimeoutCooldownMs = 300_000L;
         /** Exit timeout before canceling and re-placing at the latest ask. */
         private Long exitTimeoutMs;
         /** Optional manual maker fee override in bps; null reads the account/symbol rate from Binance. */

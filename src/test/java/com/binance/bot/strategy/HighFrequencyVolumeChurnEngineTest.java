@@ -3,6 +3,7 @@ package com.binance.bot.strategy;
 import com.binance.bot.config.BinanceProperties;
 import com.binance.bot.account.AccountCredentials;
 import com.binance.bot.account.AccountExecutionEvent;
+import com.binance.bot.account.AccountRiskCoordinator;
 import com.binance.bot.manager.SymbolRuleManager;
 import com.binance.bot.notification.TradeNotificationService;
 import com.binance.bot.notification.FillNotification;
@@ -26,6 +27,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -45,6 +47,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.atLeast;
+import static org.mockito.Mockito.clearInvocations;
 
 class HighFrequencyVolumeChurnEngineTest {
     private BinanceProperties properties;
@@ -315,8 +318,88 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(1_800_000L, profile.getValue().getEntryAnchorWaitMs());
         assertEquals(0, new BigDecimal("8").compareTo(profile.getValue().getMaxEntryAnchorDriftBps()));
         assertEquals(0, new BigDecimal("8").compareTo(profile.getValue().getMaxCumulativeEntryAnchorDriftBps()));
+        assertEquals(300_000L, profile.getValue().getEntryTimeoutCooldownMs());
         assertEquals(60_000L, profile.getValue().getPostSellEntryDelayMs());
         assertEquals(0, new BigDecimal("510").compareTo(profile.getValue().getDailyVolumeLimitUsdt()));
+    }
+
+    @Test
+    void sellCheckAllowsUpToTwentyFourHoursWhileBuyTimeoutKeepsThirtyMinuteLimit() {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult accepted = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 1_800_000L, 86_400_000L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 1, 1);
+
+        assertTrue(accepted.accepted());
+        assertEquals(86_400_000L, engine.getStrategyProfile().getExitTimeoutMs());
+
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult excessiveSell = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 1_800_000L, 86_400_001L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 1, 1);
+        assertFalse(excessiveSell.accepted());
+        assertTrue(excessiveSell.message().contains("卖单检查时间"));
+
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult excessiveBuy = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 1_800_001L, 86_400_000L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 1, 1);
+        assertFalse(excessiveBuy.accepted());
+        assertTrue(excessiveBuy.message().contains("买单超时时间"));
+
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult disabledCooldown = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 1_800_000L, 86_400_000L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 1, 1, 0L);
+        assertTrue(disabledCooldown.accepted());
+        assertEquals(0L, engine.getStrategyProfile().getEntryTimeoutCooldownMs());
+
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult excessiveCooldown = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 1_800_000L, 86_400_000L,
+                null, null, null, null, null, null, 60_000L, new BigDecimal("510"), 1, 1, 86_400_001L);
+        assertFalse(excessiveCooldown.accepted());
+        assertTrue(excessiveCooldown.message().contains("买单超时冷静期"));
+    }
+
+    @Test
+    void cumulativeEntryAnchorDriftAllowsUpToOneThousandBps() {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult accepted = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
+                null, null, 1_800_000L, new BigDecimal("100"), new BigDecimal("1000"),
+                null, 60_000L, new BigDecimal("510"), 1, 1);
+
+        assertTrue(accepted.accepted());
+        assertEquals(0, new BigDecimal("1000").compareTo(
+                engine.getStrategyProfile().getMaxCumulativeEntryAnchorDriftBps()));
+
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult excessive = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
+                null, null, 1_800_000L, new BigDecimal("100"), new BigDecimal("1000.01"),
+                null, 60_000L, new BigDecimal("510"), 1, 1);
+
+        assertFalse(excessive.accepted());
+        assertTrue(excessive.message().contains("累计最大追高"));
+        assertTrue(excessive.message().contains("1000 bps"));
+    }
+
+    @Test
+    void clearingManualAnchorPersistsAutomaticAnchorMode() {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult manual = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
+                null, null, 1_800_000L, BigDecimal.ZERO, BigDecimal.ZERO,
+                new BigDecimal("0.5900"), 60_000L, new BigDecimal("510"), 1, 1);
+        assertTrue(manual.accepted());
+        assertEquals(0, new BigDecimal("0.5900").compareTo(
+                engine.getStrategyProfile().getManualEntryAnchorPrice()));
+        clearInvocations(dailyStatsStore);
+
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult automatic = engine.switchStrategy(
+                "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 20_000L, 120_000L,
+                null, null, 1_800_000L, BigDecimal.ZERO, BigDecimal.ZERO,
+                null, 60_000L, new BigDecimal("510"), 1, 1);
+
+        assertTrue(automatic.accepted());
+        assertNull(engine.getStrategyProfile().getManualEntryAnchorPrice());
+        ArgumentCaptor<BinanceProperties.SymbolStrategyProfile> saved =
+                ArgumentCaptor.forClass(BinanceProperties.SymbolStrategyProfile.class);
+        verify(dailyStatsStore).saveStrategyOverride(eq("test-account"), eq("ENSOUSDT"), saved.capture());
+        assertNull(saved.getValue().getManualEntryAnchorPrice());
     }
 
     @Test
@@ -357,7 +440,7 @@ class HighFrequencyVolumeChurnEngineTest {
 
         assertFalse(engine.getIsRunning().get());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
-        assertTrue(engine.getStatusReason().get().contains("已确认空仓并自动停止当前账户"));
+        assertTrue(engine.getStatusReason().get().contains("已确认空仓并自动停止当前币种策略"));
     }
 
     @Test
@@ -968,8 +1051,11 @@ class HighFrequencyVolumeChurnEngineTest {
                 [{"orderId":77,"clientOrderId":"ta-restore-S-1","side":"SELL","price":"0.6013",
                   "origQty":"10","executedQty":"0","status":"NEW"}]
                 """));
-        when(dailyStatsStore.today(eq("test-account"), eq("test-bot"), eq("ENSOUSDT")))
-                .thenReturn(dailyStatsWithPosition("ENSOUSDT", "10", "6.006"));
+        when(tradeService.getMyTrades(eq("ENSOUSDT"), anyLong(), anyLong(), eq(1000)))
+                .thenReturn(mapper.readTree("""
+                        [{"id":11,"orderId":101,"price":"0.6006","qty":"10","quoteQty":"6.006",
+                          "commission":"0","commissionAsset":"USDT","isBuyer":true,"time":%d}]
+                        """.formatted(now - 1000)));
         when(dailyStatsStore.loadRuntimeState("test-account", "ENSOUSDT")).thenReturn(Optional.of(
                 new DailyTradeStatsStore.RuntimeState("test-account", "ENSOUSDT", "SELLING", 77L,
                         "ta-restore-S-1", "SELL", new BigDecimal("0.6013"), new BigDecimal("10"),
@@ -1017,6 +1103,55 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(88L, atomic("activeOrderId", Long.class).get());
         assertEquals(0, new BigDecimal("10").compareTo(engine.getRiskSnapshot().positionQty()));
         assertEquals(0, new BigDecimal("6.0000").compareTo(engine.getRiskSnapshot().positionCostUsdt()));
+        verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.6001"), anyString());
+    }
+
+    @Test
+    void explicitStartRecoversCrossDayInventoryFromExchangeHistoryAndPlacesSell() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        long now = System.currentTimeMillis();
+        long todayStart = LocalDate.now(ZoneOffset.UTC).atStartOfDay(ZoneOffset.UTC)
+                .toInstant().toEpochMilli();
+        long previousDayTradeTime = todayStart - TimeUnit.HOURS.toMillis(1);
+        engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L);
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp")).set(now);
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketFrameTimestamp")).set(now);
+        atomic("lastBestAsk", BigDecimal.class).set(new BigDecimal("0.6001"));
+        BinanceAccountTradeClient.AssetBalance balance = new BinanceAccountTradeClient.AssetBalance(
+                "ENSO", new BigDecimal("10"), BigDecimal.ZERO, new BigDecimal("10"));
+        when(tradeService.getAssetBalance("ENSO")).thenReturn(balance);
+        when(tradeService.getOpenOrders("ENSOUSDT")).thenReturn(mapper.readTree("[]"));
+        JsonNode previousDayBuy = mapper.readTree("""
+                [{"id":11,"orderId":101,"price":"0.6000","qty":"10","quoteQty":"6.0000",
+                  "commission":"0","commissionAsset":"USDT","isBuyer":true,"time":%d}]
+                """.formatted(previousDayTradeTime));
+        JsonNode noTrades = mapper.readTree("[]");
+        when(tradeService.getMyTrades(eq("ENSOUSDT"), anyLong(), anyLong(), eq(1000)))
+                .thenAnswer(invocation -> {
+                    long startMs = invocation.getArgument(1);
+                    long endMs = invocation.getArgument(2);
+                    return startMs <= previousDayTradeTime && endMs >= previousDayTradeTime
+                            ? previousDayBuy : noTrades;
+                });
+        when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
+                decimalEquals("0.6001"), anyString()))
+                .thenReturn(mapper.readTree("{\"orderId\":88}"));
+        JsonNode accountInfo = mapper.readTree(
+                "{\"balances\":[{\"asset\":\"ENSO\",\"free\":\"10\",\"locked\":\"0\"}]}"
+        );
+
+        assertFalse(engine.reconcileAccountRiskSnapshot(accountInfo));
+        assertTrue(engine.recoverAccountRiskSnapshotForStart(accountInfo));
+        assertTrue(engine.startTrading());
+
+        assertTrue(engine.getIsRunning().get());
+        assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING, engine.getCurrentStatus().get());
+        assertEquals(88L, atomic("activeOrderId", Long.class).get());
+        assertEquals(0, new BigDecimal("10").compareTo(engine.getRiskSnapshot().positionQty()));
+        assertEquals(0, new BigDecimal("6.0000").compareTo(engine.getRiskSnapshot().positionCostUsdt()));
+        assertEquals(0, engine.getDailyStatsSnapshot().totalVolumeQuote().signum());
         verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
                 decimalEquals("0.6001"), anyString());
     }
@@ -1080,7 +1215,7 @@ class HighFrequencyVolumeChurnEngineTest {
 
         assertFalse(engine.getIsRunning().get());
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.HALTED, engine.getCurrentStatus().get());
-        assertTrue(engine.getStatusReason().get().contains("今日远程成交无法还原成本或与交易所余额不一致"));
+        assertTrue(engine.getStatusReason().get().contains("交易所历史成交无法还原成本或与余额不一致"));
         verify(tradeService, never()).placeLimitGtcSell(anyString(), any(), any(), anyString());
         verify(tradeService, never()).cancelAndReplaceOrder(anyString(), eq("SELL"), any(), any(), any(), anyString());
     }
@@ -1967,6 +2102,14 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE, engine.getCurrentStatus().get());
         assertNull(atomic("activeOrderId", Long.class).get());
         assertTrue(engine.getIsRunning().get());
+
+        clearInvocations(tradeService);
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.862"), new BigDecimal("0.863"));
+
+        verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                any(), any(), isNull(), anyString());
+        assertTrue(engine.getStatusReason().get().contains("买单超时撤单后冷静"));
     }
 
     @Test
@@ -2016,6 +2159,11 @@ class HighFrequencyVolumeChurnEngineTest {
     @Test
     void partialMakerBuyCancelsRemainderAndSubmitsOneEntryPriceGtcSell() throws Exception {
         prepareRestingMakerOrder();
+        AccountRiskCoordinator coordinator = (AccountRiskCoordinator)
+                ReflectionTestUtils.getField(engine, "accountRiskCoordinator");
+        String engineKey = (String) ReflectionTestUtils.getField(engine, "accountEngineKey");
+        assertTrue(coordinator.reserveEntry(engineKey, new BigDecimal("6"),
+                new BigDecimal("40"), new BigDecimal("8")).accepted());
         ObjectMapper mapper = new ObjectMapper();
         atomic("lastBestBid", BigDecimal.class).set(new BigDecimal("0.862"));
         atomic("lastBestAsk", BigDecimal.class).set(new BigDecimal("0.863"));
@@ -2059,6 +2207,7 @@ class HighFrequencyVolumeChurnEngineTest {
         verify(tradeService, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("SELL"), any(),
                 any(), any(), anyString());
         assertEquals(1, engine.getAccountingSnapshot().processedTradeCount());
+        assertEquals(0, BigDecimal.ZERO.compareTo(coordinator.snapshot().pendingEntryNotional()));
     }
 
     @Test
