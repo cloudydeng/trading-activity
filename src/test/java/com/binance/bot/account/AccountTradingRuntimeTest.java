@@ -13,6 +13,7 @@ import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -263,9 +264,61 @@ class AccountTradingRuntimeTest {
         assertFalse(runtime.canChangeConfiguredSymbols());
     }
 
+    @Test
+    void stoppedRuntimeHotAppliesAddedAndRemovedSymbolsInMemory() {
+        HighFrequencyVolumeChurnEngine enso = stoppedEngine("ENSOUSDT");
+        HighFrequencyVolumeChurnEngine xrp = stoppedEngine("XRPUSDT");
+        HighFrequencyVolumeChurnEngine holo = stoppedEngine("HOLOUSDT");
+        TradingRiskGuard holoRisk = mock(TradingRiskGuard.class);
+        PostFillOutcomeTracker holoTracker = mock(PostFillOutcomeTracker.class);
+        AccountTradingRuntime runtime = new AccountTradingRuntime(
+                new AccountCredentials("account-a", "A", "key", "secret"),
+                mock(BinanceAccountTradeClient.class), mock(AccountUserDataStream.class),
+                List.of(enso, xrp), Map.of(), Map.of());
+
+        AccountTradingRuntime.ApplySymbolsResult result = runtime.applyConfiguredSymbols(
+                List.of("ENSOUSDT", "HOLOUSDT"),
+                Map.of("HOLOUSDT", new AccountTradingRuntimeFactory.AccountSymbolRuntime(
+                        holo, holoRisk, holoTracker)));
+
+        assertTrue(result.applied());
+        assertEquals(List.of("ENSOUSDT", "HOLOUSDT"),
+                runtime.engines().stream().map(HighFrequencyVolumeChurnEngine::getSymbol).toList());
+        assertTrue(runtime.engine("XRPUSDT").isEmpty());
+        assertTrue(runtime.engine("HOLOUSDT").isPresent());
+        verify(xrp).shutdown();
+        verify(holo, never()).shutdown();
+    }
+
+    @Test
+    void hotApplyRechecksSafetyBeforeRemovingSymbols() {
+        HighFrequencyVolumeChurnEngine enso = stoppedEngine("ENSOUSDT");
+        HighFrequencyVolumeChurnEngine xrp = stoppedEngine("XRPUSDT");
+        when(xrp.hasActiveOrder()).thenReturn(true);
+        AccountTradingRuntime runtime = new AccountTradingRuntime(
+                new AccountCredentials("account-a", "A", "key", "secret"),
+                mock(BinanceAccountTradeClient.class), mock(AccountUserDataStream.class),
+                List.of(enso, xrp), Map.of(), Map.of());
+
+        AccountTradingRuntime.ApplySymbolsResult result = runtime.applyConfiguredSymbols(
+                List.of("ENSOUSDT"), Map.of());
+
+        assertFalse(result.applied());
+        assertEquals(List.of("ENSOUSDT", "XRPUSDT"),
+                runtime.engines().stream().map(HighFrequencyVolumeChurnEngine::getSymbol).toList());
+        verify(xrp, never()).shutdown();
+    }
+
     private AccountTradingRuntime runtime(String accountId, HighFrequencyVolumeChurnEngine engine) {
         return new AccountTradingRuntime(new AccountCredentials(accountId, accountId, "key", "secret"),
                 mock(BinanceAccountTradeClient.class), mock(AccountUserDataStream.class), engine,
                 mock(TradingRiskGuard.class), mock(PostFillOutcomeTracker.class));
+    }
+
+    private HighFrequencyVolumeChurnEngine stoppedEngine(String symbol) {
+        HighFrequencyVolumeChurnEngine engine = mock(HighFrequencyVolumeChurnEngine.class);
+        when(engine.getSymbol()).thenReturn(symbol);
+        when(engine.getIsRunning()).thenReturn(new java.util.concurrent.atomic.AtomicBoolean(false));
+        return engine;
     }
 }

@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 
 /** Builds fresh stateful objects for each account; only public symbol rules and durable storage are shared. */
 @Component
@@ -62,26 +63,16 @@ public class AccountTradingRuntimeFactory {
         List<HighFrequencyVolumeChurnEngine> engines = new ArrayList<>();
         Map<String, TradingRiskGuard> riskGuards = new LinkedHashMap<>();
         Map<String, PostFillOutcomeTracker> outcomeTrackers = new LinkedHashMap<>();
+        BooleanSupplier streamReady = () -> {
+            AccountUserDataStream stream = streamRef.get();
+            return stream != null && stream.isReady();
+        };
         for (String symbol : symbols) {
-            BinanceProperties accountProperties = copyProperties();
-            accountProperties.getStrategy().setSymbol(symbol);
-            accountProperties.getStrategy().setOrderAmountsUsdt(credentials.orderAmountsUsdt());
-            accountProperties.getStrategy().setSymbolStrategies(new LinkedHashMap<>(strategies));
-            MarketSignalEvaluator signalEvaluator = new MarketSignalEvaluator();
-            TradingRiskGuard riskGuard = new TradingRiskGuard();
-            String journalPath = accountObservationPath(
-                    accountProperties.getStrategy().getObservationOutputFile(), credentials.accountId(), symbol);
-            PostFillOutcomeTracker outcomeTracker = new PostFillOutcomeTracker(new ObservationJournal(journalPath));
-            HighFrequencyVolumeChurnEngine engine = new HighFrequencyVolumeChurnEngine(
-                    credentials.accountId(), credentials.alias(), credentials, accountProperties, tradeClient,
-                    ruleManager, () -> {
-                        AccountUserDataStream stream = streamRef.get();
-                        return stream != null && stream.isReady();
-                    }, signalEvaluator, outcomeTracker, riskGuard, dailyStatsStore, notificationService,
-                    accountRiskCoordinator);
-            engines.add(engine);
-            riskGuards.put(symbol, riskGuard);
-            outcomeTrackers.put(symbol, outcomeTracker);
+            AccountSymbolRuntime symbolRuntime = createSymbolRuntime(
+                    credentials, tradeClient, streamReady, accountRiskCoordinator, symbol, strategies);
+            engines.add(symbolRuntime.engine());
+            riskGuards.put(symbol, symbolRuntime.riskGuard());
+            outcomeTrackers.put(symbol, symbolRuntime.outcomeTracker());
         }
         AtomicReference<AccountTradingRuntime> runtimeRef = new AtomicReference<>();
         AccountUserDataStream stream = new AccountUserDataStream(streamProperties, signer, credentials,
@@ -102,6 +93,47 @@ public class AccountTradingRuntimeFactory {
         return runtime;
     }
 
+    public AccountSymbolRuntime createSymbolRuntime(AccountCredentials credentials,
+                                                    BinanceAccountTradeClient tradeClient,
+                                                    AccountUserDataStream userDataStream,
+                                                    AccountRiskCoordinator accountRiskCoordinator,
+                                                    String symbol) {
+        return createSymbolRuntime(credentials, tradeClient, userDataStream::isReady,
+                accountRiskCoordinator, symbol, mergedStrategies(credentials));
+    }
+
+    private AccountSymbolRuntime createSymbolRuntime(AccountCredentials credentials,
+                                                     BinanceAccountTradeClient tradeClient,
+                                                     BooleanSupplier accountStreamReady,
+                                                     AccountRiskCoordinator accountRiskCoordinator,
+                                                     String symbol,
+                                                     Map<String, BinanceProperties.SymbolStrategyProfile> strategies) {
+        BinanceProperties accountProperties = copyProperties();
+        String normalizedSymbol = symbol == null ? "" : symbol.trim().toUpperCase();
+        accountProperties.getStrategy().setSymbol(normalizedSymbol);
+        accountProperties.getStrategy().setOrderAmountsUsdt(credentials.orderAmountsUsdt());
+        accountProperties.getStrategy().setSymbolStrategies(new LinkedHashMap<>(strategies));
+        MarketSignalEvaluator signalEvaluator = new MarketSignalEvaluator();
+        TradingRiskGuard riskGuard = new TradingRiskGuard();
+        String journalPath = accountObservationPath(
+                accountProperties.getStrategy().getObservationOutputFile(), credentials.accountId(), normalizedSymbol);
+        PostFillOutcomeTracker outcomeTracker = new PostFillOutcomeTracker(new ObservationJournal(journalPath));
+        HighFrequencyVolumeChurnEngine engine = new HighFrequencyVolumeChurnEngine(
+                credentials.accountId(), credentials.alias(), credentials, accountProperties, tradeClient,
+                ruleManager, accountStreamReady, signalEvaluator, outcomeTracker, riskGuard,
+                dailyStatsStore, notificationService, accountRiskCoordinator);
+        return new AccountSymbolRuntime(engine, riskGuard, outcomeTracker);
+    }
+
+    private Map<String, BinanceProperties.SymbolStrategyProfile> mergedStrategies(AccountCredentials credentials) {
+        Map<String, BinanceProperties.SymbolStrategyProfile> strategies = new LinkedHashMap<>(
+                credentials.symbolStrategies());
+        Map<String, BinanceProperties.SymbolStrategyProfile> persistedStrategies =
+                dailyStatsStore.loadStrategyOverrides(credentials.accountId());
+        if (persistedStrategies != null) strategies.putAll(persistedStrategies);
+        return strategies;
+    }
+
     private List<String> configuredSymbols(AccountCredentials credentials) {
         LinkedHashSet<String> symbols = new LinkedHashSet<>(
                 dailyStatsStore.loadAccountSymbols(credentials.accountId()).orElse(credentials.symbols()));
@@ -115,6 +147,10 @@ public class AccountTradingRuntimeFactory {
         if (symbols.size() > 5) throw new IllegalArgumentException("an account supports at most 5 concurrent symbols");
         return List.copyOf(symbols);
     }
+
+    public record AccountSymbolRuntime(HighFrequencyVolumeChurnEngine engine,
+                                       TradingRiskGuard riskGuard,
+                                       PostFillOutcomeTracker outcomeTracker) { }
 
     private BinanceProperties copyProperties() {
         BinanceProperties copy = new BinanceProperties();

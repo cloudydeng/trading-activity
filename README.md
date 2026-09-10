@@ -55,7 +55,7 @@ BOT_ACCOUNT_PROFILES_JSON='{
 
 多币种账户必须使用带 `symbol` 的启动接口，避免旧账户级接口含义不明确；旧账户级“停止”接口会停止该账户的全部币种，不会只停配置中的第一个币种。
 
-控制台“账户交易对配置”可以增加或删除交易对。页面只把非敏感的交易对清单写入 SQLite 的 `runtime_setting`，不会读取、覆盖或重写 `/etc/trading-activity.env`；SQLite 清单在后续启动时优先于 env 中的初始 `symbols`。修改前必须停止该账户全部币种且本地没有活动订单，保存后重启服务生效。已有账户的热加载不会替换正在运行的账户实例，这避免改清单时误动现有订单。
+控制台“账户交易对配置”可以增加或删除交易对。页面只把非敏感的交易对清单写入 SQLite 的 `runtime_setting`，不会读取、覆盖或重写 `/etc/trading-activity.env`；SQLite 清单在后续启动时优先于 env 中的初始 `symbols`。修改前必须停止该账户全部币种且本地没有活动订单；保存后会优先热应用到当前账户运行时，动态新增/移除币种 engine，并继续复用同一条账户 User Data WebSocket。若热应用失败，SQLite 配置仍保留，重启服务后按已保存清单生效。
 
 `orderAmountsUsdt` 可为每个账户按交易对设置单笔 USDT 名义金额；未配置的交易对回退到全局
 `binance.strategy.order-amount-usdt`。单笔金额仍不能超过 `max-live-order-notional-usdt`，并会在控制台显示当前生效值。

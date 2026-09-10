@@ -1,7 +1,11 @@
 package com.binance.bot.account;
 
 import com.binance.bot.config.BinanceProperties;
+import com.binance.bot.service.AccountUserDataStream;
+import com.binance.bot.service.BinanceAccountTradeClient;
 import com.binance.bot.strategy.DailyTradeStatsStore;
+import com.binance.bot.strategy.PostFillOutcomeTracker;
+import com.binance.bot.strategy.TradingRiskGuard;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -17,7 +21,7 @@ import static org.mockito.Mockito.*;
 
 class TradingAccountManagerTest {
     @Test
-    void savesStoppedAccountSymbolsToSqliteForNextRestart() {
+    void savesStoppedAccountSymbolsToSqliteAndHotAppliesRuntime() {
         BinanceProperties properties = propertiesWith("account-a", "A", "key-a", "secret-a",
                 "account-b", "B", "key-b", "secret-b");
         AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
@@ -28,16 +32,30 @@ class TradingAccountManagerTest {
                 mock(com.binance.bot.strategy.HighFrequencyVolumeChurnEngine.class);
         com.binance.bot.strategy.HighFrequencyVolumeChurnEngine engineB =
                 mock(com.binance.bot.strategy.HighFrequencyVolumeChurnEngine.class);
+        com.binance.bot.strategy.HighFrequencyVolumeChurnEngine saharaEngine =
+                mock(com.binance.bot.strategy.HighFrequencyVolumeChurnEngine.class);
         when(accountA.accountId()).thenReturn("account-a");
         when(accountA.alias()).thenReturn("A");
-        when(accountA.engines()).thenReturn(List.of(engineA));
+        when(accountA.credentials()).thenReturn(new AccountCredentials("account-a", "A", "key-a", "secret-a"));
+        when(accountA.tradeClient()).thenReturn(mock(BinanceAccountTradeClient.class));
+        when(accountA.userDataStream()).thenReturn(mock(AccountUserDataStream.class));
+        when(accountA.accountRiskCoordinator()).thenReturn(new AccountRiskCoordinator());
+        when(accountA.engines()).thenReturn(List.of(engineA, saharaEngine));
+        when(accountA.engine("PROMUSDT")).thenReturn(Optional.of(engineA));
+        when(accountA.engine("SAHARAUSDT")).thenReturn(Optional.empty());
         when(accountA.canChangeConfiguredSymbols()).thenReturn(true);
+        when(accountA.applyConfiguredSymbols(eq(List.of("PROMUSDT", "SAHARAUSDT")), anyMap()))
+                .thenReturn(new AccountTradingRuntime.ApplySymbolsResult(true, "交易对配置已热应用"));
         when(engineA.getSymbol()).thenReturn("PROMUSDT");
+        when(saharaEngine.getSymbol()).thenReturn("SAHARAUSDT");
         when(accountB.accountId()).thenReturn("account-b");
         when(accountB.engines()).thenReturn(List.of(engineB));
         when(engineB.getSymbol()).thenReturn("BTCUSDT");
         when(factory.create(any())).thenAnswer(invocation ->
                 "account-a".equals(((AccountCredentials) invocation.getArgument(0)).accountId()) ? accountA : accountB);
+        when(factory.createSymbolRuntime(any(), any(), any(), any(), eq("SAHARAUSDT")))
+                .thenReturn(new AccountTradingRuntimeFactory.AccountSymbolRuntime(
+                        saharaEngine, mock(TradingRiskGuard.class), mock(PostFillOutcomeTracker.class)));
         when(store.loadAccountSymbols("account-a"))
                 .thenReturn(Optional.of(List.of("PROMUSDT", "SAHARAUSDT")));
         TradingAccountManager manager = new TradingAccountManager(properties, factory, store);
@@ -47,9 +65,13 @@ class TradingAccountManagerTest {
                 "account-a", List.of("PROMUSDT", "SAHARAUSDT"));
 
         assertTrue(result.accepted());
-        assertTrue(result.configuration().restartRequired());
+        assertFalse(result.configuration().restartRequired());
+        assertTrue(result.message().contains("热应用"));
         assertEquals(List.of("PROMUSDT", "SAHARAUSDT"), result.configuration().configuredSymbols());
+        assertEquals(List.of("PROMUSDT", "SAHARAUSDT"), result.configuration().activeSymbols());
         verify(store).saveAccountSymbols("account-a", List.of("PROMUSDT", "SAHARAUSDT"));
+        verify(saharaEngine).initialize();
+        verify(accountA).applyConfiguredSymbols(eq(List.of("PROMUSDT", "SAHARAUSDT")), anyMap());
     }
 
     @Test

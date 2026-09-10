@@ -189,16 +189,51 @@ public class TradingAccountManager {
         }
         try {
             dailyStatsStore.saveAccountSymbols(accountId, symbols);
+            List<String> configuredSymbols = dailyStatsStore.loadAccountSymbols(accountId).orElse(symbols);
+            HotApplySymbolsResult hotApply = hotApplyAccountSymbols(runtime, configuredSymbols);
             AccountSymbolsConfiguration configuration = accountSymbolsConfiguration(accountId).orElseThrow();
-            String message = configuration.restartRequired()
-                    ? "交易对配置已保存到 SQLite，重启服务后生效"
-                    : "交易对配置已保存，当前运行实例无需变化";
+            String message = hotApply.applied()
+                    ? "交易对配置已保存并热应用"
+                    : "交易对配置已保存到 SQLite，" + hotApply.message() + "；需重启服务生效";
             return new SymbolsUpdateResult(true, message, configuration);
         } catch (IllegalArgumentException e) {
             return new SymbolsUpdateResult(false, safeMessage(e), safeAccountSymbolsConfiguration(accountId));
         } catch (RuntimeException e) {
             log.error("[accountId={}] 保存账户交易对配置失败: {}", safeProfileId(accountId), safeMessage(e));
             return new SymbolsUpdateResult(false, "保存交易对配置失败", safeAccountSymbolsConfiguration(accountId));
+        }
+    }
+
+    private HotApplySymbolsResult hotApplyAccountSymbols(AccountTradingRuntime runtime, List<String> configuredSymbols) {
+        if (!runtime.canChangeConfiguredSymbols()) {
+            return new HotApplySymbolsResult(false, "当前账户状态已变化，无法安全热应用");
+        }
+        Map<String, AccountTradingRuntimeFactory.AccountSymbolRuntime> additions = new LinkedHashMap<>();
+        boolean applied = false;
+        try {
+            for (String symbol : configuredSymbols) {
+                String normalized = symbol == null ? "" : symbol.trim().toUpperCase();
+                if (normalized.isBlank() || runtime.engine(normalized).isPresent()) continue;
+                AccountTradingRuntimeFactory.AccountSymbolRuntime addition = runtimeFactory.createSymbolRuntime(
+                        runtime.credentials(), runtime.tradeClient(), runtime.userDataStream(),
+                        runtime.accountRiskCoordinator(), normalized);
+                addition.engine().initialize();
+                additions.put(normalized, addition);
+            }
+            AccountTradingRuntime.ApplySymbolsResult result =
+                    runtime.applyConfiguredSymbols(configuredSymbols, additions);
+            applied = result.applied();
+            return new HotApplySymbolsResult(result.applied(), result.message());
+        } catch (RuntimeException e) {
+            log.error("[accountId={}] 交易对配置热应用失败，已保留 SQLite 配置等待重启生效: {}",
+                    runtime.accountId(), safeMessage(e));
+            return new HotApplySymbolsResult(false, "热应用失败: " + safeMessage(e));
+        } finally {
+            if (!applied) {
+                additions.values().forEach(addition -> {
+                    try { addition.engine().shutdown(); } catch (RuntimeException ignored) { }
+                });
+            }
         }
     }
 
@@ -341,4 +376,5 @@ public class TradingAccountManager {
                                               String editBlockReason) { }
     public record SymbolsUpdateResult(boolean accepted, String message,
                                       AccountSymbolsConfiguration configuration) { }
+    private record HotApplySymbolsResult(boolean applied, String message) { }
 }
