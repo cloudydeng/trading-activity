@@ -7,12 +7,15 @@ import com.binance.bot.service.BinanceIpRateLimitCoordinator;
 import com.binance.bot.service.BinanceSigner;
 import com.binance.bot.strategy.DailyTradeStatsStore;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 
+import java.lang.reflect.Constructor;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -34,5 +37,17 @@ class AccountTradingRuntimeFactoryTest {
 
         assertEquals(List.of("PROMUSDT", "SAHARAUSDT"),
                 runtime.engines().stream().map(engine -> engine.getSymbol()).toList());
+    }
+
+    @Test
+    void springInjectionConstructorIsExplicitWhenTestCompatibilityConstructorExists() {
+        List<Constructor<?>> autowiredConstructors = List.of(AccountTradingRuntimeFactory.class.getConstructors())
+                .stream()
+                .filter(constructor -> constructor.isAnnotationPresent(Autowired.class))
+                .toList();
+
+        assertEquals(1, autowiredConstructors.size());
+        assertTrue(List.of(autowiredConstructors.get(0).getParameterTypes())
+                .contains(SymbolTradeCoordinator.class));
     }
 }

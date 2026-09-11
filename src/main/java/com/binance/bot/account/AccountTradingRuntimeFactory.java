@@ -14,6 +14,7 @@ import com.binance.bot.strategy.ObservationJournal;
 import com.binance.bot.strategy.PostFillOutcomeTracker;
 import com.binance.bot.strategy.TradingRiskGuard;
 import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.nio.file.Path;
@@ -45,6 +46,7 @@ public class AccountTradingRuntimeFactory {
                 notificationService, new SymbolTradeCoordinator());
     }
 
+    @Autowired
     public AccountTradingRuntimeFactory(BinanceProperties applicationProperties, BinanceSigner signer,
                                         SymbolRuleManager ruleManager,
                                         BinanceIpRateLimitCoordinator rateLimitCoordinator,
