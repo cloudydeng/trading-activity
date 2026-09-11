@@ -41,6 +41,7 @@ public class DailyTradeStatsStore {
     private static final String STRATEGY_OVERRIDE_PREFIX = "strategy_override:";
     private static final String RUNTIME_STATE_PREFIX = "runtime_state:";
     private static final String ACCOUNT_SYMBOLS_PREFIX = "account_symbols:";
+    private static final String TRADING_RUNTIME_SETTINGS_KEY = "trading_runtime_settings";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Connection connection;
@@ -939,6 +940,33 @@ public class DailyTradeStatsStore {
         });
     }
 
+    public void saveTradingRuntimeSettings(TradingRuntimeSettings settings) {
+        withLock(() -> {
+            TradingRuntimeSettings normalized = normalizeTradingRuntimeSettings(settings);
+            try {
+                saveSetting(TRADING_RUNTIME_SETTINGS_KEY, objectMapper.writeValueAsString(normalized),
+                        "保存交易运行设置失败");
+            } catch (Exception e) {
+                if (e instanceof IllegalStateException stateException) throw stateException;
+                throw new IllegalStateException("保存交易运行设置失败", e);
+            }
+        });
+    }
+
+    public java.util.Optional<TradingRuntimeSettings> loadTradingRuntimeSettings() {
+        return withLock(() -> {
+            try {
+                java.util.Optional<String> payload = loadSetting(TRADING_RUNTIME_SETTINGS_KEY);
+                if (payload.isEmpty()) return java.util.Optional.empty();
+                return java.util.Optional.of(normalizeTradingRuntimeSettings(
+                        objectMapper.readValue(payload.get(), TradingRuntimeSettings.class)));
+            } catch (Exception e) {
+                log.warn("忽略无效的交易运行设置");
+                return java.util.Optional.empty();
+            }
+        });
+    }
+
     private String normalizeSymbol(String symbol) {
         String normalized = symbol == null ? "" : symbol.trim().toUpperCase();
         if (!normalized.matches("[A-Z0-9]{5,20}") || !normalized.endsWith("USDT")) {
@@ -955,6 +983,15 @@ public class DailyTradeStatsStore {
         if (normalized.isEmpty()) throw new IllegalArgumentException("账户至少需要保留一个 USDT 交易对");
         if (normalized.size() > 5) throw new IllegalArgumentException("一个账户最多配置 5 个交易对");
         return List.copyOf(normalized);
+    }
+
+    private TradingRuntimeSettings normalizeTradingRuntimeSettings(TradingRuntimeSettings settings) {
+        if (settings == null) throw new IllegalArgumentException("交易运行设置不能为空");
+        int maxConcurrent = settings.maxConcurrentEntriesPerSymbol();
+        if (maxConcurrent < 1 || maxConcurrent > 20) {
+            throw new IllegalArgumentException("同交易对并发名额必须在 1 到 20 之间");
+        }
+        return new TradingRuntimeSettings(maxConcurrent);
     }
 
     private void saveSetting(String key, String value, String errorMessage) {
@@ -1141,6 +1178,7 @@ public class DailyTradeStatsStore {
                                long orderPlacedAtMs, long updatedAtMs,
                                BigDecimal feeAwareInitialEntryAnchorPrice,
                                List<BigDecimal> feeAwareRecentBuyPrices) { }
+    public record TradingRuntimeSettings(int maxConcurrentEntriesPerSymbol) { }
 
     private static final class MutableSymbolSummary {
         private final String accountId;

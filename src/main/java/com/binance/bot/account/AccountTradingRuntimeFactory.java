@@ -34,21 +34,34 @@ public class AccountTradingRuntimeFactory {
     private final BinanceIpRateLimitCoordinator rateLimitCoordinator;
     private final DailyTradeStatsStore dailyStatsStore;
     private final TradeNotificationService notificationService;
+    private final SymbolTradeCoordinator symbolTradeCoordinator;
 
     public AccountTradingRuntimeFactory(BinanceProperties applicationProperties, BinanceSigner signer,
                                         SymbolRuleManager ruleManager,
                                         BinanceIpRateLimitCoordinator rateLimitCoordinator,
                                         DailyTradeStatsStore dailyStatsStore,
                                         TradeNotificationService notificationService) {
+        this(applicationProperties, signer, ruleManager, rateLimitCoordinator, dailyStatsStore,
+                notificationService, new SymbolTradeCoordinator());
+    }
+
+    public AccountTradingRuntimeFactory(BinanceProperties applicationProperties, BinanceSigner signer,
+                                        SymbolRuleManager ruleManager,
+                                        BinanceIpRateLimitCoordinator rateLimitCoordinator,
+                                        DailyTradeStatsStore dailyStatsStore,
+                                        TradeNotificationService notificationService,
+                                        SymbolTradeCoordinator symbolTradeCoordinator) {
         this.applicationProperties = applicationProperties;
         this.signer = signer;
         this.ruleManager = ruleManager;
         this.rateLimitCoordinator = rateLimitCoordinator;
         this.dailyStatsStore = dailyStatsStore;
         this.notificationService = notificationService;
+        this.symbolTradeCoordinator = symbolTradeCoordinator;
     }
 
     public AccountTradingRuntime create(AccountCredentials credentials) {
+        applyTradingRuntimeSettings();
         Map<String, BinanceProperties.SymbolStrategyProfile> strategies = new LinkedHashMap<>(
                 credentials.symbolStrategies());
         Map<String, BinanceProperties.SymbolStrategyProfile> persistedStrategies =
@@ -98,8 +111,21 @@ public class AccountTradingRuntimeFactory {
                                                     AccountUserDataStream userDataStream,
                                                     AccountRiskCoordinator accountRiskCoordinator,
                                                     String symbol) {
+        applyTradingRuntimeSettings();
         return createSymbolRuntime(credentials, tradeClient, userDataStream::isReady,
                 accountRiskCoordinator, symbol, mergedStrategies(credentials));
+    }
+
+    private void applyTradingRuntimeSettings() {
+        java.util.Optional<DailyTradeStatsStore.TradingRuntimeSettings> persisted =
+                dailyStatsStore.loadTradingRuntimeSettings();
+        int maxConcurrent = (persisted == null ? java.util.Optional.<DailyTradeStatsStore.TradingRuntimeSettings>empty()
+                : persisted)
+                .map(DailyTradeStatsStore.TradingRuntimeSettings::maxConcurrentEntriesPerSymbol)
+                .orElse(applicationProperties.getStrategy().getMaxConcurrentEntriesPerSymbol());
+        maxConcurrent = Math.max(1, maxConcurrent);
+        applicationProperties.getStrategy().setMaxConcurrentEntriesPerSymbol(maxConcurrent);
+        symbolTradeCoordinator.configureMaxConcurrentEntriesPerSymbol(maxConcurrent);
     }
 
     private AccountSymbolRuntime createSymbolRuntime(AccountCredentials credentials,
@@ -121,7 +147,7 @@ public class AccountTradingRuntimeFactory {
         HighFrequencyVolumeChurnEngine engine = new HighFrequencyVolumeChurnEngine(
                 credentials.accountId(), credentials.alias(), credentials, accountProperties, tradeClient,
                 ruleManager, accountStreamReady, signalEvaluator, outcomeTracker, riskGuard,
-                dailyStatsStore, notificationService, accountRiskCoordinator);
+                dailyStatsStore, notificationService, accountRiskCoordinator, symbolTradeCoordinator);
         return new AccountSymbolRuntime(engine, riskGuard, outcomeTracker);
     }
 

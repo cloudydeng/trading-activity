@@ -11,7 +11,7 @@
 - BUY 一旦真实成交（包括达到最小可卖额的部分成交），立即撤销剩余买单并对账，再按当前策略挂第一张卖单：`BID_ASK_MAKER` 使用卖一/买入价上方可配置 tick 底线，`BUY_PRICE_MAKER` 使用实际买入均价，`FEE_AWARE_MAKER` 使用手续费保护价。
 - 每张卖单按配置时间检查（默认 2 分钟）；若原单仍在卖一，则保留原单并重新计时；若不在卖一，则撤单、对账并直接按最新卖一重挂。超时重挂不再使用买入价或手续费保护价底线。
 - 自动交易流程没有价格止损、止损冷却或 MARKET 卖出；MARKET 只保留给人工授权清仓。库存对账与防重复卖出始终是强制保护。
-- 每个 API 账户拥有一个账户会话和一条 User Data WebSocket，可配置最多 5 个交易对同时运行。每个交易对拥有独立策略状态机、行情流、订单、持仓恢复和统计；账户余额、BNB 检查、买单提交、总持仓风险与总回撤保护由同一账户共享协调。
+- 每个 API 账户拥有一个账户会话和一条 User Data WebSocket，可配置最多 5 个交易对同时运行。每个交易对拥有独立策略状态机、行情流、订单、持仓恢复和统计；账户余额、BNB 检查、买单提交、总持仓风险与总回撤保护由同一账户共享协调。同一个交易对跨 API key 默认只允许 1 个账户处于买入/持仓/卖出这一轮，其他账户会等待；可在控制台“全局交易设置”中调整并发名额，保存到 SQLite 并立即生效。
 - 多币种账户启动任一币种前只读取一次账户余额，并同时核对全部已配置币种。若远程持仓与内存状态不一致，系统仅在这次人工启动中按 24 小时窗口向前查询交易所成交（最多 30 天），恢复当前未平仓成本；无法可靠恢复时拒绝启动。旧成交不计入今天的成交量、手续费或盈亏。可用 USDT 与待提交买单也按账户统一预留，避免多个币种争抢同一余额。
 - 所有账户共享服务器公网 IP 的 Binance 请求权重；系统动态读取每分钟上限，在 80% 处暂停新开仓并保留退出、撤单和对账余量。
 - 控制台“全部账号最近 10 条成交记录”只接收账户 WebSocket 成交事件，并通过控制台 WebSocket 实时推送；不轮询 `/api/v3/myTrades`，服务重启后从新成交开始显示。
@@ -60,7 +60,7 @@ BOT_ACCOUNT_PROFILES_JSON='{
 `orderAmountsUsdt` 可为每个账户按交易对设置单笔 USDT 名义金额；未配置的交易对回退到全局
 `binance.strategy.order-amount-usdt`。单笔金额仍不能超过 `max-live-order-notional-usdt`，并会在控制台显示当前生效值。
 
-生产环境可在受保护配置文件中用 `BINANCE_STRATEGY_MAX_DAILY_DRAWDOWN_USDT` 覆盖日内最大回撤；未配置时默认 `8 USDT`，修改后需重启服务。
+生产环境可在受保护配置文件中用 `BINANCE_STRATEGY_MAX_DAILY_DRAWDOWN_USDT` 覆盖日内最大回撤；未配置时默认 `8 USDT`，修改后需重启服务。同交易对跨 API key 的交易轮次并发名额默认 `1`，env 可用 `BINANCE_STRATEGY_MAX_CONCURRENT_ENTRIES_PER_SYMBOL` 提供初始值；控制台保存到 SQLite 后优先于 env 并立即生效。
 
 `symbolStrategies` 可为每个账户的每个交易对选择三种策略：
 `BID_ASK_MAKER` 按 `bidAskEntryBookLevel` 选择买一至买五挂买单（默认买一），初始卖价取卖一和“买入均价 + `bidAskInitialSellMarkupTicks` 个 tick”的较高值，加价默认 `1 tick`；

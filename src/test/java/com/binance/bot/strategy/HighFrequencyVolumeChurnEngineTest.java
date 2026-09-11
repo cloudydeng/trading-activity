@@ -4,6 +4,7 @@ import com.binance.bot.config.BinanceProperties;
 import com.binance.bot.account.AccountCredentials;
 import com.binance.bot.account.AccountExecutionEvent;
 import com.binance.bot.account.AccountRiskCoordinator;
+import com.binance.bot.account.SymbolTradeCoordinator;
 import com.binance.bot.manager.SymbolRuleManager;
 import com.binance.bot.notification.TradeNotificationService;
 import com.binance.bot.notification.FillNotification;
@@ -2036,6 +2037,40 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void sameSymbolEntryLimitDefersSecondAccountUntilFirstCycleIsFlat() throws Exception {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        BinanceAccountTradeClient tradeA = mock(BinanceAccountTradeClient.class);
+        BinanceAccountTradeClient tradeB = mock(BinanceAccountTradeClient.class);
+        stubHealthyBalances(tradeA);
+        stubHealthyBalances(tradeB);
+        when(tradeA.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString()))
+                .thenReturn(new ObjectMapper().readTree("{\"orderId\":101}"));
+        when(tradeB.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString()))
+                .thenReturn(new ObjectMapper().readTree("{\"orderId\":102}"));
+        HighFrequencyVolumeChurnEngine engineA = engineFor("account-a", "A", tradeA, coordinator);
+        HighFrequencyVolumeChurnEngine engineB = engineFor("account-b", "B", tradeB, coordinator);
+        engineA.getIsRunning().set(true);
+        engineB.getIsRunning().set(true);
+
+        ReflectionTestUtils.invokeMethod(engineA, "driveChurnStateMachine",
+                new BigDecimal("0.862"), new BigDecimal("0.863"));
+        ReflectionTestUtils.invokeMethod(engineB, "driveChurnStateMachine",
+                new BigDecimal("0.862"), new BigDecimal("0.863"));
+
+        verify(tradeA).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString());
+        verify(tradeB, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString());
+        assertTrue(engineB.getStatusReason().get().contains("同交易对已有 1/1 个账户交易中"));
+
+        ReflectionTestUtils.invokeMethod(engineA, "completeFlatExit", false);
+        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engineB, "nextOrderAttemptAt"))
+                .set(0);
+        ReflectionTestUtils.invokeMethod(engineB, "driveChurnStateMachine",
+                new BigDecimal("0.862"), new BigDecimal("0.863"));
+
+        verify(tradeB).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString());
+    }
+
+    @Test
     void localIpWeightThrottleDefersEntryWithoutHaltingEngine() throws Exception {
         engine.getIsRunning().set(true);
         when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString()))
@@ -2262,6 +2297,22 @@ class HighFrequencyVolumeChurnEngineTest {
                 .thenReturn(MarketSignalEvaluator.EntryDecision.allow(
                         new BigDecimal("0.2"), new BigDecimal("0.1"), new BigDecimal("0.1"),
                         BigDecimal.ZERO, BigDecimal.ZERO));
+    }
+
+    private HighFrequencyVolumeChurnEngine engineFor(String accountId, String alias,
+                                                     BinanceAccountTradeClient tradeClient,
+                                                     SymbolTradeCoordinator coordinator) {
+        return new HighFrequencyVolumeChurnEngine(accountId, alias,
+                new AccountCredentials(accountId, alias, "key-" + accountId, "secret-" + accountId),
+                properties, tradeClient, ruleManager, userDataStreamReady::get, marketSignalEvaluator,
+                mock(PostFillOutcomeTracker.class), new TradingRiskGuard(), dailyStatsStore,
+                notificationService, null, coordinator);
+    }
+
+    private void stubHealthyBalances(BinanceAccountTradeClient client) {
+        when(client.getAssetBalance("BNB")).thenReturn(new BinanceAccountTradeClient.AssetBalance(
+                "BNB", new BigDecimal("0.01"), BigDecimal.ZERO, new BigDecimal("0.01")));
+        when(client.getTickerPrice("BNBUSDT")).thenReturn(new BigDecimal("1000"));
     }
 
     @SuppressWarnings("unchecked")

@@ -43,6 +43,22 @@ class DailyTradeStatsStoreTest {
     }
 
     @Test
+    void persistsTradingRuntimeSettingsAcrossRestart() {
+        BinanceProperties properties = properties();
+        DailyTradeStatsStore first = new DailyTradeStatsStore(properties);
+        first.saveTradingRuntimeSettings(new DailyTradeStatsStore.TradingRuntimeSettings(3));
+        first.close();
+
+        DailyTradeStatsStore restarted = new DailyTradeStatsStore(properties());
+
+        assertEquals(3, restarted.loadTradingRuntimeSettings().orElseThrow()
+                .maxConcurrentEntriesPerSymbol());
+        assertThrows(IllegalArgumentException.class, () -> restarted.saveTradingRuntimeSettings(
+                new DailyTradeStatsStore.TradingRuntimeSettings(0)));
+        restarted.close();
+    }
+
+    @Test
     void persistsDailyEconomicsAndDeduplicatesTradesAcrossRestart() throws Exception {
         BinanceProperties properties = properties();
         DailyTradeStatsStore first = new DailyTradeStatsStore(properties);

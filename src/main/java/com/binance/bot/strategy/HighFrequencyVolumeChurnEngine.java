@@ -3,6 +3,7 @@ package com.binance.bot.strategy;
 import com.binance.bot.account.AccountCredentials;
 import com.binance.bot.account.AccountExecutionEvent;
 import com.binance.bot.account.AccountRiskCoordinator;
+import com.binance.bot.account.SymbolTradeCoordinator;
 import com.binance.bot.config.BinanceProperties;
 import com.binance.bot.manager.SymbolRuleManager;
 import com.binance.bot.notification.FillNotification;
@@ -68,6 +69,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final DailyTradeStatsStore dailyStatsStore;
     private final TradeNotificationService notificationService;
     private final AccountRiskCoordinator accountRiskCoordinator;
+    private final SymbolTradeCoordinator symbolTradeCoordinator;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newHttpClient();
     private final AtomicReference<BigDecimal> lastBestBid = new AtomicReference<>();
@@ -144,6 +146,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final ReentrantLock inboundMarketMessageLock = new ReentrantLock();
     private final AtomicReference<String> lastDustStateSignature = new AtomicReference<>("");
     private final AtomicBoolean accountRiskReconciled = new AtomicBoolean(false);
+    private final AtomicBoolean symbolTradeSlotHeld = new AtomicBoolean(false);
+    private final AtomicReference<String> symbolTradeSlotSymbol = new AtomicReference<>();
 
     public HighFrequencyVolumeChurnEngine(String accountId, String accountAlias, AccountCredentials credentials,
                                            BinanceProperties properties, BinanceAccountTradeClient tradeService,
@@ -154,7 +158,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                            TradeNotificationService notificationService) {
         this(accountId, accountAlias, credentials, properties, tradeService, ruleManager,
                 accountStreamReady, marketSignalEvaluator, postFillOutcomeTracker, riskGuard,
-                dailyStatsStore, notificationService, null);
+                dailyStatsStore, notificationService, null, null);
     }
 
     public HighFrequencyVolumeChurnEngine(String accountId, String accountAlias, AccountCredentials credentials,
@@ -165,6 +169,20 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                            TradingRiskGuard riskGuard, DailyTradeStatsStore dailyStatsStore,
                                            TradeNotificationService notificationService,
                                            AccountRiskCoordinator accountRiskCoordinator) {
+        this(accountId, accountAlias, credentials, properties, tradeService, ruleManager,
+                accountStreamReady, marketSignalEvaluator, postFillOutcomeTracker, riskGuard,
+                dailyStatsStore, notificationService, accountRiskCoordinator, null);
+    }
+
+    public HighFrequencyVolumeChurnEngine(String accountId, String accountAlias, AccountCredentials credentials,
+                                           BinanceProperties properties, BinanceAccountTradeClient tradeService,
+                                           SymbolRuleManager ruleManager, BooleanSupplier accountStreamReady,
+                                           MarketSignalEvaluator marketSignalEvaluator,
+                                           PostFillOutcomeTracker postFillOutcomeTracker,
+                                           TradingRiskGuard riskGuard, DailyTradeStatsStore dailyStatsStore,
+                                           TradeNotificationService notificationService,
+                                           AccountRiskCoordinator accountRiskCoordinator,
+                                           SymbolTradeCoordinator symbolTradeCoordinator) {
         this.accountId = accountId;
         this.accountAlias = accountAlias;
         this.accountEngineKey = accountId + "::" + properties.getStrategy().getSymbol().toUpperCase();
@@ -184,6 +202,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         this.accountRiskReconciled.set(accountRiskCoordinator == null);
         this.accountRiskCoordinator = accountRiskCoordinator == null
                 ? new AccountRiskCoordinator() : accountRiskCoordinator;
+        this.symbolTradeCoordinator = symbolTradeCoordinator == null
+                ? new SymbolTradeCoordinator() : symbolTradeCoordinator;
         this.accountRiskCoordinator.register(accountEngineKey, riskGuard::snapshot, accountRiskReconciled::get);
         if (properties.getStrategy().getSymbolStrategies() != null) {
             properties.getStrategy().getSymbolStrategies().forEach((symbol, profile) -> {
@@ -217,6 +237,46 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         } finally {
             stateLock.unlock();
         }
+    }
+
+    private SymbolTradeCoordinator.EntryPermit acquireSymbolTradeSlot(String symbol) {
+        String normalizedSymbol = normalizeStrategySymbol(symbol);
+        String heldSymbol = symbolTradeSlotSymbol.get();
+        if (symbolTradeSlotHeld.get() && normalizedSymbol.equals(heldSymbol)) {
+            return new SymbolTradeCoordinator.EntryPermit(true, "");
+        }
+        if (symbolTradeSlotHeld.get()) releaseSymbolTradeSlot();
+        SymbolTradeCoordinator.EntryPermit permit = symbolTradeCoordinator.acquire(
+                normalizedSymbol, accountEngineKey, accountAlias);
+        if (permit.accepted()) {
+            symbolTradeSlotSymbol.set(normalizedSymbol);
+            symbolTradeSlotHeld.set(true);
+        }
+        return permit;
+    }
+
+    private void releaseSymbolTradeSlot() {
+        String symbol = symbolTradeSlotSymbol.getAndSet(null);
+        if (!symbolTradeSlotHeld.getAndSet(false) || symbol == null || symbol.isBlank()) return;
+        symbolTradeCoordinator.release(symbol, accountEngineKey);
+    }
+
+    private void releaseSymbolTradeSlotIfFlat() {
+        if (holdingInventory.get().signum() == 0
+                && activeOrderId.get() == null
+                && currentStatus.get() != ChurnStatus.BUYING
+                && currentStatus.get() != ChurnStatus.SELLING) {
+            releaseSymbolTradeSlot();
+        }
+    }
+
+    private void claimExistingSymbolTradeSlot(String symbol) {
+        String normalizedSymbol = normalizeStrategySymbol(symbol);
+        if (symbolTradeSlotHeld.get() && normalizedSymbol.equals(symbolTradeSlotSymbol.get())) return;
+        if (symbolTradeSlotHeld.get()) releaseSymbolTradeSlot();
+        symbolTradeCoordinator.claimExisting(normalizedSymbol, accountEngineKey, accountAlias);
+        symbolTradeSlotSymbol.set(normalizedSymbol);
+        symbolTradeSlotHeld.set(true);
     }
 
     public void initialize() {
@@ -445,7 +505,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return false;
         }
         if (!openOrders.isEmpty()) {
-            if (restoreActiveSellOrder(openOrders, runtimeState)) return true;
+            if (restoreActiveSellOrder(openOrders, runtimeState)) {
+                claimExistingSymbolTradeSlot(properties.getStrategy().getSymbol());
+                return true;
+            }
             halt("发现未由本进程恢复的活动订单，需先人工对账");
             return false;
         }
@@ -499,6 +562,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         isRunning.set(true);
         currentStatus.set(ChurnStatus.SELLING);
         statusReason.set("启动时按交易所历史成交恢复持仓，重新挂卖单");
+        claimExistingSymbolTradeSlot(properties.getStrategy().getSymbol());
         submitImmediateExit(rule);
         boolean accepted = activeOrderId.get() != null && currentStatus.get() == ChurnStatus.SELLING;
         if (accepted) {
@@ -687,6 +751,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             statusReason.set("已安全停止");
             resetEntryTarget();
         }
+        releaseSymbolTradeSlot();
         log.info("[accountId={} alias={}] 引擎已停止。总交易量: {} USDT, 闭环轮数: {}",
                 accountId, accountAlias, totalVolumeUsdt.get(), roundTripsCompleted.get());
         return true;
@@ -757,6 +822,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         try {
             stopTrading();
         } finally {
+            releaseSymbolTradeSlot();
             accountRiskCoordinator.unregister(accountEngineKey);
         }
     }
@@ -1068,6 +1134,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             if (!reconcileTerminalEvent(orderId, side, update.cumulativeExecutedQty(), update.cumulativeQuoteQty(), rule)) return;
             clearActiveOrder();
             transitionAfterInventoryChange(rule, "BUY 已成交，按实际成交均价挂限价卖单");
+            releaseSymbolTradeSlotIfFlat();
         } else if (activeEvent && "SELL".equalsIgnoreCase(side) && currentStatus.get() == ChurnStatus.SELLING
                 && ("FILLED".equals(orderStatus) || "CANCELED".equals(orderStatus)
                 || "EXPIRED".equals(orderStatus) || "EXPIRED_IN_MATCH".equals(orderStatus))) {
@@ -1829,12 +1896,19 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private void submitMakerOrder(String symbol, String side, BigDecimal price, BigDecimal qty,
                                   Long cancelOrderId, ChurnStatus status) {
         boolean buy = "BUY".equalsIgnoreCase(side);
+        SymbolTradeCoordinator.EntryPermit symbolPermit = buy ? acquireSymbolTradeSlot(symbol) : null;
+        if (buy && !symbolPermit.accepted()) {
+            nextOrderAttemptAt.set(System.currentTimeMillis() + 1_000);
+            statusReason.set(symbolPermit.reason());
+            return;
+        }
         AccountRiskCoordinator.EntryReservation reservation = buy
                 ? accountRiskCoordinator.reserveEntry(accountEngineKey, price.multiply(qty),
                 properties.getStrategy().getMaxInventoryUsdt(),
                 properties.getStrategy().getMaxDailyDrawdownUsdt())
                 : null;
         if (buy && !reservation.accepted()) {
+            releaseSymbolTradeSlot();
             nextOrderAttemptAt.set(System.currentTimeMillis() + 1_000);
             statusReason.set(reservation.reason());
             return;
@@ -1863,6 +1937,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     statusReason.set("持仓退出中：Maker 卖单已挂出 @ " + price.toPlainString());
                 }
             }
+        } catch (RuntimeException e) {
+            if (buy) {
+                accountRiskCoordinator.releaseEntry(accountEngineKey);
+                releaseSymbolTradeSlot();
+                if (cancelOrderId == null) resetEntryTarget();
+            }
+            throw e;
         } finally {
             replacingOrderId.compareAndSet(cancelOrderId, null);
         }
@@ -1881,7 +1962,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return;
         }
         if (response.path("localRateLimited").asBoolean(false)) {
-            if (status == ChurnStatus.BUYING) accountRiskCoordinator.releaseEntry(accountEngineKey);
+            if (status == ChurnStatus.BUYING) {
+                accountRiskCoordinator.releaseEntry(accountEngineKey);
+                releaseSymbolTradeSlot();
+            }
             pendingClientOrderIds.remove(clientOrderId);
             activeClientOrderId.compareAndSet(clientOrderId, null);
             if (oldOrderId == null && status == ChurnStatus.BUYING) resetEntryTarget();
@@ -1928,6 +2012,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 accountRiskCoordinator.releaseEntry(accountEngineKey);
                 if (rule != null) transitionAfterInventoryChange(rule, "旧买单已撤销但新买单未创建，重新评估持仓");
                 else { currentStatus.set(ChurnStatus.IDLE); resetEntryTarget(); }
+                releaseSymbolTradeSlotIfFlat();
             } else {
                 releaseActiveSellReservation();
                 if (rule != null) transitionAfterInventoryChange(rule, "旧卖单已撤销但新卖单未创建，重新评估持仓");
@@ -1946,7 +2031,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return;
         }
         if (oldOrderId == null) {
-            if (status == ChurnStatus.BUYING) accountRiskCoordinator.releaseEntry(accountEngineKey);
+            if (status == ChurnStatus.BUYING) {
+                accountRiskCoordinator.releaseEntry(accountEngineKey);
+                releaseSymbolTradeSlot();
+            }
             activeClientOrderId.compareAndSet(clientOrderId, null);
             boolean insufficientBalance = response.path("code").asInt() == -2010
                     && response.path("msg").asText("").toLowerCase().contains("insufficient balance");
@@ -2054,6 +2142,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             clearActiveOrder();
             accountRiskCoordinator.releaseEntry(accountEngineKey);
             transitionAfterInventoryChange(rule, "BUY 撤单包含成交，立即退出已成交持仓");
+            releaseSymbolTradeSlotIfFlat();
             log.info("[accountId={} alias={}] 撤单 {} 已确认，状态机恢复为 {}",
                     accountId, accountAlias, orderId, currentStatus.get());
         }
@@ -2124,6 +2213,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         clearActiveOrder();
         if ("BUY".equalsIgnoreCase(side)) {
             transitionAfterInventoryChange(rule, "BUY REST 对账完成，重新评估持仓");
+            releaseSymbolTradeSlotIfFlat();
         } else if (reconciledInventory.compareTo(rule.stepSize()) < 0) {
             completeFlatExit(true);
         } else {
@@ -2150,6 +2240,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         rememberFeeAwareEntryPriceCeiling(rule);
         resetEntryTarget();
         persistRuntimeState(false);
+        releaseSymbolTradeSlot();
         if (dailyVolumeLimitReached()) {
             dailyVolumeStopPending.set(false);
             isRunning.set(false);
@@ -2215,6 +2306,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     private void clearTrackedOrders() {
         accountRiskCoordinator.releaseEntry(accountEngineKey);
+        releaseSymbolTradeSlotIfFlat();
         clearActiveOrder();
         knownOrderIds.clear();
         pendingClientOrderIds.clear();

@@ -1,6 +1,7 @@
 package com.binance.bot.controller;
 
 import com.binance.bot.account.AccountTradingRuntime;
+import com.binance.bot.account.SymbolTradeCoordinator;
 import com.binance.bot.account.TradingAccountManager;
 import com.binance.bot.config.BinanceProperties;
 import com.binance.bot.notification.FillNotification;
@@ -25,6 +26,23 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class BotDashboardControllerTest {
+    @Test
+    void tradingSettingsCanBeSavedAndAppliedImmediately() {
+        TradingAccountManager accountManager = mock(TradingAccountManager.class);
+        TradeNotificationService notificationService = mock(TradeNotificationService.class);
+        DailyTradeStatsStore store = mock(DailyTradeStatsStore.class);
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        BotDashboardController controller = new BotDashboardController(
+                accountManager, new BinanceProperties(), notificationService, store, coordinator);
+
+        ResponseEntity<?> response = controller.updateTradingSettings(
+                new BotDashboardController.TradingSettingsRequest(2));
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        assertEquals(2, coordinator.maxConcurrentEntriesPerSymbol());
+        verify(store).saveTradingRuntimeSettings(new DailyTradeStatsStore.TradingRuntimeSettings(2));
+    }
+
     @Test
     void accountSymbolConfigurationCanBeReadAndUpdated() {
         TradingAccountManager accountManager = mock(TradingAccountManager.class);

@@ -98,6 +98,8 @@ public class BinanceProperties {
         private Map<String, BigDecimal> orderAmountsUsdt = new LinkedHashMap<>();
         /** Account-specific strategy overrides copied into each runtime. */
         private Map<String, SymbolStrategyProfile> symbolStrategies = new LinkedHashMap<>();
+        /** Maximum account/symbol engines that may hold an entry/exit cycle for the same symbol. */
+        private int maxConcurrentEntriesPerSymbol = 1;
         private BigDecimal maxLiveOrderNotionalUsdt = new BigDecimal("30");
         private int bidDepthOffsetTicks;
         private int askDepthOffsetTicks;
