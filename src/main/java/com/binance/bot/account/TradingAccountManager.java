@@ -267,10 +267,11 @@ public class TradingAccountManager {
         runtimes().forEach(runtime -> runtime.engines().forEach(engine -> result.add(new AccountSummary(
                 runtime.accountId() + "::" + engine.getSymbol(), runtime.accountId(), runtime.alias(),
                 runtime.symbolCount(), runtime.initialized(), engine.getIsRunning().get(),
-                engine.getCurrentStatus().get().name(), engine.getStrategyMode(), engine.getSymbol(),
+                engine.getCurrentStatus().get().name(), engine.getStatusReason().get(),
+                engine.getStrategyMode(), engine.getSymbol(),
                 engine.isAccountStreamReady(), null))));
         initializationErrors.forEach((id, error) -> result.add(new AccountSummary(id, id, id, 0,
-                false, false, "INITIALIZATION_FAILED", null, null, false, error)));
+                false, false, "INITIALIZATION_FAILED", error, null, null, false, error)));
         result.sort(Comparator.comparing(AccountSummary::accountId)
                 .thenComparing(summary -> Optional.ofNullable(summary.symbol()).orElse("")));
         return result;
@@ -383,7 +384,7 @@ public class TradingAccountManager {
 
     public record AccountSummary(String runtimeId, String accountId, String alias, int symbolCount,
                                  boolean initialized, boolean running,
-                                 String status, String strategyMode, String symbol,
+                                 String status, String statusReason, String strategyMode, String symbol,
                                  boolean accountStreamReady, String error) { }
     public record OperationResult(boolean success, String reason) { }
     public record ReloadResult(int added, List<String> addedAccounts, Map<String, String> errors) { }
