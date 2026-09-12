@@ -257,7 +257,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     private void releaseSymbolTradeSlot() {
         String symbol = symbolTradeSlotSymbol.getAndSet(null);
-        if (!symbolTradeSlotHeld.getAndSet(false) || symbol == null || symbol.isBlank()) return;
+        symbolTradeSlotHeld.set(false);
+        if (symbol == null || symbol.isBlank()) symbol = properties.getStrategy().getSymbol();
+        if (symbol == null || symbol.isBlank()) return;
+        // release() also removes an engine that is waiting in the per-symbol FIFO queue.
         symbolTradeCoordinator.release(symbol, accountEngineKey);
     }
 
@@ -762,6 +765,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     public LiquidationResult liquidateExistingPosition() {
         return withStateLock(() -> {
         isRunning.set(false);
+        releaseSymbolTradeSlotIfFlat();
         if (!properties.getStrategy().isLiveTradingEnabled()) {
             return LiquidationResult.rejected("服务器未配置 BINANCE_LIVE_TRADING_ENABLED=true");
         }
@@ -898,6 +902,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         currentStatus.set(ChurnStatus.HALTED);
         statusReason.set(reason);
+        releaseSymbolTradeSlotIfFlat();
         if (wasRunning || orderId != null) log.error("[accountId={} alias={}] {}；已停机，重连后不会自动恢复",
                 accountId, accountAlias, reason);
     }
@@ -2346,7 +2351,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return new LiquidationResult(false, null, BigDecimal.ZERO, message);
         }
     }
-    private void halt(String reason) { isRunning.set(false); currentStatus.set(ChurnStatus.HALTED); statusReason.set(reason); log.error("[accountId={} alias={}] 引擎进入保护停机: {}", accountId, accountAlias, reason); }
+    private void halt(String reason) { isRunning.set(false); currentStatus.set(ChurnStatus.HALTED); statusReason.set(reason); releaseSymbolTradeSlotIfFlat(); log.error("[accountId={} alias={}] 引擎进入保护停机: {}", accountId, accountAlias, reason); }
     private BigDecimal applyJitter(BigDecimal qty) { double j = properties.getStrategy().getRandomSizeJitter(); return j <= 0 ? qty : qty.multiply(BigDecimal.valueOf(1 + ThreadLocalRandom.current().nextDouble(-j, j))); }
     private boolean calibrateHoldings() {
         BinanceAccountTradeClient.AssetBalance balance = tradeService.getAssetBalance(baseAsset());
@@ -2603,6 +2608,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         statusReason.set(dailyVolumeLimitMessage(holdingInventory.get().signum() > 0
                 ? "仅剩不可交易粉尘，已自动停止当前币种策略"
                 : "已自动停止当前币种策略"));
+        releaseSymbolTradeSlotIfFlat();
         persistRuntimeState(false);
         log.warn("[accountId={} alias={}] {}", accountId, accountAlias, statusReason.get());
         return true;
@@ -2660,6 +2666,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         statusReason.set(bnbBalanceMessage(bnb, holdingInventory.get().signum() > 0
                 ? "仅剩不可交易粉尘，已自动停止当前币种策略"
                 : "已自动停止当前币种策略"));
+        releaseSymbolTradeSlotIfFlat();
         persistRuntimeState(false);
         log.warn("[accountId={} alias={}] {}", accountId, accountAlias, statusReason.get());
         return true;
