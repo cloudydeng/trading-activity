@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -28,6 +29,8 @@ class AccountRiskCoordinatorTest {
                 "a::ENSO", new BigDecimal("12"), new BigDecimal("30"), new BigDecimal("8"));
 
         assertFalse(blocked.accepted());
+        assertEquals("新买入后账户总风险预计超过 30 USDT（当前占用 22 USDT + 本单 12 USDT = 预计 34 USDT）",
+                blocked.reason());
     }
 
     @Test

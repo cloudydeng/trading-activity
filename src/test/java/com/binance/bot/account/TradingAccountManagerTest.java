@@ -15,6 +15,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -167,6 +169,38 @@ class TradingAccountManagerTest {
         assertTrue(manager.find("invalid account").isEmpty());
         verify(factory, times(1)).create(any());
         verify(healthy).initialize();
+    }
+
+    @Test
+    void summariesExposeEachSymbolStatusReason() {
+        BinanceProperties properties = new BinanceProperties();
+        properties.getApi().getProfiles().put("account-a", profile("A", "key-a", "secret-a"));
+        AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
+        AccountTradingRuntime runtime = mock(AccountTradingRuntime.class);
+        com.binance.bot.strategy.HighFrequencyVolumeChurnEngine engine =
+                mock(com.binance.bot.strategy.HighFrequencyVolumeChurnEngine.class);
+        when(runtime.accountId()).thenReturn("account-a");
+        when(runtime.alias()).thenReturn("A");
+        when(runtime.symbolCount()).thenReturn(1);
+        when(runtime.initialized()).thenReturn(true);
+        when(runtime.engines()).thenReturn(List.of(engine));
+        when(engine.getSymbol()).thenReturn("HOLOUSDT");
+        when(engine.getIsRunning()).thenReturn(new AtomicBoolean(true));
+        when(engine.getCurrentStatus()).thenReturn(new AtomicReference<>(
+                com.binance.bot.strategy.HighFrequencyVolumeChurnEngine.ChurnStatus.IDLE));
+        when(engine.getStatusReason()).thenReturn(new AtomicReference<>(
+                "HOLOUSDT 同交易对已有 2/2 个账户交易中；FIFO 排队第 1 位"));
+        when(engine.getStrategyMode()).thenReturn("BUY_PRICE_MAKER");
+        when(engine.isAccountStreamReady()).thenReturn(true);
+        when(factory.create(any())).thenReturn(runtime);
+        TradingAccountManager manager = new TradingAccountManager(
+                properties, factory, mock(DailyTradeStatsStore.class));
+        manager.initialize();
+
+        TradingAccountManager.AccountSummary summary = manager.summaries().getFirst();
+
+        assertEquals("HOLOUSDT 同交易对已有 2/2 个账户交易中；FIFO 排队第 1 位",
+                summary.statusReason());
     }
 
     @Test

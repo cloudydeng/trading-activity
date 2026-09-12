@@ -10,6 +10,7 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 /** Records post-fill market outcomes for validation; it does not make trading decisions. */
 public class PostFillOutcomeTracker {
@@ -17,6 +18,7 @@ public class PostFillOutcomeTracker {
     private static final MathContext MC = MathContext.DECIMAL64;
     private final Deque<Observation> active = new ArrayDeque<>();
     private final Deque<Outcome> completed = new ArrayDeque<>();
+    private final ReentrantLock lock = new ReentrantLock();
     private final ObservationJournal observationJournal;
 
     /** Keeps lightweight unit tests independent from the filesystem. */
@@ -28,13 +30,18 @@ public class PostFillOutcomeTracker {
         this.observationJournal = observationJournal;
     }
 
-    public synchronized void recordBuyFill(BigDecimal entryPrice, String entryReason, long timestampMs) {
+    public void recordBuyFill(BigDecimal entryPrice, String entryReason, long timestampMs) {
         recordBuyFill(entryPrice, entryReason, null, timestampMs);
     }
 
-    public synchronized void recordBuyFill(BigDecimal entryPrice, String entryReason,
+    public void recordBuyFill(BigDecimal entryPrice, String entryReason,
                                            MarketSignalEvaluator.MarketContext entryContext, long timestampMs) {
+        lock.lock();
+        try {
         recordEntry(entryPrice, entryReason, entryContext, "FILLED", timestampMs);
+        } finally {
+            lock.unlock();
+        }
     }
 
     private void recordEntry(BigDecimal entryPrice, String entryReason, MarketSignalEvaluator.MarketContext entryContext,
@@ -43,7 +50,9 @@ public class PostFillOutcomeTracker {
         active.addLast(new Observation(entryPrice, entryReason, entryContext, entryType, timestampMs));
     }
 
-    public synchronized void recordMarketPrice(BigDecimal price, long timestampMs) {
+    public void recordMarketPrice(BigDecimal price, long timestampMs) {
+        lock.lock();
+        try {
         if (price == null || price.signum() <= 0) return;
         var iterator = active.iterator();
         while (iterator.hasNext()) {
@@ -57,16 +66,29 @@ public class PostFillOutcomeTracker {
             }
         }
         while (completed.size() > 500) completed.removeFirst();
+        } finally {
+            lock.unlock();
+        }
     }
 
-    public synchronized OutcomeSummary getSummary() {
-        return summarize(null);
+    public OutcomeSummary getSummary() {
+        lock.lock();
+        try {
+            return summarize(null);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** Prevents price observations from two symbols being combined after a hot switch. */
-    public synchronized void reset() {
+    public void reset() {
+        lock.lock();
+        try {
         active.clear();
         completed.clear();
+        } finally {
+            lock.unlock();
+        }
     }
 
     private OutcomeSummary summarize(String entryType) {
