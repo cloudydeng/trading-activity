@@ -97,8 +97,10 @@ public final class AccountRiskCoordinator {
             BigDecimal projected = total.add(requestedNotional);
             if (accountExposureLimit != null && accountExposureLimit.signum() > 0
                     && projected.compareTo(accountExposureLimit) > 0) {
-                return new EntryReservation(false, "账户所有币种的持仓和活动买单已达到总风险上限 "
-                        + accountExposureLimit.stripTrailingZeros().toPlainString() + " USDT");
+                return new EntryReservation(false, "新买入后账户总风险预计超过 "
+                        + formatUsdt(accountExposureLimit) + " USDT（当前占用 "
+                        + formatUsdt(total) + " USDT + 本单 " + formatUsdt(requestedNotional)
+                        + " USDT = 预计 " + formatUsdt(projected) + " USDT）");
             }
             if (freeQuoteBalance != null) {
                 BigDecimal spentSinceSnapshot = accountRisk.positionCost()
@@ -240,6 +242,10 @@ public final class AccountRiskCoordinator {
             latchedEntryBlockReason = "账户所有币种合计已达到今日最大回撤限制";
         }
         return latchedEntryBlockReason;
+    }
+
+    private static String formatUsdt(BigDecimal value) {
+        return value.stripTrailingZeros().toPlainString();
     }
 
     private record AccountRiskSnapshot(BigDecimal positionCost, BigDecimal todayNetPnl, boolean complete) { }
