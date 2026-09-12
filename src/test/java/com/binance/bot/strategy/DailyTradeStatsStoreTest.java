@@ -306,7 +306,8 @@ class DailyTradeStatsStoreTest {
         DailyTradeStatsStore first = new DailyTradeStatsStore(properties);
         first.saveRuntimeState("account-a", "ENSOUSDT", new DailyTradeStatsStore.RuntimeState(
                 "account-a", "ENSOUSDT", "SELLING", 77L, "ta-a-S-1", "SELL",
-                new BigDecimal("0.6013"), new BigDecimal("10"), new BigDecimal("0.6000"),
+                new BigDecimal("0.6013"), new BigDecimal("0.5995"),
+                new BigDecimal("10"), new BigDecimal("0.6000"),
                 1234L, 5678L, new BigDecimal("0.5990"),
                 List.of(new BigDecimal("0.5980"), new BigDecimal("0.6000"))));
         first.close();
@@ -316,6 +317,7 @@ class DailyTradeStatsStoreTest {
         assertEquals(77L, state.orderId());
         assertEquals("ta-a-S-1", state.clientOrderId());
         assertDecimal("0.6013", state.orderPrice());
+        assertDecimal("0.5995", state.previousBuyOrderPrice());
         assertDecimal("0.6000", state.feeAwareEntryPriceCeiling());
         assertDecimal("0.5990", state.feeAwareInitialEntryAnchorPrice());
         assertEquals(2, state.feeAwareRecentBuyPrices().size());

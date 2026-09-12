@@ -1174,10 +1174,22 @@ public class DailyTradeStatsStore {
 
     public record RuntimeState(String accountId, String symbol, String status, Long orderId,
                                String clientOrderId, String side, BigDecimal orderPrice,
+                               BigDecimal previousBuyOrderPrice,
                                BigDecimal activeSellCoveredQty, BigDecimal feeAwareEntryPriceCeiling,
                                long orderPlacedAtMs, long updatedAtMs,
                                BigDecimal feeAwareInitialEntryAnchorPrice,
-                               List<BigDecimal> feeAwareRecentBuyPrices) { }
+                               List<BigDecimal> feeAwareRecentBuyPrices) {
+        public RuntimeState(String accountId, String symbol, String status, Long orderId,
+                            String clientOrderId, String side, BigDecimal orderPrice,
+                            BigDecimal activeSellCoveredQty, BigDecimal feeAwareEntryPriceCeiling,
+                            long orderPlacedAtMs, long updatedAtMs,
+                            BigDecimal feeAwareInitialEntryAnchorPrice,
+                            List<BigDecimal> feeAwareRecentBuyPrices) {
+            this(accountId, symbol, status, orderId, clientOrderId, side, orderPrice, null,
+                    activeSellCoveredQty, feeAwareEntryPriceCeiling, orderPlacedAtMs, updatedAtMs,
+                    feeAwareInitialEntryAnchorPrice, feeAwareRecentBuyPrices);
+        }
+    }
     public record TradingRuntimeSettings(int maxConcurrentEntriesPerSymbol) { }
 
     private static final class MutableSymbolSummary {

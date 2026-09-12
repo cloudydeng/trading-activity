@@ -43,6 +43,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -95,6 +96,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final AtomicReference<BigDecimal> filledEntryQuantity = new AtomicReference<>(BigDecimal.ZERO);
     private final AtomicReference<BigDecimal> filledEntryQuoteQuantity = new AtomicReference<>(BigDecimal.ZERO);
     private final AtomicReference<BigDecimal> filledEntryMaxPrice = new AtomicReference<>(BigDecimal.ZERO);
+    private final AtomicReference<BigDecimal> previousBuyOrderPrice = new AtomicReference<>();
     private final AtomicReference<BigDecimal> feeAwareEntryPriceCeiling = new AtomicReference<>();
     private final AtomicReference<BigDecimal> feeAwareInitialEntryAnchorPrice = new AtomicReference<>();
     private final ArrayDeque<BigDecimal> feeAwareRecentBuyPrices = new ArrayDeque<>();
@@ -500,6 +502,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         dailyVolumeStopPending.set(dailyVolumeLimitReached());
         DailyTradeStatsStore.RuntimeState runtimeState = loadRuntimeState();
+        if (runtimeState != null && runtimeState.previousBuyOrderPrice() != null
+                && runtimeState.previousBuyOrderPrice().signum() > 0) {
+            previousBuyOrderPrice.set(runtimeState.previousBuyOrderPrice());
+        }
         restoreFeeAwareEntryPriceCeiling(runtimeState);
         applyConfiguredManualAnchorToCurrentCeiling();
         JsonNode openOrders = tradeService.getOpenOrders(properties.getStrategy().getSymbol());
@@ -692,7 +698,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             }
             dailyStatsStore.saveRuntimeState(accountId, symbol, new DailyTradeStatsStore.RuntimeState(
                     accountId, symbol, status.name(), orderId, clientOrderId, side, activeOrderPrice.get(),
-                    activeSellCoveredQty.get(), ceiling, orderPlacedTimestamp.get(), System.currentTimeMillis(),
+                    previousBuyOrderPrice.get(), activeSellCoveredQty.get(), ceiling,
+                    orderPlacedTimestamp.get(), System.currentTimeMillis(),
                     feeAwareInitialEntryAnchorPrice.get(), feeAwareRecentBuyPricesSnapshot()));
         } catch (RuntimeException e) {
             log.error("[accountId={} alias={}] 保存运行状态快照失败", accountId, accountAlias, e);
@@ -866,6 +873,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     /** One account-wide REST snapshot at strategy start or after account-stream recovery. */
     public void refreshDashboardOpenOrderSnapshot() {
+        refreshDashboardOpenOrderSnapshot(UnaryOperator.identity());
+    }
+
+    /** Enriches the account-wide snapshot with runtime-owned display fields without another REST call. */
+    public void refreshDashboardOpenOrderSnapshot(UnaryOperator<OpenOrderNotification> orderEnricher) {
         JsonNode openOrders;
         try {
             openOrders = tradeService.getAllOpenOrders();
@@ -881,13 +893,14 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         List<OpenOrderNotification> snapshot = new ArrayList<>();
         for (JsonNode order : openOrders) {
-            snapshot.add(new OpenOrderNotification(
+            OpenOrderNotification notification = new OpenOrderNotification(
                     accountId, accountAlias, order.path("symbol").asText(""),
                     order.path("side").asText(""), order.path("type").asText(""),
                     order.path("status").asText("NEW"), order.path("price").asText("0"),
                     order.path("origQty").asText("0"), order.path("executedQty").asText("0"),
                     order.path("orderId").asLong(0),
-                    order.path("time").asLong(order.path("updateTime").asLong(System.currentTimeMillis()))));
+                    order.path("time").asLong(order.path("updateTime").asLong(System.currentTimeMillis())));
+            snapshot.add(orderEnricher == null ? notification : orderEnricher.apply(notification));
         }
         notificationService.replaceOpenOrders(accountId, snapshot);
         log.info("[accountId={} alias={}] 控制台活动订单快照已对账，当前 {} 笔",
@@ -1254,6 +1267,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 quoteQuantity, notificationEntryPrice, notificationEntryQuote, notificationEntryTime,
                 commission, commissionAsset, tradeTimeMs));
         if ("BUY".equalsIgnoreCase(side)) {
+            BigDecimal submittedBuyPrice = activeOrderPrice.get();
+            previousBuyOrderPrice.set(submittedBuyPrice != null && submittedBuyPrice.signum() > 0
+                    ? submittedBuyPrice : price);
             filledEntryQuantity.accumulateAndGet(trade.quantity(), BigDecimal::add);
             filledEntryQuoteQuantity.accumulateAndGet(trade.quoteQuantity(), BigDecimal::add);
             filledEntryMaxPrice.accumulateAndGet(price, BigDecimal::max);
@@ -1724,6 +1740,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return null;
     }
 
+    /** Previous BUY order price exposed only for dashboard SELL-order display. */
+    public BigDecimal dashboardPreviousBuyPrice() {
+        BigDecimal exactOrderPrice = previousBuyOrderPrice.get();
+        return exactOrderPrice != null && exactOrderPrice.signum() > 0
+                ? exactOrderPrice : currentEntryAverageExecutionPrice();
+    }
+
     private BigDecimal entryAverageStrictlyHigherPrice(SymbolRuleManager.SymbolRule rule) {
         BigDecimal average = entryAveragePrice(rule);
         if (average.signum() <= 0) return BigDecimal.ZERO;
@@ -1934,6 +1957,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 long acceptedOrderId = acceptedOrder.get("orderId").asLong();
                 if (Long.valueOf(acceptedOrderId).equals(activeOrderId.get())) {
                     activeOrderPrice.set(price);
+                    if (buy) previousBuyOrderPrice.set(price);
                     persistRuntimeState(true);
                 }
                 log.info("[accountId={} alias={}] Maker 报单已接受: ID={} side={} qty={} price={} clientOrderId={}",
@@ -2094,6 +2118,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             trackOrder(matched.path("orderId").asLong(), clientOrderId, status);
             BigDecimal matchedPrice = new BigDecimal(matched.path("price").asText("0"));
             if (matchedPrice.signum() > 0) activeOrderPrice.set(matchedPrice);
+            if (status == ChurnStatus.BUYING && matchedPrice.signum() > 0) {
+                previousBuyOrderPrice.set(matchedPrice);
+            }
             if (status == ChurnStatus.SELLING && activeSellCoveredQty.get().signum() <= 0) {
                 BigDecimal originalQty = new BigDecimal(matched.path("origQty").asText("0"));
                 BigDecimal executedQty = new BigDecimal(matched.path("executedQty").asText("0"));

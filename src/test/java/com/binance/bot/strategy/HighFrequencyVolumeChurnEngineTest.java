@@ -132,6 +132,7 @@ class HighFrequencyVolumeChurnEngineTest {
         ReflectionTestUtils.invokeMethod(engine, "applyTrade", 41L, 102L, "BUY",
                 BigDecimal.ONE, new BigDecimal("5.909"), new BigDecimal("5.909"),
                 BigDecimal.ZERO, "USDT", "ta-buy-1", 101L);
+        assertEquals(0, new BigDecimal("5.909").compareTo(engine.dashboardPreviousBuyPrice()));
         ReflectionTestUtils.invokeMethod(engine, "applyTrade", 42L, 103L, "SELL",
                 new BigDecimal("2"), new BigDecimal("5.910"), new BigDecimal("11.820"),
                 BigDecimal.ZERO, "USDT", "ta-sell-1", 102L);
@@ -181,7 +182,7 @@ class HighFrequencyVolumeChurnEngineTest {
     void oneAccountOrderSnapshotFailureDoesNotEscapeIntoBatchStart() {
         when(tradeService.getAllOpenOrders()).thenThrow(new IllegalStateException("account unavailable"));
 
-        assertDoesNotThrow(engine::refreshDashboardOpenOrderSnapshot);
+        assertDoesNotThrow(() -> engine.refreshDashboardOpenOrderSnapshot());
     }
 
     @Test
@@ -1059,7 +1060,8 @@ class HighFrequencyVolumeChurnEngineTest {
                         """.formatted(now - 1000)));
         when(dailyStatsStore.loadRuntimeState("test-account", "ENSOUSDT")).thenReturn(Optional.of(
                 new DailyTradeStatsStore.RuntimeState("test-account", "ENSOUSDT", "SELLING", 77L,
-                        "ta-restore-S-1", "SELL", new BigDecimal("0.6013"), new BigDecimal("10"),
+                        "ta-restore-S-1", "SELL", new BigDecimal("0.6013"), new BigDecimal("0.5995"),
+                        new BigDecimal("10"),
                         new BigDecimal("0.6000"), now - 10_000, now - 10_000,
                         new BigDecimal("0.6000"), List.of(new BigDecimal("0.6000")))));
 
@@ -1071,6 +1073,7 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(0, new BigDecimal("6.006").compareTo(engine.getRiskSnapshot().positionCostUsdt()));
         assertEquals(0, new BigDecimal("0.6000").compareTo(
                 atomic("feeAwareEntryPriceCeiling", BigDecimal.class).get()));
+        assertEquals(0, new BigDecimal("0.5995").compareTo(engine.dashboardPreviousBuyPrice()));
         assertTrue(engine.getStatusReason().get().contains("重启后已恢复本进程卖单"));
     }
 

@@ -100,7 +100,11 @@ public class AccountTradingRuntimeFactory {
                 }, () -> {
                     AccountTradingRuntime runtime = runtimeRef.get();
                     if (runtime != null) runtime.handleUserStreamReady();
-                }, notificationService::notifyOrderUpdate);
+                }, update -> {
+                    AccountTradingRuntime runtime = runtimeRef.get();
+                    notificationService.notifyOrderUpdate(runtime == null
+                            ? update : runtime.enrichDashboardOpenOrder(update));
+                });
         streamRef.set(stream);
         AccountTradingRuntime runtime = new AccountTradingRuntime(
                 credentials, tradeClient, stream, engines, riskGuards, outcomeTrackers, accountRiskCoordinator);

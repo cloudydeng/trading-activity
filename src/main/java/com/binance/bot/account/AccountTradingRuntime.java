@@ -1,5 +1,6 @@
 package com.binance.bot.account;
 
+import com.binance.bot.notification.OpenOrderNotification;
 import com.binance.bot.service.AccountUserDataStream;
 import com.binance.bot.service.BinanceAccountTradeClient;
 import com.binance.bot.strategy.HighFrequencyVolumeChurnEngine;
@@ -134,6 +135,15 @@ public class AccountTradingRuntime {
             engines().stream().filter(value -> value.getIsRunning().get()).forEach(value ->
                     value.handleUserStreamLoss("收到未配置交易对 " + update.symbol() + " 的账户成交事件"));
         }
+    }
+
+    /** Adds the immediately preceding BUY price to SELL orders for dashboard display. */
+    public OpenOrderNotification enrichDashboardOpenOrder(OpenOrderNotification order) {
+        if (order == null || !"SELL".equalsIgnoreCase(order.side())) return order;
+        return engine(order.symbol())
+                .map(HighFrequencyVolumeChurnEngine::dashboardPreviousBuyPrice)
+                .map(order::withEntryPrice)
+                .orElse(order);
     }
 
     public void handleUserStreamLoss(String reason) {
@@ -317,7 +327,7 @@ public class AccountTradingRuntime {
         if (!force && previous > 0 && now - previous < 1_000) return;
         if (!force && !lastDashboardOpenOrderSnapshotAtMs.compareAndSet(previous, now)) return;
         if (force) lastDashboardOpenOrderSnapshotAtMs.set(now);
-        engine().refreshDashboardOpenOrderSnapshot();
+        engine().refreshDashboardOpenOrderSnapshot(this::enrichDashboardOpenOrder);
     }
 
     private static String safeEngineSymbol(HighFrequencyVolumeChurnEngine engine) {
