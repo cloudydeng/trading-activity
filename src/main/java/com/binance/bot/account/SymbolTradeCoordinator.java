@@ -12,8 +12,9 @@ import java.util.concurrent.locks.ReentrantLock;
 /**
  * JVM-wide, per-symbol pipeline shared by all account runtimes.
  *
- * <p>The configured concurrency is split into one BUY lane and the remaining
- * SELL lanes (with one SELL lane when the configured concurrency is one).
+ * <p>The configured concurrency is split as evenly as possible between BUY and
+ * SELL lanes, with the odd extra lane assigned to SELL (and one shared cycle
+ * lane when the configured concurrency is one).
  * Positions whose BUY has completed keep their total-concurrency slot while
  * waiting for a SELL lane in a strict per-symbol FIFO queue.</p>
  */
@@ -37,11 +38,12 @@ public final class SymbolTradeCoordinator {
         return maxConcurrentEntriesPerSymbol.get();
     }
 
-    /** Requests the symbol's single BUY lane while preserving BUY FIFO order. */
+    /** Requests one of the symbol's BUY lanes while preserving BUY FIFO order. */
     public EntryPermit acquire(String symbol, String engineId, String accountAlias) {
         String normalizedSymbol = normalizeSymbol(symbol);
         String normalizedEngineId = normalizeEngineId(engineId);
         int limit = maxConcurrentEntriesPerSymbol.get();
+        int buyLimit = buyLaneLimit(limit);
         if (normalizedSymbol.isBlank() || normalizedEngineId.isBlank()) {
             return new EntryPermit(false, "同交易对交易协调参数无效");
         }
@@ -66,13 +68,13 @@ public final class SymbolTradeCoordinator {
             buyWaiters.putIfAbsent(normalizedEngineId, new Waiter(normalizedEngineId,
                     displayAlias(normalizedEngineId, accountAlias), System.currentTimeMillis()));
             String firstWaitingEngineId = buyWaiters.keySet().iterator().next();
-            boolean buyLaneOccupied = countPhase(holders, Phase.BUYING) >= 1;
+            boolean buyLaneOccupied = countPhase(holders, Phase.BUYING) >= buyLimit;
             boolean totalCapacityReached = current == null
                     ? holders.size() >= limit
                     : holders.size() > limit;
             if (buyLaneOccupied || totalCapacityReached || !normalizedEngineId.equals(firstWaitingEngineId)) {
                 return new EntryPermit(false, buyWaitingReason(normalizedSymbol, normalizedEngineId,
-                        holders, buyWaiters, limit));
+                        holders, buyWaiters, buyLimit, limit));
             }
 
             Waiter waiter = buyWaiters.remove(normalizedEngineId);
@@ -241,10 +243,11 @@ public final class SymbolTradeCoordinator {
     }
 
     private String buyWaitingReason(String symbol, String engineId, LinkedHashMap<String, Holder> holders,
-                                    LinkedHashMap<String, Waiter> waiters, int limit) {
+                                    LinkedHashMap<String, Waiter> waiters, int buyLimit, int limit) {
         int position = queuePosition(waiters, engineId);
         String buying = describeHolders(holders, Phase.BUYING);
-        return symbol + " 买入通道已有 " + countPhase(holders, Phase.BUYING) + "/1 个账户买入中"
+        return symbol + " 买入通道已有 " + countPhase(holders, Phase.BUYING) + "/" + buyLimit
+                + " 个账户买入中"
                 + (buying.isBlank() ? "" : "：" + buying)
                 + "；总交易轮次 " + holders.size() + "/" + limit
                 + "；BUY FIFO 排队第 " + position + " 位";
@@ -276,8 +279,12 @@ public final class SymbolTradeCoordinator {
         return count;
     }
 
+    private int buyLaneLimit(int totalLimit) {
+        return Math.max(1, totalLimit / 2);
+    }
+
     private int sellLaneLimit(int totalLimit) {
-        return Math.max(1, totalLimit - 1);
+        return totalLimit == 1 ? 1 : totalLimit - buyLaneLimit(totalLimit);
     }
 
     private void cleanupEmptyState(String symbol, LinkedHashMap<String, Holder> holders,

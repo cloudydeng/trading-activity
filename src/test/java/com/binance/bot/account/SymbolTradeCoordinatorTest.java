@@ -40,6 +40,7 @@ class SymbolTradeCoordinatorTest {
         coordinator.configureMaxConcurrentEntriesPerSymbol(3);
 
         assertTrue(coordinator.acquire("THEUSDT", "a", "A").accepted());
+        assertFalse(coordinator.acquire("THEUSDT", "b", "B").accepted());
         assertTrue(coordinator.acquireSell("THEUSDT", "a", "A").accepted());
         assertTrue(coordinator.acquire("THEUSDT", "b", "B").accepted());
         assertTrue(coordinator.acquireSell("THEUSDT", "b", "B").accepted());
@@ -55,6 +56,32 @@ class SymbolTradeCoordinatorTest {
         assertFalse(waitingSell.accepted());
         assertEquals(SymbolTradeCoordinator.Phase.WAITING_TO_SELL, holder(coordinator, "c").phase());
         assertEquals(1, coordinator.snapshot("THEUSDT").sellWaiters().size());
+    }
+
+    @Test
+    void concurrencyFourRunsTwoBuysAndTwoSells() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        coordinator.configureMaxConcurrentEntriesPerSymbol(4);
+
+        assertTrue(coordinator.acquire("THEUSDT", "a", "A").accepted());
+        assertTrue(coordinator.acquire("THEUSDT", "b", "B").accepted());
+        assertFalse(coordinator.acquire("THEUSDT", "c", "C").accepted());
+        assertFalse(coordinator.acquire("THEUSDT", "d", "D").accepted());
+
+        assertTrue(coordinator.acquireSell("THEUSDT", "a", "A").accepted());
+        assertTrue(coordinator.acquire("THEUSDT", "c", "C").accepted());
+        assertTrue(coordinator.acquireSell("THEUSDT", "b", "B").accepted());
+        assertTrue(coordinator.acquire("THEUSDT", "d", "D").accepted());
+
+        assertEquals(SymbolTradeCoordinator.Phase.SELLING, holder(coordinator, "a").phase());
+        assertEquals(SymbolTradeCoordinator.Phase.SELLING, holder(coordinator, "b").phase());
+        assertEquals(SymbolTradeCoordinator.Phase.BUYING, holder(coordinator, "c").phase());
+        assertEquals(SymbolTradeCoordinator.Phase.BUYING, holder(coordinator, "d").phase());
+        assertTrue(coordinator.snapshot("THEUSDT").waiters().isEmpty());
+
+        SymbolTradeCoordinator.EntryPermit waitingSell = coordinator.acquireSell("THEUSDT", "c", "C");
+        assertFalse(waitingSell.accepted());
+        assertTrue(waitingSell.reason().contains("卖出通道已有 2/2"));
     }
 
     @Test
