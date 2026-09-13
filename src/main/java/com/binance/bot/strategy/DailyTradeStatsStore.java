@@ -1178,7 +1178,21 @@ public class DailyTradeStatsStore {
                                BigDecimal activeSellCoveredQty, BigDecimal feeAwareEntryPriceCeiling,
                                long orderPlacedAtMs, long updatedAtMs,
                                BigDecimal feeAwareInitialEntryAnchorPrice,
-                               List<BigDecimal> feeAwareRecentBuyPrices) {
+                               List<BigDecimal> feeAwareRecentBuyPrices,
+                               Long orderTimeoutMs) {
+        public RuntimeState(String accountId, String symbol, String status, Long orderId,
+                            String clientOrderId, String side, BigDecimal orderPrice,
+                            BigDecimal previousBuyOrderPrice,
+                            BigDecimal activeSellCoveredQty, BigDecimal feeAwareEntryPriceCeiling,
+                            long orderPlacedAtMs, long updatedAtMs,
+                            BigDecimal feeAwareInitialEntryAnchorPrice,
+                            List<BigDecimal> feeAwareRecentBuyPrices) {
+            this(accountId, symbol, status, orderId, clientOrderId, side, orderPrice,
+                    previousBuyOrderPrice, activeSellCoveredQty, feeAwareEntryPriceCeiling,
+                    orderPlacedAtMs, updatedAtMs, feeAwareInitialEntryAnchorPrice,
+                    feeAwareRecentBuyPrices, null);
+        }
+
         public RuntimeState(String accountId, String symbol, String status, Long orderId,
                             String clientOrderId, String side, BigDecimal orderPrice,
                             BigDecimal activeSellCoveredQty, BigDecimal feeAwareEntryPriceCeiling,
@@ -1187,7 +1201,7 @@ public class DailyTradeStatsStore {
                             List<BigDecimal> feeAwareRecentBuyPrices) {
             this(accountId, symbol, status, orderId, clientOrderId, side, orderPrice, null,
                     activeSellCoveredQty, feeAwareEntryPriceCeiling, orderPlacedAtMs, updatedAtMs,
-                    feeAwareInitialEntryAnchorPrice, feeAwareRecentBuyPrices);
+                    feeAwareInitialEntryAnchorPrice, feeAwareRecentBuyPrices, null);
         }
     }
     public record TradingRuntimeSettings(int maxConcurrentEntriesPerSymbol) { }

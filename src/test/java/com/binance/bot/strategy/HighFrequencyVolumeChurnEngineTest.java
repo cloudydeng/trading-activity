@@ -653,6 +653,31 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void eachBuyUsesAnIntegerNotionalFromEightBelowToTwoAboveTheConfiguredBase() {
+        properties.getStrategy().setMaxLiveOrderNotionalUsdt(new BigDecimal("30"));
+        assertTrue(engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("22"),
+                20_000L, 120_000L).accepted());
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule("ENSOUSDT");
+
+        for (int i = 0; i < 500; i++) {
+            BigDecimal amount = ReflectionTestUtils.invokeMethod(engine,
+                    "randomizedOrderAmountUsdt", new BigDecimal("0.6000"), rule);
+            assertEquals(0, amount.scale());
+            assertTrue(amount.compareTo(new BigDecimal("14")) >= 0);
+            assertTrue(amount.compareTo(new BigDecimal("24")) <= 0);
+        }
+    }
+
+    @Test
+    void orderTimeoutRandomizationStaysWithinOneToOnePointFiveTimesTheBase() {
+        for (int i = 0; i < 500; i++) {
+            Long timeoutMs = ReflectionTestUtils.invokeMethod(engine, "randomizedTimeoutMs", 20_000L);
+            assertTrue(timeoutMs >= 20_000L);
+            assertTrue(timeoutMs <= 30_000L);
+        }
+    }
+
+    @Test
     void buyPriceMakerBuysAtBestBidAndInitialSellUsesActualBuyAverage() throws Exception {
         HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
                 "ENSOUSDT", "BUY_PRICE_MAKER", new BigDecimal("6"), 20_000L, 120_000L);
@@ -722,8 +747,11 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(77L, runtimeState.getValue().orderId());
         assertEquals(0, new BigDecimal("0.6000").compareTo(runtimeState.getValue().feeAwareEntryPriceCeiling()));
 
-        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
-                .set(System.currentTimeMillis() - 121_000);
+        long initialSellTimeoutMs = ((AtomicLong) ReflectionTestUtils.getField(
+                engine, "activeOrderTimeoutMs")).get();
+        assertTrue(initialSellTimeoutMs >= 120_000L && initialSellTimeoutMs <= 180_000L);
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis() - initialSellTimeoutMs - 1);
         when(tradeService.cancelOrder("ENSOUSDT", 77L))
                 .thenReturn(mapper.readTree("{\"orderId\":77,\"status\":\"CANCELED\"}"));
         when(tradeService.getOrder("ENSOUSDT", 77L)).thenReturn(mapper.readTree(
@@ -1063,7 +1091,7 @@ class HighFrequencyVolumeChurnEngineTest {
                         "ta-restore-S-1", "SELL", new BigDecimal("0.6013"), new BigDecimal("0.5995"),
                         new BigDecimal("10"),
                         new BigDecimal("0.6000"), now - 10_000, now - 10_000,
-                        new BigDecimal("0.6000"), List.of(new BigDecimal("0.6000")))));
+                        new BigDecimal("0.6000"), List.of(new BigDecimal("0.6000")), 150_000L)));
 
         assertTrue(engine.startTrading());
 
@@ -1074,6 +1102,8 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(0, new BigDecimal("0.6000").compareTo(
                 atomic("feeAwareEntryPriceCeiling", BigDecimal.class).get()));
         assertEquals(0, new BigDecimal("0.5995").compareTo(engine.dashboardPreviousBuyPrice()));
+        assertEquals(150_000L, ((AtomicLong) ReflectionTestUtils.getField(
+                engine, "activeOrderTimeoutMs")).get());
         assertTrue(engine.getStatusReason().get().contains("重启后已恢复本进程卖单"));
     }
 
@@ -1646,8 +1676,8 @@ class HighFrequencyVolumeChurnEngineTest {
         atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6.0000"));
         atomic("activeOrderId", Long.class).set(77L);
         atomic("activeClientOrderId", String.class).set("churn-SELLG-old");
-        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
-                .set(System.currentTimeMillis() - 121_000);
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis() - 121_000L);
         TradingRiskGuard guard = (TradingRiskGuard) ReflectionTestUtils.getField(engine, "riskGuard");
         guard.recordFill("BUY", new BigDecimal("10"), new BigDecimal("0.60"),
                 System.currentTimeMillis(), properties.getStrategy());
@@ -1672,8 +1702,11 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(88L, atomic("activeOrderId", Long.class).get());
         assertTrue(engine.getStatusReason().get().contains("最新卖一"));
 
-        ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
-                .set(System.currentTimeMillis() - 121_000);
+        long replacementSellTimeoutMs = ((AtomicLong) ReflectionTestUtils.getField(
+                engine, "activeOrderTimeoutMs")).get();
+        assertTrue(replacementSellTimeoutMs >= 120_000L && replacementSellTimeoutMs <= 180_000L);
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis() - replacementSellTimeoutMs - 1);
         when(tradeService.cancelOrder("ENSOUSDT", 88L))
                 .thenReturn(mapper.readTree("{\"orderId\":88,\"status\":\"CANCELED\"}"));
         when(tradeService.getOrder("ENSOUSDT", 88L)).thenReturn(mapper.readTree(

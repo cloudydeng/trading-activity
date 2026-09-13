@@ -309,7 +309,7 @@ class DailyTradeStatsStoreTest {
                 new BigDecimal("0.6013"), new BigDecimal("0.5995"),
                 new BigDecimal("10"), new BigDecimal("0.6000"),
                 1234L, 5678L, new BigDecimal("0.5990"),
-                List.of(new BigDecimal("0.5980"), new BigDecimal("0.6000"))));
+                List.of(new BigDecimal("0.5980"), new BigDecimal("0.6000")), 150_000L));
         first.close();
 
         DailyTradeStatsStore restarted = new DailyTradeStatsStore(properties);
@@ -321,6 +321,7 @@ class DailyTradeStatsStoreTest {
         assertDecimal("0.6000", state.feeAwareEntryPriceCeiling());
         assertDecimal("0.5990", state.feeAwareInitialEntryAnchorPrice());
         assertEquals(2, state.feeAwareRecentBuyPrices().size());
+        assertEquals(150_000L, state.orderTimeoutMs());
 
         restarted.clearRuntimeState("account-a", "ENSOUSDT");
         assertEquals(true, restarted.loadRuntimeState("account-a", "ENSOUSDT").isEmpty());

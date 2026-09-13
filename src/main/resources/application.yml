@@ -38,7 +38,7 @@ binance:
     # 系统只有 LIVE 运行模式；服务器开关默认关闭，避免误启动真实交易。
     live-trading-enabled: "${BINANCE_LIVE_TRADING_ENABLED:false}"
     symbol: "${BINANCE_STRATEGY_SYMBOL:ENSOUSDT}"
-    # 单笔名义金额；ENSOUSDT 的 Binance 最小名义额为 5 USDT。
+    # 单笔金额基准；每张 BUY 实际取 [基准-8, 基准+2] 内的随机整数，并受交易所最小额与 LIVE 上限约束。
     order-amount-usdt: 12.0
     # 控制台可配置的单笔 LIVE 金额上限；现有账户金额不会因此自动放大。
     max-live-order-notional-usdt: 30.0
@@ -49,14 +49,14 @@ binance:
     bid-depth-offset-ticks: 0
     # 旧版盘口偏移配置；当前三种策略的初始卖价不读取该字段。
     ask-depth-offset-ticks: 0
-    # 挂单超时时间 (毫秒，超时后跟随最新盘口位移)
+    # 买单超时基准；每张 BUY 创建时在 1.0～1.5 倍内随机一次。
     order-ttl-ms: 20000
-    # 每张卖单管理 2 分钟；超时撤单对账后，将剩余持仓按最新卖一价重新挂 LIMIT GTC。
+    # 卖单超时基准；每次挂单/复查窗口在 1.0～1.5 倍内随机，超时后按最新卖一管理。
     limit-sell-timeout-ms: 120000
     # 仅作为兼容配置；买单现在固定驻留至 20 秒 TTL，不再因短线信号撤单。
     min-entry-order-rest-ms: 800
-    # 买入只允许 Maker；20 秒后若仍在策略配置档位则继续挂，否则撤单，不追卖一、不转 IOC。
-    # 默认每笔 12U，可按账户/交易对配置但不得超过 30U；数量仅按 stepSize 向下取整。
+    # 买入只允许 Maker；随机超时后若仍在策略配置档位则继续挂，否则撤单，不追卖一、不转 IOC。
+    # 旧比例抖动字段仅保留配置兼容；当前按上面的 USDT 整数区间随机。
     random-size-jitter: 0
     # 以下行情参数继续用于原始技术数据和兼容评估器；当前三种策略不会据此阻断买一 Maker 入场。
     signal-lookback-ms: 3000

@@ -55,6 +55,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private static final long POSITION_RECOVERY_WINDOW_MS = TimeUnit.DAYS.toMillis(1);
     private static final int POSITION_RECOVERY_MAX_WINDOWS = 30;
     private static final BigDecimal MIN_BNB_BALANCE_USDT = BigDecimal.ONE;
+    private static final BigDecimal ORDER_AMOUNT_RANDOM_LOWER_OFFSET_USDT = new BigDecimal("8");
+    private static final BigDecimal ORDER_AMOUNT_RANDOM_UPPER_OFFSET_USDT = new BigDecimal("2");
     private final String accountId;
     private final String accountAlias;
     private final String accountTag;
@@ -129,6 +131,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final ConcurrentHashMap<String, BinanceProperties.SymbolStrategyProfile> pendingStrategyProfiles =
             new ConcurrentHashMap<>();
     private final AtomicLong orderPlacedTimestamp = new AtomicLong(0);
+    /** Randomized once for the active order/check window and kept stable until that window ends. */
+    private final AtomicLong activeOrderTimeoutMs = new AtomicLong(0);
     private final AtomicLong nextOrderAttemptAt = new AtomicLong(0);
     private final AtomicLong clientOrderSequence = new AtomicLong(0);
     private final AtomicBoolean entryCancellationPending = new AtomicBoolean(false);
@@ -695,6 +699,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         activeOrderPrice.set(orderPrice.signum() > 0 ? orderPrice : state.orderPrice());
         activeSellCoveredQty.set(remainingQty);
         orderPlacedTimestamp.set(state.orderPlacedAtMs() > 0 ? state.orderPlacedAtMs() : System.currentTimeMillis());
+        activeOrderTimeoutMs.set(state.orderTimeoutMs() != null && state.orderTimeoutMs() > 0
+                ? state.orderTimeoutMs() : randomizedTimeoutMs(exitOrderTimeoutMs()));
         entryCancellationPending.set(false);
         BigDecimal markPrice = lastBestAskOrZero().signum() > 0 ? lastBestAskOrZero() : activeOrderPrice.get();
         riskGuard.restoreOpenPosition(recovered.positionQty(), recovered.positionCostUsdt(),
@@ -728,7 +734,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     accountId, symbol, status.name(), orderId, clientOrderId, side, activeOrderPrice.get(),
                     previousBuyOrderPrice.get(), activeSellCoveredQty.get(), ceiling,
                     orderPlacedTimestamp.get(), System.currentTimeMillis(),
-                    feeAwareInitialEntryAnchorPrice.get(), feeAwareRecentBuyPricesSnapshot()));
+                    feeAwareInitialEntryAnchorPrice.get(), feeAwareRecentBuyPricesSnapshot(),
+                    activeOrderTimeoutMs.get() > 0 ? activeOrderTimeoutMs.get() : null));
         } catch (RuntimeException e) {
             log.error("[accountId={} alias={}] 保存运行状态快照失败", accountId, accountAlias, e);
             if (includeActiveOrder && orderId != null) {
@@ -1069,7 +1076,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 Long orderId = activeOrderId.get();
                 if (orderId == null) { halt("买单状态没有活动订单"); return; }
                 long restingMs = now - orderPlacedTimestamp.get();
-                long makerTimeoutMs = Math.max(entryOrderTimeoutMs(),
+                long makerTimeoutMs = Math.max(currentActiveOrderTimeoutMs(ChurnStatus.BUYING),
                         properties.getStrategy().getMinEntryOrderRestMs());
                 if (!entryCancellationPending.get() && restingMs >= makerTimeoutMs) {
                     BigDecimal orderPrice = activeOrderPrice.get();
@@ -1102,12 +1109,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             case SELLING -> {
                 Long activeId = activeOrderId.get();
                 if (activeId != null) {
-                    if (now - orderPlacedTimestamp.get() >= exitOrderTimeoutMs()) {
+                    long sellTimeoutMs = currentActiveOrderTimeoutMs(ChurnStatus.SELLING);
+                    if (now - orderPlacedTimestamp.get() >= sellTimeoutMs) {
                         BigDecimal currentBestAsk = positiveOrZero(bestAsk);
                         if (currentBestAsk.signum() <= 0) currentBestAsk = lastBestAskOrZero();
-                        if (deferTimedOutExitIfStillBestAsk(rule, currentBestAsk, now)) return;
+                        if (deferTimedOutExitIfStillBestAsk(rule, currentBestAsk, now, sellTimeoutMs)) return;
                         if (currentBestAsk.signum() <= 0) return;
-                        rollTimedOutExitToBestAsk(symbol, currentBestAsk, rule, activeId);
+                        rollTimedOutExitToBestAsk(symbol, currentBestAsk, rule, activeId, sellTimeoutMs);
                     }
                     return;
                 }
@@ -1501,14 +1509,19 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
      * Neither path falls back to MARKET.
      */
     private boolean deferTimedOutExitIfStillBestAsk(SymbolRuleManager.SymbolRule rule,
-                                                    BigDecimal bestAsk, long now) {
+                                                    BigDecimal bestAsk, long now,
+                                                    long completedTimeoutMs) {
         BigDecimal normalizedAsk = positiveOrZero(bestAsk);
         if (normalizedAsk.signum() <= 0) {
             orderPlacedTimestamp.set(now);
+            long nextTimeoutMs = randomizedTimeoutMs(exitOrderTimeoutMs());
+            activeOrderTimeoutMs.set(nextTimeoutMs);
             persistRuntimeState(true);
-            statusReason.set("卖单已超时但暂时无法确认最新卖一，保留当前 LIMIT 卖单；下次按配置时间复查");
+            statusReason.set("卖单满 " + durationLabel(completedTimeoutMs)
+                    + " 但暂时无法确认最新卖一，保留当前 LIMIT 卖单；"
+                    + durationLabel(nextTimeoutMs) + " 后复查");
             log.info("[accountId={} alias={}] 卖单超时但最新卖一暂不可用，保留订单 {}，下次按 {} 复查",
-                    accountId, accountAlias, activeOrderId.get(), durationLabel(exitOrderTimeoutMs()));
+                    accountId, accountAlias, activeOrderId.get(), durationLabel(nextTimeoutMs));
             return true;
         }
         normalizedAsk = PrecisionUtil.roundDownToStep(normalizedAsk, rule.tickSize());
@@ -1518,23 +1531,28 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (normalizedOrderPrice.compareTo(normalizedAsk) != 0) return false;
 
         orderPlacedTimestamp.set(now);
+        long nextTimeoutMs = randomizedTimeoutMs(exitOrderTimeoutMs());
+        activeOrderTimeoutMs.set(nextTimeoutMs);
         persistRuntimeState(true);
-        statusReason.set("卖单已超时但仍在卖一，保留当前 LIMIT 卖单 @ "
-                + normalizedOrderPrice.toPlainString() + "；下次按配置时间复查");
+        statusReason.set("卖单满 " + durationLabel(completedTimeoutMs)
+                + " 但仍在卖一，保留当前 LIMIT 卖单 @ "
+                + normalizedOrderPrice.toPlainString() + "；"
+                + durationLabel(nextTimeoutMs) + " 后复查");
         log.info("[accountId={} alias={}] 卖单 {} 满 {} 仍在卖一 @ {}，保留原单并重新计时",
-                accountId, accountAlias, activeOrderId.get(), durationLabel(exitOrderTimeoutMs()),
+                accountId, accountAlias, activeOrderId.get(), durationLabel(completedTimeoutMs),
                 normalizedOrderPrice);
         return true;
     }
 
     private void rollTimedOutExitToBestAsk(String symbol, BigDecimal bestAsk,
-                                           SymbolRuleManager.SymbolRule rule, long orderId) {
+                                           SymbolRuleManager.SymbolRule rule, long orderId,
+                                           long completedTimeoutMs) {
         if (!exitSubmissionInFlight.compareAndSet(false, true)) return;
         try {
             JsonNode cancel = tradeService.cancelOrder(symbol, orderId);
             JsonNode finalOrder = tradeService.getOrder(symbol, orderId);
             if (finalOrder == null || !isTerminal(finalOrder.path("status").asText())) {
-                halt(durationLabel(exitOrderTimeoutMs()) + "卖单超时后无法确认原限价卖单已撤销");
+                halt(durationLabel(completedTimeoutMs) + "卖单超时后无法确认原限价卖单已撤销");
                 return;
             }
             if (cancel == null || cancel.has("code")) {
@@ -1550,7 +1568,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 scheduleOrderReconciliation(orderId);
                 return;
             }
-            if (!reconcileInventory(rule, durationLabel(exitOrderTimeoutMs()) + "卖单超时撤单")) return;
+            if (!reconcileInventory(rule, durationLabel(completedTimeoutMs) + "卖单超时撤单")) return;
             markRestReconciled(orderId);
             clearActiveOrder();
             if (holdingInventory.get().compareTo(rule.stepSize()) < 0) {
@@ -1585,11 +1603,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 trackOrder(response.get("orderId").asLong(), clientOrderId, ChurnStatus.SELLING);
                 activeOrderPrice.set(price);
                 persistRuntimeState(true);
-                statusReason.set("上一张卖单满 " + durationLabel(exitOrderTimeoutMs())
+                statusReason.set("上一张卖单满 " + durationLabel(completedTimeoutMs)
                         + "，剩余持仓已按最新卖一挂 LIMIT @ "
                         + price.toPlainString());
                 log.info("[accountId={} alias={}] 卖单满 {}，已按最新卖一重新挂 LIMIT {} {} @ {}",
-                        accountId, accountAlias, durationLabel(exitOrderTimeoutMs()),
+                        accountId, accountAlias, durationLabel(completedTimeoutMs),
                         quantity, baseAsset(), price);
             } else {
                 reconcileAmbiguousSubmission(clientOrderId, ChurnStatus.SELLING,
@@ -1929,8 +1947,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     private BigDecimal buyQuantity(BigDecimal bid, SymbolRuleManager.SymbolRule rule) {
-        BigDecimal base = orderAmountUsdt().divide(bid, 8, RoundingMode.DOWN);
-        return PrecisionUtil.roundDownToStep(applyJitter(base), rule.stepSize());
+        BigDecimal randomizedNotional = randomizedOrderAmountUsdt(bid, rule);
+        BigDecimal base = randomizedNotional.divide(bid, 8, RoundingMode.DOWN);
+        return PrecisionUtil.roundDownToStep(base, rule.stepSize());
     }
     private BigDecimal sumDepth(JsonNode levels) {
         BigDecimal total = BigDecimal.ZERO;
@@ -2222,6 +2241,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         activeClientOrderId.set(clientOrderId);
         entryCancellationPending.set(false);
         orderPlacedTimestamp.set(System.currentTimeMillis());
+        activeOrderTimeoutMs.set(randomizedTimeoutMs(status == ChurnStatus.BUYING
+                ? entryOrderTimeoutMs() : exitOrderTimeoutMs()));
         currentStatus.set(status);
         persistRuntimeState(true);
         if (currentStatus.get() != ChurnStatus.HALTED) scheduleOrderReconciliation(orderId);
@@ -2368,6 +2389,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         activeOrderPrice.set(null);
         activeSellCoveredQty.set(BigDecimal.ZERO);
         orderPlacedTimestamp.set(0);
+        activeOrderTimeoutMs.set(0);
         persistRuntimeState(false);
     }
 
@@ -2421,7 +2443,29 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         releaseSymbolTradeSlotIfFlat();
         log.error("[accountId={} alias={}] 引擎进入保护停机: {}", accountId, accountAlias, reason);
     }
-    private BigDecimal applyJitter(BigDecimal qty) { double j = properties.getStrategy().getRandomSizeJitter(); return j <= 0 ? qty : qty.multiply(BigDecimal.valueOf(1 + ThreadLocalRandom.current().nextDouble(-j, j))); }
+    private BigDecimal randomizedOrderAmountUsdt(BigDecimal price, SymbolRuleManager.SymbolRule rule) {
+        BigDecimal configured = orderAmountUsdt();
+        if (configured == null || configured.signum() <= 0) return BigDecimal.ZERO;
+
+        long lower = configured.subtract(ORDER_AMOUNT_RANDOM_LOWER_OFFSET_USDT)
+                .setScale(0, RoundingMode.CEILING).longValue();
+        long upper = configured.add(ORDER_AMOUNT_RANDOM_UPPER_OFFSET_USDT)
+                .setScale(0, RoundingMode.FLOOR).longValue();
+        long liveUpper = properties.getStrategy().getMaxLiveOrderNotionalUsdt()
+                .setScale(0, RoundingMode.FLOOR).longValue();
+        lower = Math.max(1L, lower);
+        upper = Math.min(upper, liveUpper);
+
+        // One extra step of quote value prevents quantity rounding from pushing an integer target
+        // just below Binance's minNotional filter.
+        if (price != null && price.signum() > 0 && rule != null
+                && rule.minNotional() != null && rule.stepSize() != null) {
+            BigDecimal safeMinimum = rule.minNotional().add(price.multiply(rule.stepSize()));
+            lower = Math.max(lower, safeMinimum.setScale(0, RoundingMode.CEILING).longValue());
+        }
+        if (upper < lower) return BigDecimal.ZERO;
+        return BigDecimal.valueOf(ThreadLocalRandom.current().nextLong(lower, upper + 1));
+    }
     private boolean calibrateHoldings() {
         BinanceAccountTradeClient.AssetBalance balance = tradeService.getAssetBalance(baseAsset());
         if (balance == null) {
@@ -3262,6 +3306,19 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         var profile = symbolStrategy(properties.getStrategy().getSymbol());
         return profile != null && profile.getExitTimeoutMs() != null && profile.getExitTimeoutMs() > 0
                 ? profile.getExitTimeoutMs() : properties.getStrategy().getLimitSellTimeoutMs();
+    }
+
+    private long currentActiveOrderTimeoutMs(ChurnStatus expectedStatus) {
+        long active = activeOrderTimeoutMs.get();
+        if (active > 0) return active;
+        return expectedStatus == ChurnStatus.BUYING ? entryOrderTimeoutMs() : exitOrderTimeoutMs();
+    }
+
+    private long randomizedTimeoutMs(long configuredTimeoutMs) {
+        long lower = Math.max(1L, configuredTimeoutMs);
+        long upper = lower + lower / 2;
+        if (upper <= lower) return lower;
+        return ThreadLocalRandom.current().nextLong(lower, upper + 1);
     }
 
     private long postSellEntryDelayMs() {
