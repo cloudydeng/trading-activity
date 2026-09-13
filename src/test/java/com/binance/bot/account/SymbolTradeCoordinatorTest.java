@@ -8,121 +8,101 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SymbolTradeCoordinatorTest {
     @Test
-    void concurrencyTwoRunsOneBuyAndOneSellThenQueuesCompletedBuy() {
+    void concurrencyTwoAllowsTwoCompleteCyclesAndBlocksThirdUntilOneCloses() {
         SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
         coordinator.configureMaxConcurrentEntriesPerSymbol(2);
 
         assertTrue(coordinator.acquire("bnbusdt", "a", "A").accepted());
-        SymbolTradeCoordinator.EntryPermit waitingBuy = coordinator.acquire("BNBUSDT", "b", "B");
-        assertFalse(waitingBuy.accepted());
-        assertTrue(waitingBuy.reason().contains("买入通道已有 1/1"));
-        assertTrue(waitingBuy.reason().contains("BUY FIFO 排队第 1 位"));
-
-        assertTrue(coordinator.acquireSell("BNBUSDT", "a", "A").accepted());
         assertTrue(coordinator.acquire("BNBUSDT", "b", "B").accepted());
-        assertEquals(SymbolTradeCoordinator.Phase.SELLING, holder(coordinator, "a").phase());
-        assertEquals(SymbolTradeCoordinator.Phase.BUYING, holder(coordinator, "b").phase());
+        SymbolTradeCoordinator.EntryPermit third = coordinator.acquire("BNBUSDT", "c", "C");
 
-        SymbolTradeCoordinator.EntryPermit waitingSell = coordinator.acquireSell("BNBUSDT", "b", "B");
-        assertFalse(waitingSell.accepted());
-        assertTrue(waitingSell.reason().contains("卖出通道已有 1/1"));
-        assertTrue(waitingSell.reason().contains("持仓待卖 FIFO 排队第 1 位"));
-        assertEquals(SymbolTradeCoordinator.Phase.WAITING_TO_SELL, holder(coordinator, "b").phase());
+        assertFalse(third.accepted());
+        assertTrue(third.reason().contains("已有 2/2 个账户交易中"));
+        assertTrue(third.reason().contains("FIFO 排队第 1 位"));
+
+        assertTrue(coordinator.transitionToSell("BNBUSDT", "a", "A").accepted());
+        assertTrue(coordinator.transitionToSell("BNBUSDT", "b", "B").accepted());
+        assertEquals(SymbolTradeCoordinator.Phase.SELLING, holder(coordinator, "a").phase());
+        assertEquals(SymbolTradeCoordinator.Phase.SELLING, holder(coordinator, "b").phase());
+        assertFalse(coordinator.acquire("BNBUSDT", "c", "C").accepted());
 
         coordinator.release("BNBUSDT", "a");
-        assertTrue(coordinator.acquireSell("BNBUSDT", "b", "B").accepted());
-        assertEquals(SymbolTradeCoordinator.Phase.SELLING, holder(coordinator, "b").phase());
+        assertTrue(coordinator.acquire("BNBUSDT", "c", "C").accepted());
+        assertEquals(2, coordinator.snapshot("BNBUSDT").holders().size());
     }
 
     @Test
-    void concurrencyThreeRunsOneBuyAndTwoSells() {
-        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
-        coordinator.configureMaxConcurrentEntriesPerSymbol(3);
-
-        assertTrue(coordinator.acquire("THEUSDT", "a", "A").accepted());
-        assertFalse(coordinator.acquire("THEUSDT", "b", "B").accepted());
-        assertTrue(coordinator.acquireSell("THEUSDT", "a", "A").accepted());
-        assertTrue(coordinator.acquire("THEUSDT", "b", "B").accepted());
-        assertTrue(coordinator.acquireSell("THEUSDT", "b", "B").accepted());
-        assertTrue(coordinator.acquire("THEUSDT", "c", "C").accepted());
-
-        SymbolTradeCoordinator.Snapshot snapshot = coordinator.snapshot("THEUSDT");
-        assertEquals(3, snapshot.holders().size());
-        assertEquals(SymbolTradeCoordinator.Phase.SELLING, holder(coordinator, "a").phase());
-        assertEquals(SymbolTradeCoordinator.Phase.SELLING, holder(coordinator, "b").phase());
-        assertEquals(SymbolTradeCoordinator.Phase.BUYING, holder(coordinator, "c").phase());
-
-        SymbolTradeCoordinator.EntryPermit waitingSell = coordinator.acquireSell("THEUSDT", "c", "C");
-        assertFalse(waitingSell.accepted());
-        assertEquals(SymbolTradeCoordinator.Phase.WAITING_TO_SELL, holder(coordinator, "c").phase());
-        assertEquals(1, coordinator.snapshot("THEUSDT").sellWaiters().size());
-    }
-
-    @Test
-    void concurrencyFourRunsTwoBuysAndTwoSells() {
+    void concurrencyFourCapsTenUsersAtFourCompleteCyclesWithoutBuySellLaneSplit() {
         SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
         coordinator.configureMaxConcurrentEntriesPerSymbol(4);
 
-        assertTrue(coordinator.acquire("THEUSDT", "a", "A").accepted());
-        assertTrue(coordinator.acquire("THEUSDT", "b", "B").accepted());
-        assertFalse(coordinator.acquire("THEUSDT", "c", "C").accepted());
-        assertFalse(coordinator.acquire("THEUSDT", "d", "D").accepted());
+        for (int index = 1; index <= 10; index++) {
+            SymbolTradeCoordinator.EntryPermit permit = coordinator.acquire(
+                    "THEUSDT", "engine-" + index, "Account " + index);
+            assertEquals(index <= 4, permit.accepted());
+        }
+        assertEquals(4, coordinator.snapshot("THEUSDT").holders().size());
+        assertEquals(6, coordinator.snapshot("THEUSDT").waiters().size());
 
-        assertTrue(coordinator.acquireSell("THEUSDT", "a", "A").accepted());
-        assertTrue(coordinator.acquire("THEUSDT", "c", "C").accepted());
-        assertTrue(coordinator.acquireSell("THEUSDT", "b", "B").accepted());
-        assertTrue(coordinator.acquire("THEUSDT", "d", "D").accepted());
+        for (int index = 1; index <= 4; index++) {
+            assertTrue(coordinator.transitionToSell(
+                    "THEUSDT", "engine-" + index, "Account " + index).accepted());
+        }
+        assertEquals(4, coordinator.snapshot("THEUSDT").holders().size());
+        assertFalse(coordinator.acquire("THEUSDT", "engine-5", "Account 5").accepted());
 
-        assertEquals(SymbolTradeCoordinator.Phase.SELLING, holder(coordinator, "a").phase());
-        assertEquals(SymbolTradeCoordinator.Phase.SELLING, holder(coordinator, "b").phase());
-        assertEquals(SymbolTradeCoordinator.Phase.BUYING, holder(coordinator, "c").phase());
-        assertEquals(SymbolTradeCoordinator.Phase.BUYING, holder(coordinator, "d").phase());
-        assertTrue(coordinator.snapshot("THEUSDT").waiters().isEmpty());
-
-        SymbolTradeCoordinator.EntryPermit waitingSell = coordinator.acquireSell("THEUSDT", "c", "C");
-        assertFalse(waitingSell.accepted());
-        assertTrue(waitingSell.reason().contains("卖出通道已有 2/2"));
+        coordinator.release("THEUSDT", "engine-2");
+        assertFalse(coordinator.acquire("THEUSDT", "engine-6", "Account 6").accepted());
+        assertTrue(coordinator.acquire("THEUSDT", "engine-5", "Account 5").accepted());
+        assertEquals(4, coordinator.snapshot("THEUSDT").holders().size());
     }
 
     @Test
-    void preservesStrictBuyFifoAcrossRepeatedRetries() {
+    void buyToSellTransitionKeepsTheOriginalCompleteCycleSlot() {
         SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
-        coordinator.configureMaxConcurrentEntriesPerSymbol(2);
+        coordinator.configureMaxConcurrentEntriesPerSymbol(1);
+        assertTrue(coordinator.acquire("THEUSDT", "a", "A").accepted());
+        long acquiredAt = holder(coordinator, "a").acquiredAtMs();
+
+        assertTrue(coordinator.transitionToSell("THEUSDT", "a", "A").accepted());
+
+        assertEquals(1, coordinator.snapshot("THEUSDT").holders().size());
+        assertEquals(acquiredAt, holder(coordinator, "a").acquiredAtMs());
+        assertEquals(SymbolTradeCoordinator.Phase.SELLING, holder(coordinator, "a").phase());
+    }
+
+    @Test
+    void concurrencyIsIsolatedPerSymbol() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        coordinator.configureMaxConcurrentEntriesPerSymbol(1);
+
+        assertTrue(coordinator.acquire("THEUSDT", "the-a", "A").accepted());
+        assertTrue(coordinator.acquire("BNBUSDT", "bnb-b", "B").accepted());
+        assertEquals(1, coordinator.snapshot("THEUSDT").holders().size());
+        assertEquals(1, coordinator.snapshot("BNBUSDT").holders().size());
+    }
+
+    @Test
+    void preservesStrictFifoAcrossRepeatedRetries() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        coordinator.configureMaxConcurrentEntriesPerSymbol(1);
         assertTrue(coordinator.acquire("THEUSDT", "a", "A").accepted());
         assertFalse(coordinator.acquire("THEUSDT", "b", "B").accepted());
         assertFalse(coordinator.acquire("THEUSDT", "c", "C").accepted());
 
-        assertTrue(coordinator.acquireSell("THEUSDT", "a", "A").accepted());
-        SymbolTradeCoordinator.EntryPermit cRetry = coordinator.acquire("THEUSDT", "c", "C");
-        assertFalse(cRetry.accepted());
-        assertTrue(cRetry.reason().contains("BUY FIFO 排队第 2 位"));
-        assertTrue(coordinator.acquire("THEUSDT", "b", "B").accepted());
-        assertFalse(coordinator.acquire("THEUSDT", "c", "C").accepted());
-    }
-
-    @Test
-    void preservesStrictSellFifoWhenRestoredSellsExceedConfiguredCapacity() {
-        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
-        coordinator.configureMaxConcurrentEntriesPerSymbol(3);
-        coordinator.claimExistingSell("THEUSDT", "a", "A");
-        coordinator.claimExistingSell("THEUSDT", "b", "B");
-        coordinator.claimHolding("THEUSDT", "c", "C");
-        coordinator.claimHolding("THEUSDT", "d", "D");
-
-        assertFalse(coordinator.acquireSell("THEUSDT", "c", "C").accepted());
-        SymbolTradeCoordinator.EntryPermit dWaiting = coordinator.acquireSell("THEUSDT", "d", "D");
-        assertFalse(dWaiting.accepted());
-        assertTrue(dWaiting.reason().contains("FIFO 排队第 2 位"));
-
+        assertFalse(coordinator.acquire("THEUSDT", "b", "B").accepted());
         coordinator.release("THEUSDT", "a");
-        assertFalse(coordinator.acquireSell("THEUSDT", "d", "D").accepted());
-        assertTrue(coordinator.acquireSell("THEUSDT", "c", "C").accepted());
+        SymbolTradeCoordinator.EntryPermit cBeforeB = coordinator.acquire("THEUSDT", "c", "C");
+
+        assertFalse(cBeforeB.accepted());
+        assertTrue(cBeforeB.reason().contains("FIFO 排队第 2 位"));
+        assertTrue(coordinator.acquire("THEUSDT", "b", "B").accepted());
         coordinator.release("THEUSDT", "b");
-        assertTrue(coordinator.acquireSell("THEUSDT", "d", "D").accepted());
+        assertTrue(coordinator.acquire("THEUSDT", "c", "C").accepted());
     }
 
     @Test
-    void heldDustCanReenterThroughBuyLaneWithoutTakingAnotherTotalSlot() {
+    void heldDustCanReenterWithoutTakingAnotherCompleteCycleSlot() {
         SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
         coordinator.configureMaxConcurrentEntriesPerSymbol(1);
         assertTrue(coordinator.acquire("THEUSDT", "a", "A").accepted());
@@ -134,7 +114,7 @@ class SymbolTradeCoordinatorTest {
     }
 
     @Test
-    void loweringLimitDoesNotCancelExistingSellsOrAllowNewBuyUntilWithinLimit() {
+    void loweringLimitPreservesExistingCyclesAndBlocksNewOnesUntilWithinLimit() {
         SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
         coordinator.configureMaxConcurrentEntriesPerSymbol(3);
         coordinator.claimExistingSell("THEUSDT", "a", "A");
@@ -142,34 +122,32 @@ class SymbolTradeCoordinatorTest {
         coordinator.claimHolding("THEUSDT", "c", "C");
         coordinator.configureMaxConcurrentEntriesPerSymbol(2);
 
-        SymbolTradeCoordinator.EntryPermit blocked = coordinator.acquire("THEUSDT", "c", "C");
+        SymbolTradeCoordinator.EntryPermit blocked = coordinator.acquire("THEUSDT", "d", "D");
         assertFalse(blocked.accepted());
-        assertTrue(blocked.reason().contains("总交易轮次 3/2"));
+        assertTrue(blocked.reason().contains("已有 3/2 个账户交易中"));
         assertEquals(SymbolTradeCoordinator.Phase.SELLING, holder(coordinator, "a").phase());
         assertEquals(SymbolTradeCoordinator.Phase.SELLING, holder(coordinator, "b").phase());
 
         coordinator.release("THEUSDT", "a");
-        assertTrue(coordinator.acquire("THEUSDT", "c", "C").accepted());
+        assertFalse(coordinator.acquire("THEUSDT", "d", "D").accepted());
+        coordinator.release("THEUSDT", "b");
+        assertTrue(coordinator.acquire("THEUSDT", "d", "D").accepted());
     }
 
     @Test
-    void releaseRemovesBothWaitingQueues() {
+    void releaseRemovesWaitingEntry() {
         SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
-        coordinator.configureMaxConcurrentEntriesPerSymbol(2);
+        coordinator.configureMaxConcurrentEntriesPerSymbol(1);
         assertTrue(coordinator.acquire("THEUSDT", "a", "A").accepted());
         assertFalse(coordinator.acquire("THEUSDT", "b", "B").accepted());
-        coordinator.release("THEUSDT", "b");
-        assertTrue(coordinator.snapshot("THEUSDT").waiters().isEmpty());
 
-        coordinator.claimExistingSell("THEUSDT", "c", "C");
-        coordinator.claimHolding("THEUSDT", "d", "D");
-        assertFalse(coordinator.acquireSell("THEUSDT", "d", "D").accepted());
-        coordinator.release("THEUSDT", "d");
-        assertTrue(coordinator.snapshot("THEUSDT").sellWaiters().isEmpty());
+        coordinator.release("THEUSDT", "b");
+
+        assertTrue(coordinator.snapshot("THEUSDT").waiters().isEmpty());
     }
 
     @Test
-    void restoredActiveSellsAreGrandfatheredAboveCurrentLimit() {
+    void restoredActiveCyclesAreGrandfatheredAboveCurrentLimit() {
         SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
         coordinator.claimExistingSell("BNBUSDT", "a", "A");
         coordinator.claimExistingSell("BNBUSDT", "b", "B");

@@ -678,6 +678,19 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void buyPriceMakerUsesThirtyMinuteSellTimeoutDefaultUnlessExplicitlyOverridden() {
+        assertTrue(engine.switchStrategy("ENSOUSDT", "BUY_PRICE_MAKER", new BigDecimal("6"),
+                20_000L, null).accepted());
+        Long defaultTimeout = ReflectionTestUtils.invokeMethod(engine, "exitOrderTimeoutMs");
+        assertEquals(1_800_000L, defaultTimeout);
+
+        assertTrue(engine.switchStrategy("ENSOUSDT", "BUY_PRICE_MAKER", new BigDecimal("6"),
+                20_000L, 600_000L).accepted());
+        Long explicitTimeout = ReflectionTestUtils.invokeMethod(engine, "exitOrderTimeoutMs");
+        assertEquals(600_000L, explicitTimeout);
+    }
+
+    @Test
     void buyPriceMakerBuysAtBestBidAndInitialSellUsesActualBuyAverage() throws Exception {
         HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
                 "ENSOUSDT", "BUY_PRICE_MAKER", new BigDecimal("6"), 20_000L, 120_000L);
@@ -2095,7 +2108,7 @@ class HighFrequencyVolumeChurnEngineTest {
 
         verify(tradeA).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString());
         verify(tradeB, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString());
-        assertTrue(engineB.getStatusReason().get().contains("买入通道已有 1/1 个账户买入中"));
+        assertTrue(engineB.getStatusReason().get().contains("同交易对已有 1/1 个账户交易中"));
 
         ReflectionTestUtils.invokeMethod(engineA, "completeFlatExit", false);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engineB, "nextOrderAttemptAt"))

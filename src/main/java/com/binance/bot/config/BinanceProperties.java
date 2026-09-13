@@ -106,6 +106,8 @@ public class BinanceProperties {
         private long orderTtlMs;
         /** Check a working sell after this delay; keep it at best ask or re-place at latest best ask. */
         private long limitSellTimeoutMs = 120_000;
+        /** BUY_PRICE_MAKER-specific sell timeout used when the symbol has no explicit override. */
+        private long buyPriceMakerLimitSellTimeoutMs = 1_800_000;
         /** Soft signal noise cannot cancel a fresh entry before this resting time. */
         private long minEntryOrderRestMs = 800;
         private double randomSizeJitter;

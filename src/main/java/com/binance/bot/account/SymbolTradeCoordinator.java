@@ -10,13 +10,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * JVM-wide, per-symbol pipeline shared by all account runtimes.
- *
- * <p>The configured concurrency is split as evenly as possible between BUY and
- * SELL lanes, with the odd extra lane assigned to SELL (and one shared cycle
- * lane when the configured concurrency is one).
- * Positions whose BUY has completed keep their total-concurrency slot while
- * waiting for a SELL lane in a strict per-symbol FIFO queue.</p>
+ * JVM-wide coordinator that limits how many account runtimes may manage the same
+ * symbol at the same time. A slot is held for the whole entry/exit cycle, not
+ * just for the BUY or SELL order independently.
  */
 @Component
 public final class SymbolTradeCoordinator {
@@ -26,8 +22,7 @@ public final class SymbolTradeCoordinator {
      */
     private final ReentrantLock lock = new ReentrantLock(true);
     private final Map<String, LinkedHashMap<String, Holder>> holdersBySymbol = new LinkedHashMap<>();
-    private final Map<String, LinkedHashMap<String, Waiter>> buyWaitersBySymbol = new LinkedHashMap<>();
-    private final Map<String, LinkedHashMap<String, Waiter>> sellWaitersBySymbol = new LinkedHashMap<>();
+    private final Map<String, LinkedHashMap<String, Waiter>> waitersBySymbol = new LinkedHashMap<>();
     private final AtomicInteger maxConcurrentEntriesPerSymbol = new AtomicInteger(1);
 
     public void configureMaxConcurrentEntriesPerSymbol(int value) {
@@ -38,12 +33,11 @@ public final class SymbolTradeCoordinator {
         return maxConcurrentEntriesPerSymbol.get();
     }
 
-    /** Requests one of the symbol's BUY lanes while preserving BUY FIFO order. */
+    /** Requests one of the symbol's complete-cycle slots while preserving FIFO order. */
     public EntryPermit acquire(String symbol, String engineId, String accountAlias) {
         String normalizedSymbol = normalizeSymbol(symbol);
         String normalizedEngineId = normalizeEngineId(engineId);
         int limit = maxConcurrentEntriesPerSymbol.get();
-        int buyLimit = buyLaneLimit(limit);
         if (normalizedSymbol.isBlank() || normalizedEngineId.isBlank()) {
             return new EntryPermit(false, "同交易对交易协调参数无效");
         }
@@ -51,53 +45,45 @@ public final class SymbolTradeCoordinator {
         try {
             LinkedHashMap<String, Holder> holders = holdersBySymbol.computeIfAbsent(
                     normalizedSymbol, ignored -> new LinkedHashMap<>());
-            LinkedHashMap<String, Waiter> buyWaiters = buyWaitersBySymbol.computeIfAbsent(
+            LinkedHashMap<String, Waiter> waiters = waitersBySymbol.computeIfAbsent(
                     normalizedSymbol, ignored -> new LinkedHashMap<>());
-            LinkedHashMap<String, Waiter> sellWaiters = sellWaitersBySymbol.get(normalizedSymbol);
             Holder current = holders.get(normalizedEngineId);
             if (current != null && current.phase() == Phase.BUYING) {
-                buyWaiters.remove(normalizedEngineId);
-                cleanupEmptyState(normalizedSymbol, holders, buyWaiters, sellWaiters);
+                waiters.remove(normalizedEngineId);
+                cleanupEmptyState(normalizedSymbol, holders, waiters);
                 return new EntryPermit(true, "");
             }
-            if (current != null && (current.phase() == Phase.SELLING
-                    || current.phase() == Phase.WAITING_TO_SELL)) {
-                return new EntryPermit(false, normalizedSymbol + " 当前持仓正在卖出或等待卖出，不能再次买入");
+            if (current != null && current.phase() == Phase.SELLING) {
+                return new EntryPermit(false, normalizedSymbol + " 当前持仓正在卖出，不能再次买入");
             }
 
-            buyWaiters.putIfAbsent(normalizedEngineId, new Waiter(normalizedEngineId,
+            waiters.putIfAbsent(normalizedEngineId, new Waiter(normalizedEngineId,
                     displayAlias(normalizedEngineId, accountAlias), System.currentTimeMillis()));
-            String firstWaitingEngineId = buyWaiters.keySet().iterator().next();
-            boolean buyLaneOccupied = countPhase(holders, Phase.BUYING) >= buyLimit;
+            String firstWaitingEngineId = waiters.keySet().iterator().next();
             boolean totalCapacityReached = current == null
                     ? holders.size() >= limit
                     : holders.size() > limit;
-            if (buyLaneOccupied || totalCapacityReached || !normalizedEngineId.equals(firstWaitingEngineId)) {
-                return new EntryPermit(false, buyWaitingReason(normalizedSymbol, normalizedEngineId,
-                        holders, buyWaiters, buyLimit, limit));
+            if (totalCapacityReached || !normalizedEngineId.equals(firstWaitingEngineId)) {
+                return new EntryPermit(false, waitingReason(normalizedSymbol, normalizedEngineId,
+                        holders, waiters, limit));
             }
 
-            Waiter waiter = buyWaiters.remove(normalizedEngineId);
+            Waiter waiter = waiters.remove(normalizedEngineId);
             long now = System.currentTimeMillis();
             long acquiredAt = current == null ? now : current.acquiredAtMs();
             holders.put(normalizedEngineId, new Holder(normalizedEngineId, waiter.accountAlias(),
                     Phase.BUYING, acquiredAt, now));
-            if (sellWaiters != null) sellWaiters.remove(normalizedEngineId);
-            cleanupEmptyState(normalizedSymbol, holders, buyWaiters, sellWaiters);
+            cleanupEmptyState(normalizedSymbol, holders, waiters);
             return new EntryPermit(true, "");
         } finally {
             lock.unlock();
         }
     }
 
-    /**
-     * Moves a completed BUY into the symbol's SELL lanes. When all SELL lanes are
-     * occupied, the position remains a holder and enters the strict SELL FIFO.
-     */
-    public EntryPermit acquireSell(String symbol, String engineId, String accountAlias) {
+    /** Moves a completed BUY to SELLING while retaining the same complete-cycle slot. */
+    public EntryPermit transitionToSell(String symbol, String engineId, String accountAlias) {
         String normalizedSymbol = normalizeSymbol(symbol);
         String normalizedEngineId = normalizeEngineId(engineId);
-        int sellLimit = sellLaneLimit(maxConcurrentEntriesPerSymbol.get());
         if (normalizedSymbol.isBlank() || normalizedEngineId.isBlank()) {
             return new EntryPermit(false, "同交易对卖出协调参数无效");
         }
@@ -105,9 +91,7 @@ public final class SymbolTradeCoordinator {
         try {
             LinkedHashMap<String, Holder> holders = holdersBySymbol.computeIfAbsent(
                     normalizedSymbol, ignored -> new LinkedHashMap<>());
-            LinkedHashMap<String, Waiter> buyWaiters = buyWaitersBySymbol.get(normalizedSymbol);
-            LinkedHashMap<String, Waiter> sellWaiters = sellWaitersBySymbol.computeIfAbsent(
-                    normalizedSymbol, ignored -> new LinkedHashMap<>());
+            LinkedHashMap<String, Waiter> waiters = waitersBySymbol.get(normalizedSymbol);
             Holder current = holders.get(normalizedEngineId);
             long now = System.currentTimeMillis();
             if (current == null) {
@@ -115,41 +99,22 @@ public final class SymbolTradeCoordinator {
                         Phase.HOLDING, now, now);
                 holders.put(normalizedEngineId, current);
             }
-            if (current.phase() == Phase.SELLING) {
-                sellWaiters.remove(normalizedEngineId);
-                cleanupEmptyState(normalizedSymbol, holders, buyWaiters, sellWaiters);
-                return new EntryPermit(true, "");
-            }
-            if (buyWaiters != null) buyWaiters.remove(normalizedEngineId);
-            sellWaiters.putIfAbsent(normalizedEngineId, new Waiter(normalizedEngineId,
-                    current.accountAlias(), now));
+            if (waiters != null) waiters.remove(normalizedEngineId);
             holders.put(normalizedEngineId, new Holder(current.engineId(), current.accountAlias(),
-                    Phase.WAITING_TO_SELL, current.acquiredAtMs(), now));
-
-            String firstWaitingEngineId = sellWaiters.keySet().iterator().next();
-            int activeSells = countPhase(holders, Phase.SELLING);
-            if (activeSells >= sellLimit || !normalizedEngineId.equals(firstWaitingEngineId)) {
-                return new EntryPermit(false, sellWaitingReason(normalizedSymbol, normalizedEngineId,
-                        holders, sellWaiters, sellLimit));
-            }
-
-            sellWaiters.remove(normalizedEngineId);
-            Holder waiting = holders.get(normalizedEngineId);
-            holders.put(normalizedEngineId, new Holder(waiting.engineId(), waiting.accountAlias(),
-                    Phase.SELLING, waiting.acquiredAtMs(), now));
-            cleanupEmptyState(normalizedSymbol, holders, buyWaiters, sellWaiters);
+                    Phase.SELLING, current.acquiredAtMs(), now));
+            cleanupEmptyState(normalizedSymbol, holders, waiters);
             return new EntryPermit(true, "");
         } finally {
             lock.unlock();
         }
     }
 
-    /** Marks retained dust/inventory as holding neither the BUY nor SELL lane. */
+    /** Marks retained dust/inventory while keeping the same complete-cycle slot. */
     public void markHolding(String symbol, String engineId, String accountAlias) {
         updateExistingPhase(symbol, engineId, Phase.HOLDING);
     }
 
-    /** Records recovered inventory before it requests a SELL lane. */
+    /** Records recovered inventory before it is transitioned to SELLING. */
     public void claimHolding(String symbol, String engineId, String accountAlias) {
         claimWithPhase(symbol, engineId, accountAlias, Phase.HOLDING);
     }
@@ -171,12 +136,10 @@ public final class SymbolTradeCoordinator {
         lock.lock();
         try {
             LinkedHashMap<String, Holder> holders = holdersBySymbol.get(normalizedSymbol);
-            LinkedHashMap<String, Waiter> buyWaiters = buyWaitersBySymbol.get(normalizedSymbol);
-            LinkedHashMap<String, Waiter> sellWaiters = sellWaitersBySymbol.get(normalizedSymbol);
+            LinkedHashMap<String, Waiter> waiters = waitersBySymbol.get(normalizedSymbol);
             if (holders != null) holders.remove(normalizedEngineId);
-            if (buyWaiters != null) buyWaiters.remove(normalizedEngineId);
-            if (sellWaiters != null) sellWaiters.remove(normalizedEngineId);
-            cleanupEmptyState(normalizedSymbol, holders, buyWaiters, sellWaiters);
+            if (waiters != null) waiters.remove(normalizedEngineId);
+            cleanupEmptyState(normalizedSymbol, holders, waiters);
         } finally {
             lock.unlock();
         }
@@ -187,12 +150,10 @@ public final class SymbolTradeCoordinator {
         lock.lock();
         try {
             LinkedHashMap<String, Holder> holders = holdersBySymbol.get(normalizedSymbol);
-            LinkedHashMap<String, Waiter> buyWaiters = buyWaitersBySymbol.get(normalizedSymbol);
-            LinkedHashMap<String, Waiter> sellWaiters = sellWaitersBySymbol.get(normalizedSymbol);
+            LinkedHashMap<String, Waiter> waiters = waitersBySymbol.get(normalizedSymbol);
             return new Snapshot(normalizedSymbol,
                     holders == null ? List.of() : List.copyOf(holders.values()),
-                    buyWaiters == null ? List.of() : List.copyOf(buyWaiters.values()),
-                    sellWaiters == null ? List.of() : List.copyOf(sellWaiters.values()));
+                    waiters == null ? List.of() : List.copyOf(waiters.values()));
         } finally {
             lock.unlock();
         }
@@ -206,16 +167,14 @@ public final class SymbolTradeCoordinator {
         try {
             LinkedHashMap<String, Holder> holders = holdersBySymbol.computeIfAbsent(
                     normalizedSymbol, ignored -> new LinkedHashMap<>());
-            LinkedHashMap<String, Waiter> buyWaiters = buyWaitersBySymbol.get(normalizedSymbol);
-            LinkedHashMap<String, Waiter> sellWaiters = sellWaitersBySymbol.get(normalizedSymbol);
-            if (buyWaiters != null) buyWaiters.remove(normalizedEngineId);
-            if (sellWaiters != null) sellWaiters.remove(normalizedEngineId);
+            LinkedHashMap<String, Waiter> waiters = waitersBySymbol.get(normalizedSymbol);
+            if (waiters != null) waiters.remove(normalizedEngineId);
             Holder current = holders.get(normalizedEngineId);
             long now = System.currentTimeMillis();
             holders.put(normalizedEngineId, new Holder(normalizedEngineId,
                     current == null ? displayAlias(normalizedEngineId, accountAlias) : current.accountAlias(),
                     phase, current == null ? now : current.acquiredAtMs(), now));
-            cleanupEmptyState(normalizedSymbol, holders, buyWaiters, sellWaiters);
+            cleanupEmptyState(normalizedSymbol, holders, waiters);
         } finally {
             lock.unlock();
         }
@@ -228,38 +187,25 @@ public final class SymbolTradeCoordinator {
         lock.lock();
         try {
             LinkedHashMap<String, Holder> holders = holdersBySymbol.get(normalizedSymbol);
-            LinkedHashMap<String, Waiter> buyWaiters = buyWaitersBySymbol.get(normalizedSymbol);
-            LinkedHashMap<String, Waiter> sellWaiters = sellWaitersBySymbol.get(normalizedSymbol);
+            LinkedHashMap<String, Waiter> waiters = waitersBySymbol.get(normalizedSymbol);
             Holder current = holders == null ? null : holders.get(normalizedEngineId);
             if (current == null) return;
-            if (buyWaiters != null) buyWaiters.remove(normalizedEngineId);
-            if (sellWaiters != null) sellWaiters.remove(normalizedEngineId);
+            if (waiters != null) waiters.remove(normalizedEngineId);
             holders.put(normalizedEngineId, new Holder(current.engineId(), current.accountAlias(),
                     phase, current.acquiredAtMs(), System.currentTimeMillis()));
-            cleanupEmptyState(normalizedSymbol, holders, buyWaiters, sellWaiters);
+            cleanupEmptyState(normalizedSymbol, holders, waiters);
         } finally {
             lock.unlock();
         }
     }
 
-    private String buyWaitingReason(String symbol, String engineId, LinkedHashMap<String, Holder> holders,
-                                    LinkedHashMap<String, Waiter> waiters, int buyLimit, int limit) {
+    private String waitingReason(String symbol, String engineId, LinkedHashMap<String, Holder> holders,
+                                 LinkedHashMap<String, Waiter> waiters, int limit) {
         int position = queuePosition(waiters, engineId);
-        String buying = describeHolders(holders, Phase.BUYING);
-        return symbol + " 买入通道已有 " + countPhase(holders, Phase.BUYING) + "/" + buyLimit
-                + " 个账户买入中"
-                + (buying.isBlank() ? "" : "：" + buying)
-                + "；总交易轮次 " + holders.size() + "/" + limit
-                + "；BUY FIFO 排队第 " + position + " 位";
-    }
-
-    private String sellWaitingReason(String symbol, String engineId, LinkedHashMap<String, Holder> holders,
-                                     LinkedHashMap<String, Waiter> waiters, int sellLimit) {
-        int position = queuePosition(waiters, engineId);
-        String selling = describeHolders(holders, Phase.SELLING);
-        return symbol + " 卖出通道已有 " + countPhase(holders, Phase.SELLING) + "/" + sellLimit
-                + " 个账户卖出中" + (selling.isBlank() ? "" : "：" + selling)
-                + "；持仓待卖 FIFO 排队第 " + position + " 位";
+        String occupied = describeHolders(holders);
+        return symbol + " 同交易对已有 " + holders.size() + "/" + limit + " 个账户交易中"
+                + (occupied.isBlank() ? "" : "：" + occupied)
+                + "；FIFO 排队第 " + position + " 位";
     }
 
     private int queuePosition(LinkedHashMap<String, Waiter> waiters, String engineId) {
@@ -271,34 +217,16 @@ public final class SymbolTradeCoordinator {
         return position;
     }
 
-    private int countPhase(LinkedHashMap<String, Holder> holders, Phase phase) {
-        int count = 0;
-        for (Holder holder : holders.values()) {
-            if (holder.phase() == phase) count++;
-        }
-        return count;
-    }
-
-    private int buyLaneLimit(int totalLimit) {
-        return Math.max(1, totalLimit / 2);
-    }
-
-    private int sellLaneLimit(int totalLimit) {
-        return totalLimit == 1 ? 1 : totalLimit - buyLaneLimit(totalLimit);
-    }
-
     private void cleanupEmptyState(String symbol, LinkedHashMap<String, Holder> holders,
-                                   LinkedHashMap<String, Waiter> buyWaiters,
-                                   LinkedHashMap<String, Waiter> sellWaiters) {
+                                   LinkedHashMap<String, Waiter> waiters) {
         if (holders == null || holders.isEmpty()) holdersBySymbol.remove(symbol);
-        if (buyWaiters == null || buyWaiters.isEmpty()) buyWaitersBySymbol.remove(symbol);
-        if (sellWaiters == null || sellWaiters.isEmpty()) sellWaitersBySymbol.remove(symbol);
+        if (waiters == null || waiters.isEmpty()) waitersBySymbol.remove(symbol);
     }
 
-    private String describeHolders(LinkedHashMap<String, Holder> holders, Phase phase) {
+    private String describeHolders(LinkedHashMap<String, Holder> holders) {
         List<String> labels = new ArrayList<>();
         for (Holder holder : holders.values()) {
-            if (holder.phase() == phase) labels.add(holder.accountAlias());
+            labels.add(holder.accountAlias());
         }
         return String.join("、", labels);
     }
@@ -315,11 +243,10 @@ public final class SymbolTradeCoordinator {
         return engineId == null ? "" : engineId.trim();
     }
 
-    public enum Phase { BUYING, HOLDING, WAITING_TO_SELL, SELLING }
+    public enum Phase { BUYING, HOLDING, SELLING }
     public record EntryPermit(boolean accepted, String reason) { }
     public record Holder(String engineId, String accountAlias, Phase phase,
                          long acquiredAtMs, long phaseChangedAtMs) { }
     public record Waiter(String engineId, String accountAlias, long enqueuedAtMs) { }
-    public record Snapshot(String symbol, List<Holder> holders, List<Waiter> waiters,
-                           List<Waiter> sellWaiters) { }
+    public record Snapshot(String symbol, List<Holder> holders, List<Waiter> waiters) { }
 }

@@ -18,6 +18,8 @@ class StrategyConfigurationTest {
     private static final String SYMBOL_LIMIT_ENV_KEY = "BINANCE_STRATEGY_MAX_CONCURRENT_ENTRIES_PER_SYMBOL";
     private static final String SYMBOL_LIMIT_PROPERTY_KEY =
             "binance.strategy.max-concurrent-entries-per-symbol";
+    private static final String BUY_PRICE_EXIT_TIMEOUT_PROPERTY_KEY =
+            "binance.strategy.buy-price-maker-limit-sell-timeout-ms";
 
     @Test
     void protectedEnvironmentFileValueOverridesDailyDrawdownFallback() throws Exception {
@@ -42,6 +44,14 @@ class StrategyConfigurationTest {
         sources.addFirst(new MapPropertySource("protectedEnvironmentFile", Map.of(SYMBOL_LIMIT_ENV_KEY, "2")));
 
         assertEquals("2", new PropertySourcesPropertyResolver(sources).getProperty(SYMBOL_LIMIT_PROPERTY_KEY));
+    }
+
+    @Test
+    void buyPriceMakerSellTimeoutDefaultsToThirtyMinutes() throws Exception {
+        assertEquals("1800000", new PropertySourcesPropertyResolver(applicationPropertySources())
+                .getProperty(BUY_PRICE_EXIT_TIMEOUT_PROPERTY_KEY));
+        assertEquals(1_800_000L,
+                new BinanceProperties().getStrategy().getBuyPriceMakerLimitSellTimeoutMs());
     }
 
     private MutablePropertySources applicationPropertySources() throws Exception {

@@ -258,11 +258,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return permit;
     }
 
-    private SymbolTradeCoordinator.EntryPermit acquireSymbolSellSlot(String symbol) {
+    private SymbolTradeCoordinator.EntryPermit transitionSymbolTradeSlotToSelling(String symbol) {
         String normalizedSymbol = normalizeStrategySymbol(symbol);
         String heldSymbol = symbolTradeSlotSymbol.get();
         if (symbolTradeSlotHeld.get() && !normalizedSymbol.equals(heldSymbol)) releaseSymbolTradeSlot();
-        SymbolTradeCoordinator.EntryPermit permit = symbolTradeCoordinator.acquireSell(
+        SymbolTradeCoordinator.EntryPermit permit = symbolTradeCoordinator.transitionToSell(
                 normalizedSymbol, accountEngineKey, accountAlias);
         symbolTradeSlotSymbol.set(normalizedSymbol);
         symbolTradeSlotHeld.set(true);
@@ -607,7 +607,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             log.warn("[accountId={} alias={}] 启动按交易所历史成交恢复无活动订单持仓: qty={} cost={}，已重新挂 SELL",
                     accountId, accountAlias, recoveredRisk.positionQty(), recoveredRisk.positionCostUsdt());
         } else if (managed) {
-            log.warn("[accountId={} alias={}] 启动按交易所历史成交恢复无活动订单持仓: qty={} cost={}，正在等待 SELL 通道",
+            log.warn("[accountId={} alias={}] 启动按交易所历史成交恢复无活动订单持仓: qty={} cost={}，等待下一次卖出尝试",
                     accountId, accountAlias, recoveredRisk.positionQty(), recoveredRisk.positionCostUsdt());
         }
         return managed;
@@ -1458,10 +1458,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             updateDustState(sellability, "已成交持仓不足以创建有效卖单，等待后续 BUY 合并");
             return;
         }
-        SymbolTradeCoordinator.EntryPermit sellPermit = acquireSymbolSellSlot(
+        SymbolTradeCoordinator.EntryPermit cyclePermit = transitionSymbolTradeSlotToSelling(
                 properties.getStrategy().getSymbol());
-        if (!sellPermit.accepted()) {
-            statusReason.set(sellPermit.reason());
+        if (!cyclePermit.accepted()) {
+            statusReason.set(cyclePermit.reason());
             return;
         }
         BigDecimal quantity = sellability.normalizedQty();
@@ -3304,8 +3304,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     private long exitOrderTimeoutMs() {
         var profile = symbolStrategy(properties.getStrategy().getSymbol());
-        return profile != null && profile.getExitTimeoutMs() != null && profile.getExitTimeoutMs() > 0
-                ? profile.getExitTimeoutMs() : properties.getStrategy().getLimitSellTimeoutMs();
+        if (profile != null && profile.getExitTimeoutMs() != null && profile.getExitTimeoutMs() > 0) {
+            return profile.getExitTimeoutMs();
+        }
+        return usesBuyPriceMakerStrategy()
+                ? properties.getStrategy().getBuyPriceMakerLimitSellTimeoutMs()
+                : properties.getStrategy().getLimitSellTimeoutMs();
     }
 
     private long currentActiveOrderTimeoutMs(ChurnStatus expectedStatus) {
