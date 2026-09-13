@@ -7,6 +7,7 @@ import java.math.MathContext;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * A local, fee-aware risk ledger. It is deliberately fail-closed for new entries:
@@ -16,6 +17,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public class TradingRiskGuard {
     private static final MathContext MC = MathContext.DECIMAL64;
     private final AtomicReference<String> entryBlockReason = new AtomicReference<>();
+    private final ReentrantLock lock = new ReentrantLock();
     private BigDecimal positionQty = BigDecimal.ZERO;
     private BigDecimal positionCostUsdt = BigDecimal.ZERO;
     private BigDecimal realizedPnlUsdt = BigDecimal.ZERO;
@@ -25,18 +27,25 @@ public class TradingRiskGuard {
     private long positionOpenedAtMs = -1;
     private LocalDate ledgerDate = LocalDate.now(ZoneOffset.UTC);
 
-    public synchronized void recordFill(String side, BigDecimal quantity, BigDecimal price, long nowMs,
+    public void recordFill(String side, BigDecimal quantity, BigDecimal price, long nowMs,
                                         BinanceProperties.Strategy config) {
+        lock.lock();
+        try {
         if (quantity == null || price == null || quantity.signum() <= 0 || price.signum() <= 0) return;
         BigDecimal notional = quantity.multiply(price);
         BigDecimal fee = notional.multiply(config.getAssumedMakerFeeBps()).divide(BigDecimal.valueOf(10_000), MC);
         recordActualFill(side, quantity, notional, fee, nowMs, config);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** Records exchange-reported economics instead of applying the configured fee estimate. */
-    public synchronized void recordActualFill(String side, BigDecimal inventoryQuantity, BigDecimal quoteNotional,
+    public void recordActualFill(String side, BigDecimal inventoryQuantity, BigDecimal quoteNotional,
                                               BigDecimal cashCommissionQuote, long nowMs,
                                               BinanceProperties.Strategy config) {
+        lock.lock();
+        try {
         rollDayIfNeeded();
         if (inventoryQuantity == null || quoteNotional == null || inventoryQuantity.signum() <= 0
                 || quoteNotional.signum() <= 0) return;
@@ -71,23 +80,33 @@ public class TradingRiskGuard {
             }
         }
         evaluate(nowMs, config);
+        } finally {
+            lock.unlock();
+        }
     }
 
-    public synchronized void recordMark(BigDecimal price, long nowMs, BinanceProperties.Strategy config) {
+    public void recordMark(BigDecimal price, long nowMs, BinanceProperties.Strategy config) {
+        lock.lock();
+        try {
         rollDayIfNeeded();
         if (price == null || price.signum() <= 0) return;
         markPrice = price;
         evaluate(nowMs, config);
+        } finally {
+            lock.unlock();
+        }
     }
 
-    public synchronized boolean permitsNewEntry(BigDecimal newOrderQty, BigDecimal entryPrice, long nowMs,
+    public boolean permitsNewEntry(BigDecimal newOrderQty, BigDecimal entryPrice, long nowMs,
                                                 BinanceProperties.Strategy config) {
         return permitsNewEntry(newOrderQty, entryPrice, nowMs, config, false);
     }
 
-    public synchronized boolean permitsNewEntry(BigDecimal newOrderQty, BigDecimal entryPrice, long nowMs,
+    public boolean permitsNewEntry(BigDecimal newOrderQty, BigDecimal entryPrice, long nowMs,
                                                 BinanceProperties.Strategy config,
                                                 boolean ignoreInventoryAgeBlock) {
+        lock.lock();
+        try {
         evaluate(nowMs, config, ignoreInventoryAgeBlock);
         if (entryBlockReason.get() != null) return false;
         BigDecimal projectedNotional = positionQty.add(newOrderQty).multiply(entryPrice);
@@ -96,12 +115,20 @@ public class TradingRiskGuard {
             return false;
         }
         return true;
+        } finally {
+            lock.unlock();
+        }
     }
 
-    public synchronized RiskSnapshot snapshot() {
+    public RiskSnapshot snapshot() {
+        lock.lock();
+        try {
         BigDecimal unrealized = unrealizedPnl();
         return new RiskSnapshot(entryBlockReason.get(), positionQty, positionCostUsdt, markPrice, realizedPnlUsdt,
                 unrealized, realizedPnlUsdt.add(unrealized), estimatedFeesUsdt, positionOpenedAtMs, ledgerDate);
+        } finally {
+            lock.unlock();
+        }
     }
 
     public void trip(String reason) { entryBlockReason.compareAndSet(null, reason); }
@@ -112,17 +139,24 @@ public class TradingRiskGuard {
      * proved the base-asset position is below the symbol step size. Any remaining cost is
      * conservatively realized as a loss instead of silently disappearing.
      */
-    public synchronized void reconcileExchangeFlat(long nowMs, BinanceProperties.Strategy config) {
+    public void reconcileExchangeFlat(long nowMs, BinanceProperties.Strategy config) {
+        lock.lock();
+        try {
         if (positionQty.signum() > 0) realizedPnlUsdt = realizedPnlUsdt.subtract(positionCostUsdt);
         positionQty = BigDecimal.ZERO;
         positionCostUsdt = BigDecimal.ZERO;
         positionOpenedAtMs = -1;
         entryBlockReason.compareAndSet("MAX_INVENTORY_AGE", null);
         evaluate(nowMs, config);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** Safe only after exchange reconciliation has proved the previous symbol is flat. */
-    public synchronized void resetForFlatSymbol() {
+    public void resetForFlatSymbol() {
+        lock.lock();
+        try {
         positionQty = BigDecimal.ZERO;
         positionCostUsdt = BigDecimal.ZERO;
         realizedPnlUsdt = BigDecimal.ZERO;
@@ -132,22 +166,32 @@ public class TradingRiskGuard {
         positionOpenedAtMs = -1;
         ledgerDate = LocalDate.now(ZoneOffset.UTC);
         entryBlockReason.set(null);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** Restores today's durable realized result while intentionally refusing to reconstruct inventory. */
-    public synchronized void restoreFlatDaily(BigDecimal realizedNetPnl, BigDecimal actualFees, LocalDate date,
+    public void restoreFlatDaily(BigDecimal realizedNetPnl, BigDecimal actualFees, LocalDate date,
                                               BinanceProperties.Strategy config) {
+        lock.lock();
+        try {
         resetForFlatSymbol();
         ledgerDate = date == null ? LocalDate.now(ZoneOffset.UTC) : date;
         realizedPnlUsdt = realizedNetPnl == null ? BigDecimal.ZERO : realizedNetPnl;
         estimatedFeesUsdt = actualFees == null ? BigDecimal.ZERO : actualFees.max(BigDecimal.ZERO);
         peakNetPnlUsdt = realizedPnlUsdt.max(BigDecimal.ZERO);
         evaluate(System.currentTimeMillis(), config);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** Safe only after exchange and durable ledger both confirm this open position belongs to the bot. */
-    public synchronized void restoreOpenPosition(BigDecimal quantity, BigDecimal costUsdt, BigDecimal markPrice,
+    public void restoreOpenPosition(BigDecimal quantity, BigDecimal costUsdt, BigDecimal markPrice,
                                                  long openedAtMs, BinanceProperties.Strategy config) {
+        lock.lock();
+        try {
         rollDayIfNeeded();
         if (quantity == null || quantity.signum() <= 0 || costUsdt == null || costUsdt.signum() <= 0) return;
         positionQty = quantity;
@@ -155,6 +199,9 @@ public class TradingRiskGuard {
         this.markPrice = markPrice;
         positionOpenedAtMs = openedAtMs > 0 ? openedAtMs : System.currentTimeMillis();
         evaluate(System.currentTimeMillis(), config);
+        } finally {
+            lock.unlock();
+        }
     }
 
     private void evaluate(long nowMs, BinanceProperties.Strategy config) {

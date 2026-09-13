@@ -1,5 +1,6 @@
 package com.binance.bot.account;
 
+import com.binance.bot.notification.OpenOrderNotification;
 import com.binance.bot.service.AccountUserDataStream;
 import com.binance.bot.service.BinanceAccountTradeClient;
 import com.binance.bot.strategy.HighFrequencyVolumeChurnEngine;
@@ -38,8 +39,8 @@ class AccountTradingRuntimeTest {
 
         verify(engineA).startTrading();
         verify(engineB).startTrading();
-        verify(engineA).refreshDashboardOpenOrderSnapshot();
-        verify(engineB).refreshDashboardOpenOrderSnapshot();
+        verify(engineA).refreshDashboardOpenOrderSnapshot(any());
+        verify(engineB).refreshDashboardOpenOrderSnapshot(any());
         verify(engineA).stopTrading();
         verify(engineB, never()).stopTrading();
     }
@@ -87,7 +88,7 @@ class AccountTradingRuntimeTest {
         verify(btc).onOrderUpdate(btcFill);
         verify(enso, never()).onOrderUpdate(any());
         verify(enso).startTrading();
-        verify(enso).refreshDashboardOpenOrderSnapshot();
+        verify(enso).refreshDashboardOpenOrderSnapshot(any());
         verify(btc).stopTrading();
         verify(stream).start();
     }
@@ -109,6 +110,21 @@ class AccountTradingRuntimeTest {
 
         verify(enso).stopTrading();
         verify(btc).stopTrading();
+    }
+
+    @Test
+    void sellOrderDashboardUsesPreviousBuyPriceFromMatchingSymbol() {
+        HighFrequencyVolumeChurnEngine engine = mock(HighFrequencyVolumeChurnEngine.class);
+        when(engine.getSymbol()).thenReturn("HOLOUSDT");
+        when(engine.dashboardPreviousBuyPrice()).thenReturn(new BigDecimal("0.062700"));
+        AccountTradingRuntime runtime = runtime("account-a", engine);
+        OpenOrderNotification sell = new OpenOrderNotification(
+                "account-a", "cloud", "HOLOUSDT", "SELL", "LIMIT", "NEW",
+                "0.062900", "348.6", "0", 77L, 123L);
+
+        OpenOrderNotification enriched = runtime.enrichDashboardOpenOrder(sell);
+
+        assertEquals("0.062700", enriched.entryPrice());
     }
 
     @Test
@@ -220,8 +236,8 @@ class AccountTradingRuntimeTest {
         verify(btc).handleUserStreamLoss("socket lost");
         verify(enso).handleUserStreamReady(false);
         verify(btc).handleUserStreamReady(false);
-        verify(enso).refreshDashboardOpenOrderSnapshot();
-        verify(btc, never()).refreshDashboardOpenOrderSnapshot();
+        verify(enso).refreshDashboardOpenOrderSnapshot(any());
+        verify(btc, never()).refreshDashboardOpenOrderSnapshot(any());
     }
 
     @Test
@@ -239,8 +255,8 @@ class AccountTradingRuntimeTest {
 
         verify(enso).handleUserStreamReady(false);
         verify(btc).handleUserStreamReady(false);
-        verify(enso, never()).refreshDashboardOpenOrderSnapshot();
-        verify(btc, never()).refreshDashboardOpenOrderSnapshot();
+        verify(enso, never()).refreshDashboardOpenOrderSnapshot(any());
+        verify(btc, never()).refreshDashboardOpenOrderSnapshot(any());
     }
 
     @Test

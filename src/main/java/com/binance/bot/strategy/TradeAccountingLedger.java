@@ -6,6 +6,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Process-local, idempotent accounting for authoritative Binance trade fills.
@@ -23,65 +24,91 @@ public final class TradeAccountingLedger {
     private final Map<Long, BigDecimal> orderQuote = new LinkedHashMap<>();
     private final Map<String, BigDecimal> commissionByAsset = new LinkedHashMap<>();
     private final Set<String> unconvertedCommissionAssets = new LinkedHashSet<>();
+    private final ReentrantLock lock = new ReentrantLock();
     private BigDecimal totalVolumeQuote = BigDecimal.ZERO;
     private BigDecimal totalCommissionQuote = BigDecimal.ZERO;
 
-    synchronized AppliedTrade record(long orderId, long tradeId, BigDecimal quantity, BigDecimal price,
-                                     BigDecimal quoteQuantity, BigDecimal commission, String commissionAsset,
-                                     BigDecimal commissionQuoteEquivalent) {
-        if (quantity == null || quantity.signum() <= 0) return AppliedTrade.ignored();
-        BigDecimal normalizedPrice = price == null ? BigDecimal.ZERO : price;
-        BigDecimal normalizedQuote = quoteQuantity != null && quoteQuantity.signum() > 0
-                ? quoteQuantity : quantity.multiply(normalizedPrice);
-        TradeKey key = new TradeKey(orderId, tradeId >= 0 ? Long.toString(tradeId)
-                : quantity.toPlainString() + ":" + normalizedQuote.toPlainString() + ":"
-                + (commission == null ? "0" : commission.toPlainString()) + ":"
-                + normalizeAsset(commissionAsset));
-        if (!processedTrades.add(key)) return AppliedTrade.ignored();
+    AppliedTrade record(long orderId, long tradeId, BigDecimal quantity, BigDecimal price,
+                        BigDecimal quoteQuantity, BigDecimal commission, String commissionAsset,
+                        BigDecimal commissionQuoteEquivalent) {
+        lock.lock();
+        try {
+            if (quantity == null || quantity.signum() <= 0) return AppliedTrade.ignored();
+            BigDecimal normalizedPrice = price == null ? BigDecimal.ZERO : price;
+            BigDecimal normalizedQuote = quoteQuantity != null && quoteQuantity.signum() > 0
+                    ? quoteQuantity : quantity.multiply(normalizedPrice);
+            TradeKey key = new TradeKey(orderId, tradeId >= 0 ? Long.toString(tradeId)
+                    : quantity.toPlainString() + ":" + normalizedQuote.toPlainString() + ":"
+                    + (commission == null ? "0" : commission.toPlainString()) + ":"
+                    + normalizeAsset(commissionAsset));
+            if (!processedTrades.add(key)) return AppliedTrade.ignored();
 
-        orderQuantity.merge(orderId, quantity, BigDecimal::add);
-        orderQuote.merge(orderId, normalizedQuote, BigDecimal::add);
-        totalVolumeQuote = totalVolumeQuote.add(normalizedQuote);
+            orderQuantity.merge(orderId, quantity, BigDecimal::add);
+            orderQuote.merge(orderId, normalizedQuote, BigDecimal::add);
+            totalVolumeQuote = totalVolumeQuote.add(normalizedQuote);
 
-        BigDecimal normalizedCommission = commission == null ? BigDecimal.ZERO : commission.max(BigDecimal.ZERO);
-        String normalizedAsset = normalizeAsset(commissionAsset);
-        if (normalizedCommission.signum() > 0) {
-            commissionByAsset.merge(normalizedAsset, normalizedCommission, BigDecimal::add);
-            if (commissionQuoteEquivalent == null) {
-                unconvertedCommissionAssets.add(normalizedAsset);
-            } else {
-                totalCommissionQuote = totalCommissionQuote.add(commissionQuoteEquivalent.max(BigDecimal.ZERO));
+            BigDecimal normalizedCommission = commission == null ? BigDecimal.ZERO : commission.max(BigDecimal.ZERO);
+            String normalizedAsset = normalizeAsset(commissionAsset);
+            if (normalizedCommission.signum() > 0) {
+                commissionByAsset.merge(normalizedAsset, normalizedCommission, BigDecimal::add);
+                if (commissionQuoteEquivalent == null) {
+                    unconvertedCommissionAssets.add(normalizedAsset);
+                } else {
+                    totalCommissionQuote = totalCommissionQuote.add(commissionQuoteEquivalent.max(BigDecimal.ZERO));
+                }
             }
+            return new AppliedTrade(true, quantity, normalizedQuote, normalizedCommission, normalizedAsset,
+                    commissionQuoteEquivalent);
+        } finally {
+            lock.unlock();
         }
-        return new AppliedTrade(true, quantity, normalizedQuote, normalizedCommission, normalizedAsset,
-                commissionQuoteEquivalent);
     }
 
-    synchronized BigDecimal accountedQuantity(long orderId) {
-        return orderQuantity.getOrDefault(orderId, BigDecimal.ZERO);
+    BigDecimal accountedQuantity(long orderId) {
+        lock.lock();
+        try {
+            return orderQuantity.getOrDefault(orderId, BigDecimal.ZERO);
+        } finally {
+            lock.unlock();
+        }
     }
 
-    synchronized BigDecimal accountedQuote(long orderId) {
-        return orderQuote.getOrDefault(orderId, BigDecimal.ZERO);
+    BigDecimal accountedQuote(long orderId) {
+        lock.lock();
+        try {
+            return orderQuote.getOrDefault(orderId, BigDecimal.ZERO);
+        } finally {
+            lock.unlock();
+        }
     }
 
-    synchronized AccountingSnapshot snapshot() {
-        BigDecimal costPerMillion = totalVolumeQuote.signum() > 0 && unconvertedCommissionAssets.isEmpty()
-                ? totalCommissionQuote.multiply(ONE_MILLION).divide(totalVolumeQuote, MC)
-                : null;
-        return new AccountingSnapshot(totalVolumeQuote, Map.copyOf(commissionByAsset), totalCommissionQuote,
-                costPerMillion, unconvertedCommissionAssets.isEmpty(), Set.copyOf(unconvertedCommissionAssets),
-                processedTrades.size());
+    AccountingSnapshot snapshot() {
+        lock.lock();
+        try {
+            BigDecimal costPerMillion = totalVolumeQuote.signum() > 0 && unconvertedCommissionAssets.isEmpty()
+                    ? totalCommissionQuote.multiply(ONE_MILLION).divide(totalVolumeQuote, MC)
+                    : null;
+            return new AccountingSnapshot(totalVolumeQuote, Map.copyOf(commissionByAsset), totalCommissionQuote,
+                    costPerMillion, unconvertedCommissionAssets.isEmpty(), Set.copyOf(unconvertedCommissionAssets),
+                    processedTrades.size());
+        } finally {
+            lock.unlock();
+        }
     }
 
-    synchronized void reset() {
-        processedTrades.clear();
-        orderQuantity.clear();
-        orderQuote.clear();
-        commissionByAsset.clear();
-        unconvertedCommissionAssets.clear();
-        totalVolumeQuote = BigDecimal.ZERO;
-        totalCommissionQuote = BigDecimal.ZERO;
+    void reset() {
+        lock.lock();
+        try {
+            processedTrades.clear();
+            orderQuantity.clear();
+            orderQuote.clear();
+            commissionByAsset.clear();
+            unconvertedCommissionAssets.clear();
+            totalVolumeQuote = BigDecimal.ZERO;
+            totalCommissionQuote = BigDecimal.ZERO;
+        } finally {
+            lock.unlock();
+        }
     }
 
     private String normalizeAsset(String asset) {

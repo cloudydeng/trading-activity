@@ -1,5 +1,6 @@
 package com.binance.bot.account;
 
+import com.binance.bot.notification.OpenOrderNotification;
 import com.binance.bot.service.AccountUserDataStream;
 import com.binance.bot.service.BinanceAccountTradeClient;
 import com.binance.bot.strategy.HighFrequencyVolumeChurnEngine;
@@ -13,6 +14,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 
 /** Owns one Binance account session and one independently stateful engine per configured symbol. */
 public class AccountTradingRuntime {
@@ -25,6 +27,7 @@ public class AccountTradingRuntime {
     private final AccountRiskCoordinator accountRiskCoordinator;
     private final AtomicBoolean initialized = new AtomicBoolean();
     private final AtomicLong lastDashboardOpenOrderSnapshotAtMs = new AtomicLong();
+    private final ReentrantLock lock = new ReentrantLock();
 
     public AccountTradingRuntime(AccountCredentials credentials,
                                  BinanceAccountTradeClient tradeClient,
@@ -72,18 +75,23 @@ public class AccountTradingRuntime {
         this.accountRiskCoordinator = accountRiskCoordinator;
     }
 
-    public synchronized void initialize() {
-        if (!initialized.compareAndSet(false, true)) return;
+    public void initialize() {
+        lock.lock();
         try {
-            engines.values().forEach(HighFrequencyVolumeChurnEngine::initialize);
-            userDataStream.start();
-        } catch (RuntimeException e) {
-            for (HighFrequencyVolumeChurnEngine engine : engines.values()) {
-                try { engine.shutdown(); } catch (RuntimeException cleanupFailure) { e.addSuppressed(cleanupFailure); }
+            if (!initialized.compareAndSet(false, true)) return;
+            try {
+                engines.values().forEach(HighFrequencyVolumeChurnEngine::initialize);
+                userDataStream.start();
+            } catch (RuntimeException e) {
+                for (HighFrequencyVolumeChurnEngine engine : engines.values()) {
+                    try { engine.shutdown(); } catch (RuntimeException cleanupFailure) { e.addSuppressed(cleanupFailure); }
+                }
+                try { userDataStream.shutdown(); } catch (RuntimeException cleanupFailure) { e.addSuppressed(cleanupFailure); }
+                initialized.set(false);
+                throw e;
             }
-            try { userDataStream.shutdown(); } catch (RuntimeException cleanupFailure) { e.addSuppressed(cleanupFailure); }
-            initialized.set(false);
-            throw e;
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -129,6 +137,15 @@ public class AccountTradingRuntime {
         }
     }
 
+    /** Adds the immediately preceding BUY price to SELL orders for dashboard display. */
+    public OpenOrderNotification enrichDashboardOpenOrder(OpenOrderNotification order) {
+        if (order == null || !"SELL".equalsIgnoreCase(order.side())) return order;
+        return engine(order.symbol())
+                .map(HighFrequencyVolumeChurnEngine::dashboardPreviousBuyPrice)
+                .map(order::withEntryPrice)
+                .orElse(order);
+    }
+
     public void handleUserStreamLoss(String reason) {
         engines().forEach(engine -> engine.handleUserStreamLoss(reason));
     }
@@ -141,22 +158,27 @@ public class AccountTradingRuntime {
         if (snapshotRequired) refreshDashboardOpenOrderSnapshot(true);
     }
 
-    public synchronized void shutdown() {
-        if (!initialized.get()) return;
-        RuntimeException failure = null;
+    public void shutdown() {
+        lock.lock();
         try {
-            for (HighFrequencyVolumeChurnEngine engine : engines()) {
-                try { engine.shutdown(); }
-                catch (RuntimeException e) { if (failure == null) failure = e; }
-            }
-        } finally {
+            if (!initialized.get()) return;
+            RuntimeException failure = null;
             try {
-                userDataStream.shutdown();
+                for (HighFrequencyVolumeChurnEngine engine : engines()) {
+                    try { engine.shutdown(); }
+                    catch (RuntimeException e) { if (failure == null) failure = e; }
+                }
             } finally {
-                initialized.set(false);
+                try {
+                    userDataStream.shutdown();
+                } finally {
+                    initialized.set(false);
+                }
             }
+            if (failure != null) throw failure;
+        } finally {
+            lock.unlock();
         }
-        if (failure != null) throw failure;
     }
 
     public String accountId() { return credentials.accountId(); }
@@ -165,74 +187,115 @@ public class AccountTradingRuntime {
     public BinanceAccountTradeClient tradeClient() { return tradeClient; }
     public AccountUserDataStream userDataStream() { return userDataStream; }
     public AccountRiskCoordinator accountRiskCoordinator() { return accountRiskCoordinator; }
-    public synchronized HighFrequencyVolumeChurnEngine engine() { return engines.values().iterator().next(); }
-    public synchronized Optional<HighFrequencyVolumeChurnEngine> engine(String symbol) {
-        if (symbol == null || symbol.isBlank()) return Optional.of(engine());
-        return Optional.ofNullable(engines.get(normalizeSymbol(symbol)));
+    public HighFrequencyVolumeChurnEngine engine() {
+        lock.lock();
+        try {
+            return engines.values().iterator().next();
+        } finally {
+            lock.unlock();
+        }
     }
-    public synchronized List<HighFrequencyVolumeChurnEngine> engines() { return List.copyOf(engines.values()); }
+    public Optional<HighFrequencyVolumeChurnEngine> engine(String symbol) {
+        lock.lock();
+        try {
+            if (symbol == null || symbol.isBlank()) return Optional.of(engine());
+            return Optional.ofNullable(engines.get(normalizeSymbol(symbol)));
+        } finally {
+            lock.unlock();
+        }
+    }
+    public List<HighFrequencyVolumeChurnEngine> engines() {
+        lock.lock();
+        try {
+            return List.copyOf(engines.values());
+        } finally {
+            lock.unlock();
+        }
+    }
     public TradingRiskGuard riskGuard() { return riskGuards.getOrDefault(engine().getSymbol(), engine().getRiskGuard()); }
-    public synchronized Optional<TradingRiskGuard> riskGuard(String symbol) {
-        if (symbol == null) return Optional.empty();
-        return Optional.ofNullable(riskGuards.get(normalizeSymbol(symbol)));
+    public Optional<TradingRiskGuard> riskGuard(String symbol) {
+        lock.lock();
+        try {
+            if (symbol == null) return Optional.empty();
+            return Optional.ofNullable(riskGuards.get(normalizeSymbol(symbol)));
+        } finally {
+            lock.unlock();
+        }
     }
     public PostFillOutcomeTracker outcomeTracker() { return outcomeTrackers.get(engine().getSymbol()); }
-    public synchronized int symbolCount() { return engines.size(); }
+    public int symbolCount() {
+        lock.lock();
+        try {
+            return engines.size();
+        } finally {
+            lock.unlock();
+        }
+    }
     public boolean initialized() { return initialized.get(); }
-    public synchronized boolean canChangeConfiguredSymbols() {
-        return engines.values().stream().allMatch(engine -> !engine.getIsRunning().get() && !engine.hasActiveOrder());
+    public boolean canChangeConfiguredSymbols() {
+        lock.lock();
+        try {
+            return engines.values().stream().allMatch(engine -> !engine.getIsRunning().get() && !engine.hasActiveOrder());
+        } finally {
+            lock.unlock();
+        }
     }
 
-    public synchronized ApplySymbolsResult applyConfiguredSymbols(
+    public ApplySymbolsResult applyConfiguredSymbols(
             List<String> targetSymbols,
             Map<String, AccountTradingRuntimeFactory.AccountSymbolRuntime> additions) {
-        List<String> normalizedTargets = normalizeSymbols(targetSymbols);
-        if (normalizedTargets.isEmpty()) return new ApplySymbolsResult(false, "至少需要保留 1 个交易对");
-        if (normalizedTargets.size() > 5) return new ApplySymbolsResult(false, "一个账户最多支持 5 个交易对");
-        if (!canChangeConfiguredSymbols()) {
-            return new ApplySymbolsResult(false, "请先停止该账户的全部币种，并确认没有活动订单");
-        }
-        Map<String, AccountTradingRuntimeFactory.AccountSymbolRuntime> normalizedAdditions = new LinkedHashMap<>();
-        if (additions != null) {
-            additions.forEach((symbol, addition) -> {
-                if (addition != null) normalizedAdditions.put(normalizeSymbol(symbol), addition);
-            });
-        }
-        for (String symbol : normalizedTargets) {
-            if (!engines.containsKey(symbol) && !normalizedAdditions.containsKey(symbol)) {
-                return new ApplySymbolsResult(false, "缺少新增交易对运行实例: " + symbol);
+        lock.lock();
+        try {
+            List<String> normalizedTargets = normalizeSymbols(targetSymbols);
+            if (normalizedTargets.isEmpty()) return new ApplySymbolsResult(false, "至少需要保留 1 个交易对");
+            if (normalizedTargets.size() > 5) return new ApplySymbolsResult(false, "一个账户最多支持 5 个交易对");
+            if (!canChangeConfiguredSymbols()) {
+                return new ApplySymbolsResult(false, "请先停止该账户的全部币种，并确认没有活动订单");
             }
-        }
-        for (String symbol : List.copyOf(engines.keySet())) {
-            if (!normalizedTargets.contains(symbol)) {
-                HighFrequencyVolumeChurnEngine removed = engines.get(symbol);
-                if (removed != null) removed.shutdown();
+            Map<String, AccountTradingRuntimeFactory.AccountSymbolRuntime> normalizedAdditions = new LinkedHashMap<>();
+            if (additions != null) {
+                additions.forEach((symbol, addition) -> {
+                    if (addition != null) normalizedAdditions.put(normalizeSymbol(symbol), addition);
+                });
             }
-        }
-        LinkedHashMap<String, HighFrequencyVolumeChurnEngine> nextEngines = new LinkedHashMap<>();
-        LinkedHashMap<String, TradingRiskGuard> nextRiskGuards = new LinkedHashMap<>();
-        LinkedHashMap<String, PostFillOutcomeTracker> nextOutcomeTrackers = new LinkedHashMap<>();
-        for (String symbol : normalizedTargets) {
-            AccountTradingRuntimeFactory.AccountSymbolRuntime addition = normalizedAdditions.get(symbol);
-            if (addition != null) {
-                nextEngines.put(symbol, addition.engine());
-                nextRiskGuards.put(symbol, addition.riskGuard());
-                nextOutcomeTrackers.put(symbol, addition.outcomeTracker());
-            } else {
-                nextEngines.put(symbol, engines.get(symbol));
-                TradingRiskGuard riskGuard = riskGuards.get(symbol);
-                if (riskGuard != null) nextRiskGuards.put(symbol, riskGuard);
-                PostFillOutcomeTracker tracker = outcomeTrackers.get(symbol);
-                if (tracker != null) nextOutcomeTrackers.put(symbol, tracker);
+            for (String symbol : normalizedTargets) {
+                if (!engines.containsKey(symbol) && !normalizedAdditions.containsKey(symbol)) {
+                    return new ApplySymbolsResult(false, "缺少新增交易对运行实例: " + symbol);
+                }
             }
+            for (String symbol : List.copyOf(engines.keySet())) {
+                if (!normalizedTargets.contains(symbol)) {
+                    HighFrequencyVolumeChurnEngine removed = engines.get(symbol);
+                    if (removed != null) removed.shutdown();
+                }
+            }
+            LinkedHashMap<String, HighFrequencyVolumeChurnEngine> nextEngines = new LinkedHashMap<>();
+            LinkedHashMap<String, TradingRiskGuard> nextRiskGuards = new LinkedHashMap<>();
+            LinkedHashMap<String, PostFillOutcomeTracker> nextOutcomeTrackers = new LinkedHashMap<>();
+            for (String symbol : normalizedTargets) {
+                AccountTradingRuntimeFactory.AccountSymbolRuntime addition = normalizedAdditions.get(symbol);
+                if (addition != null) {
+                    nextEngines.put(symbol, addition.engine());
+                    nextRiskGuards.put(symbol, addition.riskGuard());
+                    nextOutcomeTrackers.put(symbol, addition.outcomeTracker());
+                } else {
+                    nextEngines.put(symbol, engines.get(symbol));
+                    TradingRiskGuard riskGuard = riskGuards.get(symbol);
+                    if (riskGuard != null) nextRiskGuards.put(symbol, riskGuard);
+                    PostFillOutcomeTracker tracker = outcomeTrackers.get(symbol);
+                    if (tracker != null) nextOutcomeTrackers.put(symbol, tracker);
+                }
+            }
+            engines.clear();
+            engines.putAll(nextEngines);
+            riskGuards.clear();
+            riskGuards.putAll(nextRiskGuards);
+            outcomeTrackers.clear();
+            outcomeTrackers.putAll(nextOutcomeTrackers);
+            return new ApplySymbolsResult(true, "交易对配置已热应用");
+        } finally {
+            lock.unlock();
         }
-        engines.clear();
-        engines.putAll(nextEngines);
-        riskGuards.clear();
-        riskGuards.putAll(nextRiskGuards);
-        outcomeTrackers.clear();
-        outcomeTrackers.putAll(nextOutcomeTrackers);
-        return new ApplySymbolsResult(true, "交易对配置已热应用");
     }
 
     private boolean reconcileAccountRisk(HighFrequencyVolumeChurnEngine target) {
@@ -264,7 +327,7 @@ public class AccountTradingRuntime {
         if (!force && previous > 0 && now - previous < 1_000) return;
         if (!force && !lastDashboardOpenOrderSnapshotAtMs.compareAndSet(previous, now)) return;
         if (force) lastDashboardOpenOrderSnapshotAtMs.set(now);
-        engine().refreshDashboardOpenOrderSnapshot();
+        engine().refreshDashboardOpenOrderSnapshot(this::enrichDashboardOpenOrder);
     }
 
     private static String safeEngineSymbol(HighFrequencyVolumeChurnEngine engine) {

@@ -1,6 +1,7 @@
 package com.binance.bot.controller;
 
 import com.binance.bot.account.AccountTradingRuntime;
+import com.binance.bot.account.SymbolTradeCoordinator;
 import com.binance.bot.account.TradingAccountManager;
 import com.binance.bot.config.BinanceProperties;
 import com.binance.bot.notification.FillNotification;
@@ -10,6 +11,7 @@ import com.binance.bot.strategy.HighFrequencyVolumeChurnEngine;
 import com.binance.bot.strategy.DailyTradeStatsStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -27,16 +29,61 @@ public class BotDashboardController {
     private final TradingAccountManager accountManager;
     private final BinanceProperties properties;
     private final TradeNotificationService notificationService;
+    private final DailyTradeStatsStore dailyStatsStore;
+    private final SymbolTradeCoordinator symbolTradeCoordinator;
 
     public BotDashboardController(TradingAccountManager accountManager, BinanceProperties properties,
                                   TradeNotificationService notificationService) {
+        this(accountManager, properties, notificationService, null, null);
+    }
+
+    @Autowired
+    public BotDashboardController(TradingAccountManager accountManager, BinanceProperties properties,
+                                  TradeNotificationService notificationService,
+                                  DailyTradeStatsStore dailyStatsStore,
+                                  SymbolTradeCoordinator symbolTradeCoordinator) {
         this.accountManager = accountManager;
         this.properties = properties;
         this.notificationService = notificationService;
+        this.dailyStatsStore = dailyStatsStore;
+        this.symbolTradeCoordinator = symbolTradeCoordinator;
     }
 
     @GetMapping("/api/accounts")
     public List<TradingAccountManager.AccountSummary> accounts() { return accountManager.summaries(); }
+
+    @GetMapping("/api/settings/trading")
+    public TradingSettingsView tradingSettings() {
+        int value = dailyStatsStore == null ? properties.getStrategy().getMaxConcurrentEntriesPerSymbol()
+                : dailyStatsStore.loadTradingRuntimeSettings()
+                .map(DailyTradeStatsStore.TradingRuntimeSettings::maxConcurrentEntriesPerSymbol)
+                .orElse(properties.getStrategy().getMaxConcurrentEntriesPerSymbol());
+        value = Math.max(1, value);
+        if (symbolTradeCoordinator != null) {
+            symbolTradeCoordinator.configureMaxConcurrentEntriesPerSymbol(value);
+            value = symbolTradeCoordinator.maxConcurrentEntriesPerSymbol();
+        }
+        return new TradingSettingsView(value);
+    }
+
+    @PutMapping("/api/settings/trading")
+    public ResponseEntity<?> updateTradingSettings(@RequestBody TradingSettingsRequest request) {
+        if (request == null || request.maxConcurrentEntriesPerSymbol() == null) {
+            return ResponseEntity.badRequest().body(Map.of("accepted", false, "message", "交易运行设置不能为空"));
+        }
+        int value = request.maxConcurrentEntriesPerSymbol();
+        if (value < 1 || value > 20) {
+            return ResponseEntity.badRequest().body(Map.of("accepted", false,
+                    "message", "同交易对并发名额必须在 1 到 20 之间"));
+        }
+        DailyTradeStatsStore.TradingRuntimeSettings settings =
+                new DailyTradeStatsStore.TradingRuntimeSettings(value);
+        if (dailyStatsStore != null) dailyStatsStore.saveTradingRuntimeSettings(settings);
+        properties.getStrategy().setMaxConcurrentEntriesPerSymbol(value);
+        if (symbolTradeCoordinator != null) symbolTradeCoordinator.configureMaxConcurrentEntriesPerSymbol(value);
+        return ResponseEntity.ok(new TradingSettingsUpdateResult(true, "交易运行设置已保存并立即生效",
+                new TradingSettingsView(value)));
+    }
 
     @GetMapping("/api/accounts/open-orders")
     public Map<String, Object> allOpenOrders() {
@@ -523,6 +570,9 @@ public class BotDashboardController {
     public record LiquidationRequest(String password, String confirmation) { }
     public record SymbolSwitchRequest(String symbol) { }
     public record SymbolsConfigurationRequest(List<String> symbols) { }
+    public record TradingSettingsRequest(Integer maxConcurrentEntriesPerSymbol) { }
+    public record TradingSettingsView(int maxConcurrentEntriesPerSymbol) { }
+    public record TradingSettingsUpdateResult(boolean accepted, String message, TradingSettingsView settings) { }
     public record StrategySwitchRequest(String symbol, String mode, BigDecimal orderAmountUsdt,
                                         Long entryTimeoutMs, Long exitTimeoutMs, BigDecimal makerFeeBps,
                                         BigDecimal targetNetProfitBps, Long entryAnchorWaitMs,

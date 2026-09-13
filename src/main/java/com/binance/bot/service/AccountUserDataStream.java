@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
 @Slf4j
@@ -50,6 +51,7 @@ public class AccountUserDataStream implements WebSocket.Listener {
             new AtomicReference<>(new CompletableFuture<>());
     private final ScheduledExecutorService watchdog;
     private final StringBuilder inboundMessage = new StringBuilder();
+    private final ReentrantLock inboundMessageLock = new ReentrantLock();
     private final ExecutionCallback executionCallback;
     private final StreamLifecycleCallback streamLifecycleCallback;
     private final Runnable streamReadyCallback;
@@ -149,11 +151,14 @@ public class AccountUserDataStream implements WebSocket.Listener {
         lastFrameTimestamp.set(System.currentTimeMillis());
         try {
             String payload;
-            synchronized (inboundMessage) {
+            inboundMessageLock.lock();
+            try {
                 inboundMessage.append(data);
                 if (!last) return WebSocket.Listener.super.onText(webSocket, data, false);
                 payload = inboundMessage.toString();
                 inboundMessage.setLength(0);
+            } finally {
+                inboundMessageLock.unlock();
             }
             JsonNode root = objectMapper.readTree(payload);
             if (root.has("id") && "account-events".equals(root.get("id").asText())) {
@@ -362,7 +367,12 @@ public class AccountUserDataStream implements WebSocket.Listener {
         reconnectScheduled.set(false);
         WebSocket old = activeWebSocket.getAndSet(null);
         if (old != null) old.abort();
-        synchronized (inboundMessage) { inboundMessage.setLength(0); }
+        inboundMessageLock.lock();
+        try {
+            inboundMessage.setLength(0);
+        } finally {
+            inboundMessageLock.unlock();
+        }
         connect();
         try {
             return Boolean.TRUE.equals(future.get(Math.max(1_000, timeoutMs), TimeUnit.MILLISECONDS));

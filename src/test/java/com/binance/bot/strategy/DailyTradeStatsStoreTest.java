@@ -43,6 +43,22 @@ class DailyTradeStatsStoreTest {
     }
 
     @Test
+    void persistsTradingRuntimeSettingsAcrossRestart() {
+        BinanceProperties properties = properties();
+        DailyTradeStatsStore first = new DailyTradeStatsStore(properties);
+        first.saveTradingRuntimeSettings(new DailyTradeStatsStore.TradingRuntimeSettings(3));
+        first.close();
+
+        DailyTradeStatsStore restarted = new DailyTradeStatsStore(properties());
+
+        assertEquals(3, restarted.loadTradingRuntimeSettings().orElseThrow()
+                .maxConcurrentEntriesPerSymbol());
+        assertThrows(IllegalArgumentException.class, () -> restarted.saveTradingRuntimeSettings(
+                new DailyTradeStatsStore.TradingRuntimeSettings(0)));
+        restarted.close();
+    }
+
+    @Test
     void persistsDailyEconomicsAndDeduplicatesTradesAcrossRestart() throws Exception {
         BinanceProperties properties = properties();
         DailyTradeStatsStore first = new DailyTradeStatsStore(properties);
@@ -290,7 +306,8 @@ class DailyTradeStatsStoreTest {
         DailyTradeStatsStore first = new DailyTradeStatsStore(properties);
         first.saveRuntimeState("account-a", "ENSOUSDT", new DailyTradeStatsStore.RuntimeState(
                 "account-a", "ENSOUSDT", "SELLING", 77L, "ta-a-S-1", "SELL",
-                new BigDecimal("0.6013"), new BigDecimal("10"), new BigDecimal("0.6000"),
+                new BigDecimal("0.6013"), new BigDecimal("0.5995"),
+                new BigDecimal("10"), new BigDecimal("0.6000"),
                 1234L, 5678L, new BigDecimal("0.5990"),
                 List.of(new BigDecimal("0.5980"), new BigDecimal("0.6000"))));
         first.close();
@@ -300,6 +317,7 @@ class DailyTradeStatsStoreTest {
         assertEquals(77L, state.orderId());
         assertEquals("ta-a-S-1", state.clientOrderId());
         assertDecimal("0.6013", state.orderPrice());
+        assertDecimal("0.5995", state.previousBuyOrderPrice());
         assertDecimal("0.6000", state.feeAwareEntryPriceCeiling());
         assertDecimal("0.5990", state.feeAwareInitialEntryAnchorPrice());
         assertEquals(2, state.feeAwareRecentBuyPrices().size());

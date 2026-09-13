@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
 /** In-memory dashboard state with account-isolated fill queues and order snapshots. */
@@ -19,6 +20,7 @@ import java.util.function.Consumer;
 public class InMemoryTradeNotificationService implements TradeNotificationService {
     private static final int MAX_PER_ACCOUNT = 200;
     private final ConcurrentMap<String, Deque<FillNotification>> fillsByAccount = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, ReentrantLock> fillLocksByAccount = new ConcurrentHashMap<>();
     private final CopyOnWriteArrayList<Consumer<FillNotification>> listeners = new CopyOnWriteArrayList<>();
     private final ConcurrentMap<String, Map<String, OpenOrderNotification>> openOrdersByAccount =
             new ConcurrentHashMap<>();
@@ -29,9 +31,13 @@ public class InMemoryTradeNotificationService implements TradeNotificationServic
     public void notifyFill(FillNotification notification) {
         Deque<FillNotification> queue = fillsByAccount.computeIfAbsent(
                 notification.accountId(), ignored -> new ArrayDeque<>());
-        synchronized (queue) {
+        ReentrantLock lock = fillLocksByAccount.computeIfAbsent(notification.accountId(), ignored -> new ReentrantLock());
+        lock.lock();
+        try {
             queue.addFirst(notification);
             while (queue.size() > MAX_PER_ACCOUNT) queue.removeLast();
+        } finally {
+            lock.unlock();
         }
         for (Consumer<FillNotification> listener : listeners) {
             try {
@@ -47,13 +53,17 @@ public class InMemoryTradeNotificationService implements TradeNotificationServic
         Deque<FillNotification> queue = fillsByAccount.get(accountId);
         if (queue == null) return List.of();
         int safeLimit = Math.max(1, Math.min(limit, MAX_PER_ACCOUNT));
-        synchronized (queue) {
+        ReentrantLock lock = fillLocksByAccount.computeIfAbsent(accountId, ignored -> new ReentrantLock());
+        lock.lock();
+        try {
             List<FillNotification> result = new ArrayList<>(Math.min(queue.size(), safeLimit));
             for (FillNotification fill : queue) {
                 if (result.size() == safeLimit) break;
                 result.add(fill);
             }
             return List.copyOf(result);
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -61,9 +71,15 @@ public class InMemoryTradeNotificationService implements TradeNotificationServic
     public List<FillNotification> recentFills(int limit) {
         int safeLimit = Math.max(1, Math.min(limit, MAX_PER_ACCOUNT));
         List<FillNotification> result = new ArrayList<>();
-        for (Deque<FillNotification> queue : fillsByAccount.values()) {
-            synchronized (queue) {
+        for (Map.Entry<String, Deque<FillNotification>> entry : fillsByAccount.entrySet()) {
+            String accountId = entry.getKey();
+            Deque<FillNotification> queue = entry.getValue();
+            ReentrantLock lock = fillLocksByAccount.computeIfAbsent(accountId, ignored -> new ReentrantLock());
+            lock.lock();
+            try {
                 result.addAll(queue);
+            } finally {
+                lock.unlock();
             }
         }
         result.sort(Comparator.comparingLong(FillNotification::eventTime).reversed());

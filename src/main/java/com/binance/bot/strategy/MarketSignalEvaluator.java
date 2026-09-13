@@ -7,6 +7,7 @@ import java.math.MathContext;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Collects market diagnostics and retains the legacy conservative evaluator. The three current
@@ -18,32 +19,50 @@ public class MarketSignalEvaluator {
     private final Deque<Quote> quotes = new ArrayDeque<>();
     private final Deque<TradeFlow> trades = new ArrayDeque<>();
     private final AtomicReference<EntryDecision> lastDecision = new AtomicReference<>(EntryDecision.block("AWAITING_MARKET_DATA"));
+    private final ReentrantLock lock = new ReentrantLock();
     private DepthSnapshot latestDepth;
     private Selloff selloff;
 
-    public synchronized void recordQuote(BigDecimal bid, BigDecimal bidQty, BigDecimal ask, BigDecimal askQty, long timestampMs,
+    public void recordQuote(BigDecimal bid, BigDecimal bidQty, BigDecimal ask, BigDecimal askQty, long timestampMs,
                                          BinanceProperties.Strategy config) {
+        lock.lock();
+        try {
         if (bid.signum() <= 0 || ask.signum() <= 0 || bidQty.signum() < 0 || askQty.signum() < 0) return;
         quotes.addLast(new Quote(bid, bidQty, ask, askQty, timestampMs));
         long cutoff = timestampMs - config.getSignalLookbackMs();
         while (!quotes.isEmpty() && quotes.peekFirst().timestampMs() < cutoff) quotes.removeFirst();
+        } finally {
+            lock.unlock();
+        }
     }
 
-    public synchronized void recordAggTrade(BigDecimal quantity, boolean buyerIsMaker, long timestampMs,
+    public void recordAggTrade(BigDecimal quantity, boolean buyerIsMaker, long timestampMs,
                                             BinanceProperties.Strategy config) {
+        lock.lock();
+        try {
         if (quantity.signum() <= 0) return;
         // buyerIsMaker=true means the aggressor sold into the bid.
         trades.addLast(new TradeFlow(buyerIsMaker ? quantity.negate() : quantity, quantity, timestampMs));
         long cutoff = timestampMs - config.getSignalLookbackMs();
         while (!trades.isEmpty() && trades.peekFirst().timestampMs() < cutoff) trades.removeFirst();
+        } finally {
+            lock.unlock();
+        }
     }
 
-    public synchronized void recordDepth(BigDecimal bidDepth, BigDecimal askDepth, long timestampMs) {
+    public void recordDepth(BigDecimal bidDepth, BigDecimal askDepth, long timestampMs) {
+        lock.lock();
+        try {
         if (bidDepth.signum() < 0 || askDepth.signum() < 0) return;
         latestDepth = new DepthSnapshot(bidDepth, askDepth, timestampMs);
+        } finally {
+            lock.unlock();
+        }
     }
 
-    public synchronized EntryDecision evaluate(long nowMs, BinanceProperties.Strategy config) {
+    public EntryDecision evaluate(long nowMs, BinanceProperties.Strategy config) {
+        lock.lock();
+        try {
         pruneTrades(nowMs - config.getSignalLookbackMs());
         Quote latest = quotes.peekLast();
         if (latest == null || nowMs - latest.timestampMs() > config.getMarketDataStaleMs()) return set(EntryDecision.block("STALE_MARKET_DATA"));
@@ -98,11 +117,16 @@ public class MarketSignalEvaluator {
         // measured for visibility, but they no longer block maker entries.
         selloff = null;
         return set(EntryDecision.allow(imbalance, depthImbalance, takerFlowImbalance, returnBps, rangeBps));
+        } finally {
+            lock.unlock();
+        }
     }
 
     public EntryDecision getLastDecision() { return lastDecision.get(); }
 
-    public synchronized EntryDecision evaluateBestBidMaker(long nowMs, BinanceProperties.Strategy config) {
+    public EntryDecision evaluateBestBidMaker(long nowMs, BinanceProperties.Strategy config) {
+        lock.lock();
+        try {
         pruneTrades(nowMs - config.getSignalLookbackMs());
         Quote latest = quotes.peekLast();
         if (latest == null || nowMs - latest.timestampMs() > config.getMarketDataStaleMs()
@@ -144,25 +168,38 @@ public class MarketSignalEvaluator {
         selloff = null;
         return set(new EntryDecision(true, "BEST_BID_MAKER", imbalance, depthImbalance,
                 takerFlowImbalance, returnBps, rangeBps));
+        } finally {
+            lock.unlock();
+        }
     }
 
     public EntryDecision markBestBidMakerReady() {
         return set(new EntryDecision(true, "BEST_BID_MAKER", BigDecimal.ZERO, BigDecimal.ZERO,
                 BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
     }
-    public synchronized void reset() {
+    public void reset() {
+        lock.lock();
+        try {
         quotes.clear();
         trades.clear();
         latestDepth = null;
         selloff = null;
         lastDecision.set(EntryDecision.block("AWAITING_MARKET_DATA"));
+        } finally {
+            lock.unlock();
+        }
     }
 
-    public synchronized MarketContext getMarketContext(long nowMs) {
+    public MarketContext getMarketContext(long nowMs) {
+        lock.lock();
+        try {
         EntryDecision decision = lastDecision.get();
         return new MarketContext(decision.reason(), decision.bookImbalance(), decision.depthImbalance(),
                 decision.takerFlowImbalance(), decision.returnBps(), decision.rangeBps(),
                 selloff == null ? null : nowMs - selloff.detectedAtMs(), selloff == null ? null : selloff.lowMid());
+        } finally {
+            lock.unlock();
+        }
     }
 
     private void pruneTrades(long cutoff) {

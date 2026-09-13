@@ -11,6 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 /** Serializes same-account BUY submissions and enforces account-wide capital safety. */
@@ -20,6 +21,7 @@ public final class AccountRiskCoordinator {
     private final Map<String, Supplier<TradingRiskGuard.RiskSnapshot>> riskSuppliers = new ConcurrentHashMap<>();
     private final Map<String, Supplier<Boolean>> reconciliationSuppliers = new ConcurrentHashMap<>();
     private final Map<String, BigDecimal> pendingEntryNotional = new LinkedHashMap<>();
+    private final ReentrantLock lock = new ReentrantLock();
     private LocalDate drawdownDate = LocalDate.now(ZoneOffset.UTC);
     private BigDecimal peakAccountNetPnl = BigDecimal.ZERO;
     private String latchedEntryBlockReason;
@@ -41,116 +43,158 @@ public final class AccountRiskCoordinator {
         }
     }
 
-    public synchronized void unregister(String engineId) {
-        riskSuppliers.remove(engineId);
-        reconciliationSuppliers.remove(engineId);
-        pendingEntryNotional.remove(engineId);
+    public void unregister(String engineId) {
+        lock.lock();
+        try {
+            riskSuppliers.remove(engineId);
+            reconciliationSuppliers.remove(engineId);
+            pendingEntryNotional.remove(engineId);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** Seeds the shared quote budget from one authoritative account snapshot. */
-    public synchronized boolean updateQuoteBalance(JsonNode accountInfo, String quoteAsset) {
-        if (accountInfo == null || !accountInfo.path("balances").isArray()) return false;
-        for (JsonNode balance : accountInfo.path("balances")) {
-            if (quoteAsset.equalsIgnoreCase(balance.path("asset").asText())) {
-                try {
-                    freeQuoteBalance = new BigDecimal(balance.path("free").asText("0"));
-                    quoteBalancePositionCostBaseline = accountRiskSnapshot().positionCost();
-                    return true;
-                } catch (NumberFormatException ignored) {
-                    return false;
+    public boolean updateQuoteBalance(JsonNode accountInfo, String quoteAsset) {
+        lock.lock();
+        try {
+            if (accountInfo == null || !accountInfo.path("balances").isArray()) return false;
+            for (JsonNode balance : accountInfo.path("balances")) {
+                if (quoteAsset.equalsIgnoreCase(balance.path("asset").asText())) {
+                    try {
+                        freeQuoteBalance = new BigDecimal(balance.path("free").asText("0"));
+                        quoteBalancePositionCostBaseline = accountRiskSnapshot().positionCost();
+                        return true;
+                    } catch (NumberFormatException ignored) {
+                        return false;
+                    }
                 }
             }
+            return false;
+        } finally {
+            lock.unlock();
         }
-        return false;
     }
 
-    public synchronized EntryReservation reserveEntry(String engineId, BigDecimal requestedNotional,
+    public EntryReservation reserveEntry(String engineId, BigDecimal requestedNotional,
                                                        BigDecimal accountExposureLimit,
                                                        BigDecimal accountDrawdownLimit) {
-        if (engineId == null || requestedNotional == null || requestedNotional.signum() <= 0) {
-            return new EntryReservation(false, "账户风险预留参数无效");
-        }
-        AccountRiskSnapshot accountRisk = accountRiskSnapshot();
-        if (!accountRisk.complete()) {
-            return new EntryReservation(false, "无法确认账户所有币种的风险状态");
-        }
-        String riskBlock = accountEntryBlockReason(accountRisk, accountDrawdownLimit);
-        if (riskBlock != null) return new EntryReservation(false, riskBlock);
-        BigDecimal total = accountRisk.positionCost();
-        for (Map.Entry<String, BigDecimal> entry : pendingEntryNotional.entrySet()) {
-            if (!engineId.equals(entry.getKey())) total = total.add(entry.getValue());
-        }
-        BigDecimal projected = total.add(requestedNotional);
-        if (accountExposureLimit != null && accountExposureLimit.signum() > 0
-                && projected.compareTo(accountExposureLimit) > 0) {
-            return new EntryReservation(false, "账户所有币种的持仓和活动买单已达到总风险上限 "
-                    + accountExposureLimit.stripTrailingZeros().toPlainString() + " USDT");
-        }
-        if (freeQuoteBalance != null) {
-            BigDecimal spentSinceSnapshot = accountRisk.positionCost()
-                    .subtract(quoteBalancePositionCostBaseline).max(BigDecimal.ZERO);
-            BigDecimal available = freeQuoteBalance.subtract(spentSinceSnapshot);
+        lock.lock();
+        try {
+            if (engineId == null || requestedNotional == null || requestedNotional.signum() <= 0) {
+                return new EntryReservation(false, "账户风险预留参数无效");
+            }
+            AccountRiskSnapshot accountRisk = accountRiskSnapshot();
+            if (!accountRisk.complete()) {
+                return new EntryReservation(false, "无法确认账户所有币种的风险状态");
+            }
+            String riskBlock = accountEntryBlockReason(accountRisk, accountDrawdownLimit);
+            if (riskBlock != null) return new EntryReservation(false, riskBlock);
+            BigDecimal total = accountRisk.positionCost();
             for (Map.Entry<String, BigDecimal> entry : pendingEntryNotional.entrySet()) {
-                if (!engineId.equals(entry.getKey())) available = available.subtract(entry.getValue());
+                if (!engineId.equals(entry.getKey())) total = total.add(entry.getValue());
             }
-            if (requestedNotional.compareTo(available.max(BigDecimal.ZERO)) > 0) {
-                return new EntryReservation(false, "账户可用 USDT 不足，暂缓新买单");
+            BigDecimal projected = total.add(requestedNotional);
+            if (accountExposureLimit != null && accountExposureLimit.signum() > 0
+                    && projected.compareTo(accountExposureLimit) > 0) {
+                return new EntryReservation(false, "新买入后账户总风险预计超过 "
+                        + formatUsdt(accountExposureLimit) + " USDT（当前占用 "
+                        + formatUsdt(total) + " USDT + 本单 " + formatUsdt(requestedNotional)
+                        + " USDT = 预计 " + formatUsdt(projected) + " USDT）");
             }
+            if (freeQuoteBalance != null) {
+                BigDecimal spentSinceSnapshot = accountRisk.positionCost()
+                        .subtract(quoteBalancePositionCostBaseline).max(BigDecimal.ZERO);
+                BigDecimal available = freeQuoteBalance.subtract(spentSinceSnapshot);
+                for (Map.Entry<String, BigDecimal> entry : pendingEntryNotional.entrySet()) {
+                    if (!engineId.equals(entry.getKey())) available = available.subtract(entry.getValue());
+                }
+                if (requestedNotional.compareTo(available.max(BigDecimal.ZERO)) > 0) {
+                    return new EntryReservation(false, "账户可用 USDT 不足，暂缓新买单");
+                }
+            }
+            pendingEntryNotional.put(engineId, requestedNotional);
+            return new EntryReservation(true, "");
+        } finally {
+            lock.unlock();
         }
-        pendingEntryNotional.put(engineId, requestedNotional);
-        return new EntryReservation(true, "");
     }
 
-    public synchronized void releaseEntry(String engineId) {
-        if (engineId != null) pendingEntryNotional.remove(engineId);
+    public void releaseEntry(String engineId) {
+        lock.lock();
+        try {
+            if (engineId != null) pendingEntryNotional.remove(engineId);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** The exchange request remains inside this lock, so two symbols cannot submit BUY concurrently. */
-    public synchronized JsonNode submitBuy(Supplier<JsonNode> submission) {
-        return submission.get();
+    public JsonNode submitBuy(Supplier<JsonNode> submission) {
+        lock.lock();
+        try {
+            return submission.get();
+        } finally {
+            lock.unlock();
+        }
     }
 
-    public synchronized ExposureSnapshot snapshot() {
-        AccountRiskSnapshot accountRisk = accountRiskSnapshot();
-        BigDecimal positions = accountRisk.positionCost();
-        BigDecimal pending = pendingEntryNotional.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add);
-        return new ExposureSnapshot(positions, pending, positions.add(pending),
-                accountRisk.todayNetPnl(), peakAccountNetPnl, accountRisk.complete(),
-                accountRisk.complete() ? latchedEntryBlockReason : "无法确认账户所有币种的风险状态");
+    public ExposureSnapshot snapshot() {
+        lock.lock();
+        try {
+            AccountRiskSnapshot accountRisk = accountRiskSnapshot();
+            BigDecimal positions = accountRisk.positionCost();
+            BigDecimal pending = pendingEntryNotional.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add);
+            return new ExposureSnapshot(positions, pending, positions.add(pending),
+                    accountRisk.todayNetPnl(), peakAccountNetPnl, accountRisk.complete(),
+                    accountRisk.complete() ? latchedEntryBlockReason : "无法确认账户所有币种的风险状态");
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** Re-evaluated on every market tick so another symbol's working BUY is canceled promptly. */
-    public synchronized String accountEntryBlockReason(BigDecimal accountDrawdownLimit) {
-        AccountRiskSnapshot accountRisk = accountRiskSnapshot();
-        if (!accountRisk.complete()) return "无法确认账户所有币种的风险状态";
-        return accountEntryBlockReason(accountRisk, accountDrawdownLimit);
+    public String accountEntryBlockReason(BigDecimal accountDrawdownLimit) {
+        lock.lock();
+        try {
+            AccountRiskSnapshot accountRisk = accountRiskSnapshot();
+            if (!accountRisk.complete()) return "无法确认账户所有币种的风险状态";
+            return accountEntryBlockReason(accountRisk, accountDrawdownLimit);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** One account-level BNB read is shared by all symbol engines for 30 seconds. */
-    public synchronized BnbBalanceSnapshot refreshBnbBalance(boolean force,
+    public BnbBalanceSnapshot refreshBnbBalance(boolean force,
                                                               BinanceAccountTradeClient tradeClient) {
-        long now = System.currentTimeMillis();
-        long attemptAge = now - lastBnbBalanceAttemptAtMs;
-        if (lastBnbBalanceAttemptAtMs > 0
-                && ((!force && attemptAge < BNB_CACHE_MS) || (force && attemptAge < FORCED_BNB_DEDUP_MS))) {
-            return bnbBalanceSnapshot;
-        }
-        if (bnbBalanceSnapshot != null) {
-            long age = now - bnbBalanceSnapshot.checkedAtMs();
-            if ((!force && age < BNB_CACHE_MS) || (force && age < FORCED_BNB_DEDUP_MS)) {
+        lock.lock();
+        try {
+            long now = System.currentTimeMillis();
+            long attemptAge = now - lastBnbBalanceAttemptAtMs;
+            if (lastBnbBalanceAttemptAtMs > 0
+                    && ((!force && attemptAge < BNB_CACHE_MS) || (force && attemptAge < FORCED_BNB_DEDUP_MS))) {
                 return bnbBalanceSnapshot;
             }
-        }
-        lastBnbBalanceAttemptAtMs = now;
-        BinanceAccountTradeClient.AssetBalance balance = tradeClient.getAssetBalance("BNB");
-        if (balance == null || balance.total() == null) return bnbBalanceSnapshot;
-        BigDecimal price = tradeClient.getTickerPrice("BNBUSDT");
-        if (price == null || price.signum() <= 0) {
+            if (bnbBalanceSnapshot != null) {
+                long age = now - bnbBalanceSnapshot.checkedAtMs();
+                if ((!force && age < BNB_CACHE_MS) || (force && age < FORCED_BNB_DEDUP_MS)) {
+                    return bnbBalanceSnapshot;
+                }
+            }
+            lastBnbBalanceAttemptAtMs = now;
+            BinanceAccountTradeClient.AssetBalance balance = tradeClient.getAssetBalance("BNB");
+            if (balance == null || balance.total() == null) return bnbBalanceSnapshot;
+            BigDecimal price = tradeClient.getTickerPrice("BNBUSDT");
+            if (price == null || price.signum() <= 0) {
+                return bnbBalanceSnapshot;
+            }
+            bnbBalanceSnapshot = new BnbBalanceSnapshot(balance.total(), price,
+                    balance.total().multiply(price), now);
             return bnbBalanceSnapshot;
+        } finally {
+            lock.unlock();
         }
-        bnbBalanceSnapshot = new BnbBalanceSnapshot(balance.total(), price,
-                balance.total().multiply(price), now);
-        return bnbBalanceSnapshot;
     }
 
     private AccountRiskSnapshot accountRiskSnapshot() {
@@ -198,6 +242,10 @@ public final class AccountRiskCoordinator {
             latchedEntryBlockReason = "账户所有币种合计已达到今日最大回撤限制";
         }
         return latchedEntryBlockReason;
+    }
+
+    private static String formatUsdt(BigDecimal value) {
+        return value.stripTrailingZeros().toPlainString();
     }
 
     private record AccountRiskSnapshot(BigDecimal positionCost, BigDecimal todayNetPnl, boolean complete) { }
