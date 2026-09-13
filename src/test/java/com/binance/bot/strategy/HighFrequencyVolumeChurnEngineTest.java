@@ -2062,7 +2062,7 @@ class HighFrequencyVolumeChurnEngineTest {
 
         verify(tradeA).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString());
         verify(tradeB, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(), isNull(), anyString());
-        assertTrue(engineB.getStatusReason().get().contains("同交易对已有 1/1 个账户交易中"));
+        assertTrue(engineB.getStatusReason().get().contains("买入通道已有 1/1 个账户买入中"));
 
         ReflectionTestUtils.invokeMethod(engineA, "completeFlatExit", false);
         ((java.util.concurrent.atomic.AtomicLong) ReflectionTestUtils.getField(engineB, "nextOrderAttemptAt"))

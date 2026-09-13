@@ -244,16 +244,24 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private SymbolTradeCoordinator.EntryPermit acquireSymbolTradeSlot(String symbol) {
         String normalizedSymbol = normalizeStrategySymbol(symbol);
         String heldSymbol = symbolTradeSlotSymbol.get();
-        if (symbolTradeSlotHeld.get() && normalizedSymbol.equals(heldSymbol)) {
-            return new SymbolTradeCoordinator.EntryPermit(true, "");
-        }
-        if (symbolTradeSlotHeld.get()) releaseSymbolTradeSlot();
+        if (symbolTradeSlotHeld.get() && !normalizedSymbol.equals(heldSymbol)) releaseSymbolTradeSlot();
         SymbolTradeCoordinator.EntryPermit permit = symbolTradeCoordinator.acquire(
                 normalizedSymbol, accountEngineKey, accountAlias);
         if (permit.accepted()) {
             symbolTradeSlotSymbol.set(normalizedSymbol);
             symbolTradeSlotHeld.set(true);
         }
+        return permit;
+    }
+
+    private SymbolTradeCoordinator.EntryPermit acquireSymbolSellSlot(String symbol) {
+        String normalizedSymbol = normalizeStrategySymbol(symbol);
+        String heldSymbol = symbolTradeSlotSymbol.get();
+        if (symbolTradeSlotHeld.get() && !normalizedSymbol.equals(heldSymbol)) releaseSymbolTradeSlot();
+        SymbolTradeCoordinator.EntryPermit permit = symbolTradeCoordinator.acquireSell(
+                normalizedSymbol, accountEngineKey, accountAlias);
+        symbolTradeSlotSymbol.set(normalizedSymbol);
+        symbolTradeSlotHeld.set(true);
         return permit;
     }
 
@@ -275,11 +283,28 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
     }
 
-    private void claimExistingSymbolTradeSlot(String symbol) {
+    private void markSymbolTradeSlotHolding() {
+        if (!symbolTradeSlotHeld.get() || activeOrderId.get() != null
+                || currentStatus.get() == ChurnStatus.BUYING) return;
+        String symbol = symbolTradeSlotSymbol.get();
+        if (symbol == null || symbol.isBlank()) symbol = properties.getStrategy().getSymbol();
+        symbolTradeCoordinator.markHolding(symbol, accountEngineKey, accountAlias);
+    }
+
+    private void claimExistingSellSymbolTradeSlot(String symbol) {
         String normalizedSymbol = normalizeStrategySymbol(symbol);
         if (symbolTradeSlotHeld.get() && normalizedSymbol.equals(symbolTradeSlotSymbol.get())) return;
         if (symbolTradeSlotHeld.get()) releaseSymbolTradeSlot();
-        symbolTradeCoordinator.claimExisting(normalizedSymbol, accountEngineKey, accountAlias);
+        symbolTradeCoordinator.claimExistingSell(normalizedSymbol, accountEngineKey, accountAlias);
+        symbolTradeSlotSymbol.set(normalizedSymbol);
+        symbolTradeSlotHeld.set(true);
+    }
+
+    private void claimHoldingSymbolTradeSlot(String symbol) {
+        String normalizedSymbol = normalizeStrategySymbol(symbol);
+        if (symbolTradeSlotHeld.get() && normalizedSymbol.equals(symbolTradeSlotSymbol.get())) return;
+        if (symbolTradeSlotHeld.get()) releaseSymbolTradeSlot();
+        symbolTradeCoordinator.claimHolding(normalizedSymbol, accountEngineKey, accountAlias);
         symbolTradeSlotSymbol.set(normalizedSymbol);
         symbolTradeSlotHeld.set(true);
     }
@@ -515,7 +540,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         if (!openOrders.isEmpty()) {
             if (restoreActiveSellOrder(openOrders, runtimeState)) {
-                claimExistingSymbolTradeSlot(properties.getStrategy().getSymbol());
+                claimExistingSellSymbolTradeSlot(properties.getStrategy().getSymbol());
                 return true;
             }
             halt("发现未由本进程恢复的活动订单，需先人工对账");
@@ -571,14 +596,17 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         isRunning.set(true);
         currentStatus.set(ChurnStatus.SELLING);
         statusReason.set("启动时按交易所历史成交恢复持仓，重新挂卖单");
-        claimExistingSymbolTradeSlot(properties.getStrategy().getSymbol());
+        claimHoldingSymbolTradeSlot(properties.getStrategy().getSymbol());
         submitImmediateExit(rule);
-        boolean accepted = activeOrderId.get() != null && currentStatus.get() == ChurnStatus.SELLING;
-        if (accepted) {
+        boolean managed = symbolTradeSlotHeld.get() && currentStatus.get() == ChurnStatus.SELLING;
+        if (activeOrderId.get() != null) {
             log.warn("[accountId={} alias={}] 启动按交易所历史成交恢复无活动订单持仓: qty={} cost={}，已重新挂 SELL",
                     accountId, accountAlias, recoveredRisk.positionQty(), recoveredRisk.positionCostUsdt());
+        } else if (managed) {
+            log.warn("[accountId={} alias={}] 启动按交易所历史成交恢复无活动订单持仓: qty={} cost={}，正在等待 SELL 通道",
+                    accountId, accountAlias, recoveredRisk.positionQty(), recoveredRisk.positionCostUsdt());
         }
-        return accepted;
+        return managed;
     }
 
     private DailyTradeStatsStore.RuntimeState loadRuntimeState() {
@@ -1422,6 +1450,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             updateDustState(sellability, "已成交持仓不足以创建有效卖单，等待后续 BUY 合并");
             return;
         }
+        SymbolTradeCoordinator.EntryPermit sellPermit = acquireSymbolSellSlot(
+                properties.getStrategy().getSymbol());
+        if (!sellPermit.accepted()) {
+            statusReason.set(sellPermit.reason());
+            return;
+        }
         BigDecimal quantity = sellability.normalizedQty();
         if (usesFeeAwareMakerStrategy()) {
             reserveActiveSellQuantity(quantity);
@@ -1656,6 +1690,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             statusReason.set("运行中，等待入场信号");
             return;
         }
+        markSymbolTradeSlotHolding();
         String signature = sellability.dustReason() + "|" + sellability.rawAvailableQty().toPlainString()
                 + "|" + sellability.notional().toPlainString();
         if (!signature.equals(lastDustStateSignature.getAndSet(signature))) {
@@ -2378,7 +2413,14 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return new LiquidationResult(false, null, BigDecimal.ZERO, message);
         }
     }
-    private void halt(String reason) { isRunning.set(false); currentStatus.set(ChurnStatus.HALTED); statusReason.set(reason); releaseSymbolTradeSlotIfFlat(); log.error("[accountId={} alias={}] 引擎进入保护停机: {}", accountId, accountAlias, reason); }
+    private void halt(String reason) {
+        isRunning.set(false);
+        currentStatus.set(ChurnStatus.HALTED);
+        statusReason.set(reason);
+        markSymbolTradeSlotHolding();
+        releaseSymbolTradeSlotIfFlat();
+        log.error("[accountId={} alias={}] 引擎进入保护停机: {}", accountId, accountAlias, reason);
+    }
     private BigDecimal applyJitter(BigDecimal qty) { double j = properties.getStrategy().getRandomSizeJitter(); return j <= 0 ? qty : qty.multiply(BigDecimal.valueOf(1 + ThreadLocalRandom.current().nextDouble(-j, j))); }
     private boolean calibrateHoldings() {
         BinanceAccountTradeClient.AssetBalance balance = tradeService.getAssetBalance(baseAsset());
@@ -2635,6 +2677,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         statusReason.set(dailyVolumeLimitMessage(holdingInventory.get().signum() > 0
                 ? "仅剩不可交易粉尘，已自动停止当前币种策略"
                 : "已自动停止当前币种策略"));
+        markSymbolTradeSlotHolding();
         releaseSymbolTradeSlotIfFlat();
         persistRuntimeState(false);
         log.warn("[accountId={} alias={}] {}", accountId, accountAlias, statusReason.get());
@@ -2693,6 +2736,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         statusReason.set(bnbBalanceMessage(bnb, holdingInventory.get().signum() > 0
                 ? "仅剩不可交易粉尘，已自动停止当前币种策略"
                 : "已自动停止当前币种策略"));
+        markSymbolTradeSlotHolding();
         releaseSymbolTradeSlotIfFlat();
         persistRuntimeState(false);
         log.warn("[accountId={} alias={}] {}", accountId, accountAlias, statusReason.get());
