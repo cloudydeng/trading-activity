@@ -9,6 +9,7 @@ import com.binance.bot.notification.TradeNotificationService;
 import com.binance.bot.service.BinanceAccountTradeClient;
 import com.binance.bot.strategy.DailyTradeStatsStore;
 import com.binance.bot.strategy.HighFrequencyVolumeChurnEngine;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -16,13 +17,12 @@ import org.springframework.http.ResponseEntity;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class BotDashboardControllerTest {
@@ -99,23 +99,32 @@ class BotDashboardControllerTest {
     }
 
     @Test
-    void accountDetailsDoNotQueryExchangeWhileStrategyIsStopped() {
+    void accountDetailsQueryExchangeWhileStrategyIsStopped() throws Exception {
         TradingAccountManager accountManager = mock(TradingAccountManager.class);
         TradeNotificationService notificationService = mock(TradeNotificationService.class);
         AccountTradingRuntime runtime = mock(AccountTradingRuntime.class);
         HighFrequencyVolumeChurnEngine engine = mock(HighFrequencyVolumeChurnEngine.class);
         BinanceAccountTradeClient tradeClient = mock(BinanceAccountTradeClient.class);
+        ObjectMapper mapper = new ObjectMapper();
         when(accountManager.find("account-a")).thenReturn(Optional.of(runtime));
         when(runtime.engine()).thenReturn(engine);
         when(runtime.tradeClient()).thenReturn(tradeClient);
-        when(engine.getIsRunning()).thenReturn(new AtomicBoolean(false));
+        when(runtime.accountId()).thenReturn("account-a");
+        when(runtime.alias()).thenReturn("A");
+        when(engine.getSymbol()).thenReturn("HOLOUSDT");
+        when(tradeClient.getAccountInfo()).thenReturn(mapper.readTree(
+                "{\"accountType\":\"SPOT\",\"canTrade\":true,\"balances\":[]}"));
+        when(tradeClient.getAllOrders("HOLOUSDT", 100)).thenReturn(mapper.readTree("[]"));
+        when(tradeClient.getOpenOrders("HOLOUSDT")).thenReturn(mapper.readTree("[]"));
         BotDashboardController controller = new BotDashboardController(
                 accountManager, new BinanceProperties(), notificationService);
 
         ResponseEntity<?> response = controller.account("account-a");
 
-        assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
-        verifyNoInteractions(tradeClient);
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        verify(tradeClient).getAccountInfo();
+        verify(tradeClient).getAllOrders("HOLOUSDT", 100);
+        verify(tradeClient).getOpenOrders("HOLOUSDT");
     }
 
     @Test

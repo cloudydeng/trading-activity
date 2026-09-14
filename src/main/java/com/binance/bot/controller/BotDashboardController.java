@@ -473,10 +473,6 @@ public class BotDashboardController {
     }
 
     private ResponseEntity<?> accountSnapshot(AccountTradingRuntime runtime, HighFrequencyVolumeChurnEngine engine) {
-        if (!engine.getIsRunning().get()) {
-            return ResponseEntity.status(409).body(Map.of(
-                    "message", "策略未运行，未向交易所查询账户详情；启动策略后将自动刷新"));
-        }
         BinanceAccountTradeClient tradeService = runtime.tradeClient();
         JsonNode account = tradeService.getAccountInfo();
         JsonNode allOrders = tradeService.getAllOrders(engine.getSymbol(), 100);
