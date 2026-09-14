@@ -56,6 +56,13 @@ public final class SymbolTradeCoordinator {
             if (current != null && current.phase() == Phase.SELLING) {
                 return new EntryPermit(false, normalizedSymbol + " 当前持仓正在卖出，不能再次买入");
             }
+            if (current != null && current.phase() == Phase.HOLDING) {
+                waiters.remove(normalizedEngineId);
+                holders.put(normalizedEngineId, new Holder(current.engineId(), current.accountAlias(),
+                        Phase.BUYING, current.acquiredAtMs(), System.currentTimeMillis()));
+                cleanupEmptyState(normalizedSymbol, holders, waiters);
+                return new EntryPermit(true, "");
+            }
 
             waiters.putIfAbsent(normalizedEngineId, new Waiter(normalizedEngineId,
                     displayAlias(normalizedEngineId, accountAlias), System.currentTimeMillis()));

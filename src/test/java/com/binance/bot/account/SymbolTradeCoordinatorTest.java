@@ -2,6 +2,8 @@ package com.binance.bot.account;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -111,6 +113,26 @@ class SymbolTradeCoordinatorTest {
         assertTrue(coordinator.acquire("THEUSDT", "a", "A").accepted());
         assertEquals(1, coordinator.snapshot("THEUSDT").holders().size());
         assertEquals(SymbolTradeCoordinator.Phase.BUYING, holder(coordinator, "a").phase());
+    }
+
+    @Test
+    void heldDustReentersAheadOfWaitersBecauseItAlreadyOwnsTheCycleSlot() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        coordinator.configureMaxConcurrentEntriesPerSymbol(1);
+        assertTrue(coordinator.acquire("HOLOUSDT", "dust-holder", "Dust Holder").accepted());
+        coordinator.markHolding("HOLOUSDT", "dust-holder", "Dust Holder");
+        assertFalse(coordinator.acquire("HOLOUSDT", "waiting", "Waiting").accepted());
+
+        SymbolTradeCoordinator.EntryPermit resumed = coordinator.acquire(
+                "HOLOUSDT", "dust-holder", "Dust Holder");
+
+        assertTrue(resumed.accepted());
+        SymbolTradeCoordinator.Snapshot snapshot = coordinator.snapshot("HOLOUSDT");
+        assertEquals(1, snapshot.holders().size());
+        assertEquals(SymbolTradeCoordinator.Phase.BUYING, snapshot.holders().getFirst().phase());
+        assertEquals(List.of("waiting"), snapshot.waiters().stream()
+                .map(SymbolTradeCoordinator.Waiter::engineId)
+                .toList());
     }
 
     @Test
