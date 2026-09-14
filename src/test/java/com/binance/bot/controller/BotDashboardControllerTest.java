@@ -16,6 +16,7 @@ import org.springframework.http.ResponseEntity;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -41,6 +42,29 @@ class BotDashboardControllerTest {
         assertEquals(HttpStatus.OK, response.getStatusCode());
         assertEquals(2, coordinator.maxConcurrentEntriesPerSymbol());
         verify(store).saveTradingRuntimeSettings(new DailyTradeStatsStore.TradingRuntimeSettings(2));
+    }
+
+    @Test
+    void symbolTradingSettingPreservesDefaultAndOtherOverrides() {
+        TradingAccountManager accountManager = mock(TradingAccountManager.class);
+        TradeNotificationService notificationService = mock(TradeNotificationService.class);
+        DailyTradeStatsStore store = mock(DailyTradeStatsStore.class);
+        when(store.loadTradingRuntimeSettings()).thenReturn(Optional.of(
+                new DailyTradeStatsStore.TradingRuntimeSettings(
+                        3, Map.of("THEUSDT", 2))));
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        BotDashboardController controller = new BotDashboardController(
+                accountManager, new BinanceProperties(), notificationService, store, coordinator);
+
+        ResponseEntity<?> response = controller.updateTradingSettings(
+                new BotDashboardController.TradingSettingsRequest(0, " rezusdt "));
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        assertEquals(3, coordinator.maxConcurrentEntriesPerSymbol());
+        assertEquals(0, coordinator.maxConcurrentEntriesPerSymbol("REZUSDT"));
+        assertEquals(2, coordinator.maxConcurrentEntriesPerSymbol("THEUSDT"));
+        verify(store).saveTradingRuntimeSettings(new DailyTradeStatsStore.TradingRuntimeSettings(
+                3, Map.of("REZUSDT", 0, "THEUSDT", 2)));
     }
 
     @Test

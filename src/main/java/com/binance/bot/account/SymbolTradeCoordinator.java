@@ -23,30 +23,74 @@ public final class SymbolTradeCoordinator {
     private final ReentrantLock lock = new ReentrantLock(true);
     private final Map<String, LinkedHashMap<String, Holder>> holdersBySymbol = new LinkedHashMap<>();
     private final Map<String, LinkedHashMap<String, Waiter>> waitersBySymbol = new LinkedHashMap<>();
+    private final Map<String, Integer> maxConcurrentEntriesBySymbol = new LinkedHashMap<>();
     private final AtomicInteger maxConcurrentEntriesPerSymbol = new AtomicInteger(1);
 
     public void configureMaxConcurrentEntriesPerSymbol(int value) {
-        maxConcurrentEntriesPerSymbol.set(Math.max(1, Math.min(20, value)));
+        int normalized = Math.max(0, Math.min(20, value));
+        lock.lock();
+        try {
+            maxConcurrentEntriesPerSymbol.set(normalized);
+        } finally {
+            lock.unlock();
+        }
     }
 
     public int maxConcurrentEntriesPerSymbol() {
         return maxConcurrentEntriesPerSymbol.get();
     }
 
+    public void configureMaxConcurrentEntriesBySymbol(Map<String, Integer> values) {
+        lock.lock();
+        try {
+            maxConcurrentEntriesBySymbol.clear();
+            if (values != null) {
+                values.forEach((symbol, value) -> {
+                    String normalizedSymbol = normalizeSymbol(symbol);
+                    if (!normalizedSymbol.isBlank() && value != null) {
+                        maxConcurrentEntriesBySymbol.put(normalizedSymbol,
+                                Math.max(0, Math.min(20, value)));
+                    }
+                });
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public int maxConcurrentEntriesPerSymbol(String symbol) {
+        String normalizedSymbol = normalizeSymbol(symbol);
+        lock.lock();
+        try {
+            return maxConcurrentEntriesBySymbol.getOrDefault(
+                    normalizedSymbol, maxConcurrentEntriesPerSymbol.get());
+        } finally {
+            lock.unlock();
+        }
+    }
+
     /** Requests one of the symbol's complete-cycle slots while preserving FIFO order. */
     public EntryPermit acquire(String symbol, String engineId, String accountAlias) {
         String normalizedSymbol = normalizeSymbol(symbol);
         String normalizedEngineId = normalizeEngineId(engineId);
-        int limit = maxConcurrentEntriesPerSymbol.get();
         if (normalizedSymbol.isBlank() || normalizedEngineId.isBlank()) {
             return new EntryPermit(false, "同交易对交易协调参数无效");
         }
         lock.lock();
         try {
+            int limit = maxConcurrentEntriesBySymbol.getOrDefault(
+                    normalizedSymbol, maxConcurrentEntriesPerSymbol.get());
             LinkedHashMap<String, Holder> holders = holdersBySymbol.computeIfAbsent(
                     normalizedSymbol, ignored -> new LinkedHashMap<>());
             LinkedHashMap<String, Waiter> waiters = waitersBySymbol.computeIfAbsent(
                     normalizedSymbol, ignored -> new LinkedHashMap<>());
+            if (limit == 0) {
+                waiters.putIfAbsent(normalizedEngineId, new Waiter(normalizedEngineId,
+                        displayAlias(normalizedEngineId, accountAlias), System.currentTimeMillis()));
+                return new EntryPermit(false, normalizedSymbol
+                        + " 并发设置为 0，暂停新买入；FIFO 排队第 "
+                        + queuePosition(waiters, normalizedEngineId) + " 位");
+            }
             Holder current = holders.get(normalizedEngineId);
             if (current != null && current.phase() == Phase.BUYING) {
                 waiters.remove(normalizedEngineId);

@@ -46,15 +46,21 @@ class DailyTradeStatsStoreTest {
     void persistsTradingRuntimeSettingsAcrossRestart() {
         BinanceProperties properties = properties();
         DailyTradeStatsStore first = new DailyTradeStatsStore(properties);
-        first.saveTradingRuntimeSettings(new DailyTradeStatsStore.TradingRuntimeSettings(3));
+        first.saveTradingRuntimeSettings(new DailyTradeStatsStore.TradingRuntimeSettings(
+                3, Map.of(" rezusdt ", 0, "THEUSDT", 2)));
         first.close();
 
         DailyTradeStatsStore restarted = new DailyTradeStatsStore(properties());
 
-        assertEquals(3, restarted.loadTradingRuntimeSettings().orElseThrow()
-                .maxConcurrentEntriesPerSymbol());
+        DailyTradeStatsStore.TradingRuntimeSettings settings =
+                restarted.loadTradingRuntimeSettings().orElseThrow();
+        assertEquals(3, settings.maxConcurrentEntriesPerSymbol());
+        assertEquals(Map.of("REZUSDT", 0, "THEUSDT", 2),
+                settings.maxConcurrentEntriesBySymbol());
         assertThrows(IllegalArgumentException.class, () -> restarted.saveTradingRuntimeSettings(
-                new DailyTradeStatsStore.TradingRuntimeSettings(0)));
+                new DailyTradeStatsStore.TradingRuntimeSettings(-1)));
+        assertThrows(IllegalArgumentException.class, () -> restarted.saveTradingRuntimeSettings(
+                new DailyTradeStatsStore.TradingRuntimeSettings(21)));
         restarted.close();
     }
 

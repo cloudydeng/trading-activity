@@ -3,6 +3,7 @@ package com.binance.bot.account;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -82,6 +83,39 @@ class SymbolTradeCoordinatorTest {
         assertTrue(coordinator.acquire("BNBUSDT", "bnb-b", "B").accepted());
         assertEquals(1, coordinator.snapshot("THEUSDT").holders().size());
         assertEquals(1, coordinator.snapshot("BNBUSDT").holders().size());
+    }
+
+    @Test
+    void perSymbolLimitsOverrideTheGlobalDefaultAndZeroPausesOnlyThatSymbol() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        coordinator.configureMaxConcurrentEntriesPerSymbol(1);
+        coordinator.configureMaxConcurrentEntriesBySymbol(Map.of("REZUSDT", 0, "THEUSDT", 2));
+
+        SymbolTradeCoordinator.EntryPermit rez = coordinator.acquire("rezusdt", "rez-a", "REZ A");
+        assertFalse(rez.accepted());
+        assertTrue(rez.reason().contains("并发设置为 0，暂停新买入"));
+        assertTrue(coordinator.acquire("THEUSDT", "the-a", "THE A").accepted());
+        assertTrue(coordinator.acquire("THEUSDT", "the-b", "THE B").accepted());
+        assertFalse(coordinator.acquire("THEUSDT", "the-c", "THE C").accepted());
+        assertTrue(coordinator.acquire("HOLOUSDT", "holo-a", "HOLO A").accepted());
+        assertFalse(coordinator.acquire("HOLOUSDT", "holo-b", "HOLO B").accepted());
+        assertEquals(0, coordinator.maxConcurrentEntriesPerSymbol("REZUSDT"));
+        assertEquals(2, coordinator.maxConcurrentEntriesPerSymbol("THEUSDT"));
+        assertEquals(1, coordinator.maxConcurrentEntriesPerSymbol("HOLOUSDT"));
+    }
+
+    @Test
+    void settingSymbolToZeroDoesNotPreventAnExistingCycleFromTransitioningToSell() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        coordinator.configureMaxConcurrentEntriesPerSymbol(1);
+        assertTrue(coordinator.acquire("REZUSDT", "a", "A").accepted());
+
+        coordinator.configureMaxConcurrentEntriesBySymbol(Map.of("REZUSDT", 0));
+
+        assertTrue(coordinator.transitionToSell("REZUSDT", "a", "A").accepted());
+        assertEquals(SymbolTradeCoordinator.Phase.SELLING,
+                coordinator.snapshot("REZUSDT").holders().getFirst().phase());
+        assertFalse(coordinator.acquire("REZUSDT", "b", "B").accepted());
     }
 
     @Test

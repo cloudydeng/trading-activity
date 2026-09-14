@@ -54,16 +54,15 @@ public class BotDashboardController {
 
     @GetMapping("/api/settings/trading")
     public TradingSettingsView tradingSettings() {
-        int value = dailyStatsStore == null ? properties.getStrategy().getMaxConcurrentEntriesPerSymbol()
-                : dailyStatsStore.loadTradingRuntimeSettings()
-                .map(DailyTradeStatsStore.TradingRuntimeSettings::maxConcurrentEntriesPerSymbol)
-                .orElse(properties.getStrategy().getMaxConcurrentEntriesPerSymbol());
-        value = Math.max(1, value);
+        DailyTradeStatsStore.TradingRuntimeSettings settings = loadTradingRuntimeSettings();
+        int value = Math.max(0, Math.min(20, settings.maxConcurrentEntriesPerSymbol()));
+        Map<String, Integer> bySymbol = normalizedTradingLimits(settings.maxConcurrentEntriesBySymbol());
         if (symbolTradeCoordinator != null) {
             symbolTradeCoordinator.configureMaxConcurrentEntriesPerSymbol(value);
+            symbolTradeCoordinator.configureMaxConcurrentEntriesBySymbol(bySymbol);
             value = symbolTradeCoordinator.maxConcurrentEntriesPerSymbol();
         }
-        return new TradingSettingsView(value);
+        return new TradingSettingsView(value, bySymbol);
     }
 
     @PutMapping("/api/settings/trading")
@@ -72,17 +71,59 @@ public class BotDashboardController {
             return ResponseEntity.badRequest().body(Map.of("accepted", false, "message", "交易运行设置不能为空"));
         }
         int value = request.maxConcurrentEntriesPerSymbol();
-        if (value < 1 || value > 20) {
+        if (value < 0 || value > 20) {
             return ResponseEntity.badRequest().body(Map.of("accepted", false,
-                    "message", "同交易对并发名额必须在 1 到 20 之间"));
+                    "message", "同交易对并发名额必须在 0 到 20 之间（0 表示暂停新买入）"));
+        }
+        DailyTradeStatsStore.TradingRuntimeSettings current = loadTradingRuntimeSettings();
+        int defaultValue = Math.max(0, Math.min(20, current.maxConcurrentEntriesPerSymbol()));
+        Map<String, Integer> bySymbol = new TreeMap<>(normalizedTradingLimits(
+                current.maxConcurrentEntriesBySymbol()));
+        String symbol = request.symbol() == null ? "" : request.symbol().trim().toUpperCase(Locale.ROOT);
+        if (!symbol.isBlank()) {
+            if (!symbol.matches("[A-Z0-9]{5,20}") || !symbol.endsWith("USDT")) {
+                return ResponseEntity.badRequest().body(Map.of("accepted", false,
+                        "message", "请输入有效的 USDT 交易对，例如 BTCUSDT"));
+            }
+            bySymbol.put(symbol, value);
+        } else {
+            defaultValue = value;
         }
         DailyTradeStatsStore.TradingRuntimeSettings settings =
-                new DailyTradeStatsStore.TradingRuntimeSettings(value);
+                new DailyTradeStatsStore.TradingRuntimeSettings(defaultValue, Map.copyOf(bySymbol));
         if (dailyStatsStore != null) dailyStatsStore.saveTradingRuntimeSettings(settings);
-        properties.getStrategy().setMaxConcurrentEntriesPerSymbol(value);
-        if (symbolTradeCoordinator != null) symbolTradeCoordinator.configureMaxConcurrentEntriesPerSymbol(value);
-        return ResponseEntity.ok(new TradingSettingsUpdateResult(true, "交易运行设置已保存并立即生效",
-                new TradingSettingsView(value)));
+        properties.getStrategy().setMaxConcurrentEntriesPerSymbol(defaultValue);
+        if (symbolTradeCoordinator != null) {
+            symbolTradeCoordinator.configureMaxConcurrentEntriesPerSymbol(defaultValue);
+            symbolTradeCoordinator.configureMaxConcurrentEntriesBySymbol(bySymbol);
+        }
+        String target = symbol.isBlank() ? "全局默认" : symbol;
+        return ResponseEntity.ok(new TradingSettingsUpdateResult(true,
+                target + " 的交易运行设置已保存并立即生效",
+                new TradingSettingsView(defaultValue, Map.copyOf(bySymbol))));
+    }
+
+    private DailyTradeStatsStore.TradingRuntimeSettings loadTradingRuntimeSettings() {
+        DailyTradeStatsStore.TradingRuntimeSettings fallback =
+                new DailyTradeStatsStore.TradingRuntimeSettings(
+                        properties.getStrategy().getMaxConcurrentEntriesPerSymbol());
+        if (dailyStatsStore == null) return fallback;
+        Optional<DailyTradeStatsStore.TradingRuntimeSettings> persisted =
+                dailyStatsStore.loadTradingRuntimeSettings();
+        return persisted == null ? fallback : persisted.orElse(fallback);
+    }
+
+    private Map<String, Integer> normalizedTradingLimits(Map<String, Integer> values) {
+        Map<String, Integer> normalized = new TreeMap<>();
+        if (values != null) {
+            values.forEach((symbol, value) -> {
+                if (symbol != null && value != null) {
+                    normalized.put(symbol.trim().toUpperCase(Locale.ROOT),
+                            Math.max(0, Math.min(20, value)));
+                }
+            });
+        }
+        return Collections.unmodifiableMap(normalized);
     }
 
     @GetMapping("/api/accounts/open-orders")
@@ -566,8 +607,13 @@ public class BotDashboardController {
     public record LiquidationRequest(String password, String confirmation) { }
     public record SymbolSwitchRequest(String symbol) { }
     public record SymbolsConfigurationRequest(List<String> symbols) { }
-    public record TradingSettingsRequest(Integer maxConcurrentEntriesPerSymbol) { }
-    public record TradingSettingsView(int maxConcurrentEntriesPerSymbol) { }
+    public record TradingSettingsRequest(Integer maxConcurrentEntriesPerSymbol, String symbol) {
+        public TradingSettingsRequest(Integer maxConcurrentEntriesPerSymbol) {
+            this(maxConcurrentEntriesPerSymbol, null);
+        }
+    }
+    public record TradingSettingsView(int maxConcurrentEntriesPerSymbol,
+                                      Map<String, Integer> maxConcurrentEntriesBySymbol) { }
     public record TradingSettingsUpdateResult(boolean accepted, String message, TradingSettingsView settings) { }
     public record StrategySwitchRequest(String symbol, String mode, BigDecimal orderAmountUsdt,
                                         Long entryTimeoutMs, Long exitTimeoutMs, BigDecimal makerFeeBps,

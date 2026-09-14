@@ -60,7 +60,7 @@ BOT_ACCOUNT_PROFILES_JSON='{
 `orderAmountsUsdt` 可为每个账户按交易对设置单笔 USDT 名义金额；未配置的交易对回退到全局
 `binance.strategy.order-amount-usdt`。该值是随机区间的基准；实际 BUY 取 `[基准-8, 基准+2]` 内的整数，且不会超过 `max-live-order-notional-usdt`，控制台显示的是当前基准值。
 
-生产环境可在受保护配置文件中用 `BINANCE_STRATEGY_MAX_DAILY_DRAWDOWN_USDT` 覆盖日内最大回撤；未配置时默认 `8 USDT`，修改后需重启服务。同交易对跨 API key 的交易轮次并发名额默认 `1`，env 可用 `BINANCE_STRATEGY_MAX_CONCURRENT_ENTRIES_PER_SYMBOL` 提供初始值；控制台保存到 SQLite 后优先于 env 并立即生效。
+生产环境可在受保护配置文件中用 `BINANCE_STRATEGY_MAX_DAILY_DRAWDOWN_USDT` 覆盖日内最大回撤；未配置时默认 `8 USDT`，修改后需重启服务。同交易对跨 API key 的交易轮次并发名额支持“全局默认值 + 按交易对覆盖”，均可设置 `0～20`；例如 `REZUSDT=0`、`THEUSDT=2`，没有单独设置的交易对使用全局默认值。`0` 表示暂停对应交易对新的 BUY 轮次，已有订单和持仓仍继续安全管理，恢复为 `1～20` 后按原 FIFO 继续。env 可用 `BINANCE_STRATEGY_MAX_CONCURRENT_ENTRIES_PER_SYMBOL` 提供全局初始值，控制台保存到 SQLite 后优先于 env 并立即生效。
 
 `symbolStrategies` 可为每个账户的每个交易对选择三种策略：
 `BID_ASK_MAKER` 按 `bidAskEntryBookLevel` 选择买一至买五挂买单（默认买一），初始卖价取卖一和“买入均价 + `bidAskInitialSellMarkupTicks` 个 tick”的较高值，加价默认 `1 tick`；

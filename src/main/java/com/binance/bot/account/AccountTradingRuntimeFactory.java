@@ -125,13 +125,15 @@ public class AccountTradingRuntimeFactory {
     private void applyTradingRuntimeSettings() {
         java.util.Optional<DailyTradeStatsStore.TradingRuntimeSettings> persisted =
                 dailyStatsStore.loadTradingRuntimeSettings();
-        int maxConcurrent = (persisted == null ? java.util.Optional.<DailyTradeStatsStore.TradingRuntimeSettings>empty()
-                : persisted)
-                .map(DailyTradeStatsStore.TradingRuntimeSettings::maxConcurrentEntriesPerSymbol)
-                .orElse(applicationProperties.getStrategy().getMaxConcurrentEntriesPerSymbol());
-        maxConcurrent = Math.max(1, maxConcurrent);
+        DailyTradeStatsStore.TradingRuntimeSettings settings = (persisted == null
+                ? java.util.Optional.<DailyTradeStatsStore.TradingRuntimeSettings>empty() : persisted)
+                .orElseGet(() -> new DailyTradeStatsStore.TradingRuntimeSettings(
+                        applicationProperties.getStrategy().getMaxConcurrentEntriesPerSymbol()));
+        int maxConcurrent = settings.maxConcurrentEntriesPerSymbol();
+        maxConcurrent = Math.max(0, Math.min(20, maxConcurrent));
         applicationProperties.getStrategy().setMaxConcurrentEntriesPerSymbol(maxConcurrent);
         symbolTradeCoordinator.configureMaxConcurrentEntriesPerSymbol(maxConcurrent);
+        symbolTradeCoordinator.configureMaxConcurrentEntriesBySymbol(settings.maxConcurrentEntriesBySymbol());
     }
 
     private AccountSymbolRuntime createSymbolRuntime(AccountCredentials credentials,

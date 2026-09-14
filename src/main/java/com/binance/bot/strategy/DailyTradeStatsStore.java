@@ -988,10 +988,21 @@ public class DailyTradeStatsStore {
     private TradingRuntimeSettings normalizeTradingRuntimeSettings(TradingRuntimeSettings settings) {
         if (settings == null) throw new IllegalArgumentException("交易运行设置不能为空");
         int maxConcurrent = settings.maxConcurrentEntriesPerSymbol();
-        if (maxConcurrent < 1 || maxConcurrent > 20) {
-            throw new IllegalArgumentException("同交易对并发名额必须在 1 到 20 之间");
+        if (maxConcurrent < 0 || maxConcurrent > 20) {
+            throw new IllegalArgumentException("同交易对并发名额必须在 0 到 20 之间（0 表示暂停新买入）");
         }
-        return new TradingRuntimeSettings(maxConcurrent);
+        Map<String, Integer> bySymbol = new java.util.TreeMap<>();
+        if (settings.maxConcurrentEntriesBySymbol() != null) {
+            settings.maxConcurrentEntriesBySymbol().forEach((symbol, value) -> {
+                String normalizedSymbol = normalizeSymbol(symbol);
+                if (value == null || value < 0 || value > 20) {
+                    throw new IllegalArgumentException(normalizedSymbol
+                            + " 的并发名额必须在 0 到 20 之间（0 表示暂停新买入）");
+                }
+                bySymbol.put(normalizedSymbol, value);
+            });
+        }
+        return new TradingRuntimeSettings(maxConcurrent, Map.copyOf(bySymbol));
     }
 
     private void saveSetting(String key, String value, String errorMessage) {
@@ -1204,7 +1215,12 @@ public class DailyTradeStatsStore {
                     feeAwareInitialEntryAnchorPrice, feeAwareRecentBuyPrices, null);
         }
     }
-    public record TradingRuntimeSettings(int maxConcurrentEntriesPerSymbol) { }
+    public record TradingRuntimeSettings(int maxConcurrentEntriesPerSymbol,
+                                         Map<String, Integer> maxConcurrentEntriesBySymbol) {
+        public TradingRuntimeSettings(int maxConcurrentEntriesPerSymbol) {
+            this(maxConcurrentEntriesPerSymbol, Map.of());
+        }
+    }
 
     private static final class MutableSymbolSummary {
         private final String accountId;
