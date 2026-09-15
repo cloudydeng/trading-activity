@@ -180,6 +180,22 @@ public class TradingAccountManager {
         return runtimes.values().stream().sorted(Comparator.comparing(AccountTradingRuntime::accountId)).toList();
     }
 
+    /** Every symbol still present in at least one account's persisted configuration. */
+    public List<String> configuredTradingSymbols() {
+        return runtimes().stream()
+                .flatMap(runtime -> {
+                    List<String> activeSymbols = runtime.engines().stream()
+                            .map(engine -> engine.getSymbol().toUpperCase())
+                            .toList();
+                    return dailyStatsStore.loadAccountSymbols(runtime.accountId())
+                            .orElse(activeSymbols).stream();
+                })
+                .map(symbol -> symbol.trim().toUpperCase())
+                .distinct()
+                .sorted()
+                .toList();
+    }
+
     public Optional<AccountSymbolsConfiguration> accountSymbolsConfiguration(String accountId) {
         AccountTradingRuntime runtime = runtimes.get(accountId);
         if (runtime == null) return Optional.empty();

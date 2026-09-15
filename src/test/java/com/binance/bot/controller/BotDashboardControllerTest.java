@@ -52,6 +52,7 @@ class BotDashboardControllerTest {
         when(store.loadTradingRuntimeSettings()).thenReturn(Optional.of(
                 new DailyTradeStatsStore.TradingRuntimeSettings(
                         3, Map.of("THEUSDT", 2))));
+        when(accountManager.configuredTradingSymbols()).thenReturn(List.of("REZUSDT", "THEUSDT"));
         SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
         BotDashboardController controller = new BotDashboardController(
                 accountManager, new BinanceProperties(), notificationService, store, coordinator);
@@ -65,6 +66,28 @@ class BotDashboardControllerTest {
         assertEquals(2, coordinator.maxConcurrentEntriesPerSymbol("THEUSDT"));
         verify(store).saveTradingRuntimeSettings(new DailyTradeStatsStore.TradingRuntimeSettings(
                 3, Map.of("REZUSDT", 0, "THEUSDT", 2)));
+    }
+
+    @Test
+    void tradingSettingsRemoveOverridesForSymbolsNoAccountUses() {
+        TradingAccountManager accountManager = mock(TradingAccountManager.class);
+        TradeNotificationService notificationService = mock(TradeNotificationService.class);
+        DailyTradeStatsStore store = mock(DailyTradeStatsStore.class);
+        when(accountManager.configuredTradingSymbols()).thenReturn(List.of("THEUSDT"));
+        when(store.loadTradingRuntimeSettings()).thenReturn(Optional.of(
+                new DailyTradeStatsStore.TradingRuntimeSettings(
+                        2, Map.of("REZUSDT", 1, "THEUSDT", 3))));
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        BotDashboardController controller = new BotDashboardController(
+                accountManager, new BinanceProperties(), notificationService, store, coordinator);
+
+        BotDashboardController.TradingSettingsView result = controller.tradingSettings();
+
+        assertEquals(Map.of("THEUSDT", 3), result.maxConcurrentEntriesBySymbol());
+        assertEquals(2, coordinator.maxConcurrentEntriesPerSymbol("REZUSDT"));
+        assertEquals(3, coordinator.maxConcurrentEntriesPerSymbol("THEUSDT"));
+        verify(store).saveTradingRuntimeSettings(new DailyTradeStatsStore.TradingRuntimeSettings(
+                2, Map.of("THEUSDT", 3)));
     }
 
     @Test

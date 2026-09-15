@@ -54,7 +54,8 @@ public class BotDashboardController {
 
     @GetMapping("/api/settings/trading")
     public TradingSettingsView tradingSettings() {
-        DailyTradeStatsStore.TradingRuntimeSettings settings = loadTradingRuntimeSettings();
+        DailyTradeStatsStore.TradingRuntimeSettings settings = removeUnusedTradingLimits(
+                loadTradingRuntimeSettings(), true);
         int value = Math.max(0, Math.min(20, settings.maxConcurrentEntriesPerSymbol()));
         Map<String, Integer> bySymbol = normalizedTradingLimits(settings.maxConcurrentEntriesBySymbol());
         if (symbolTradeCoordinator != null) {
@@ -85,12 +86,17 @@ public class BotDashboardController {
                 return ResponseEntity.badRequest().body(Map.of("accepted", false,
                         "message", "请输入有效的 USDT 交易对，例如 BTCUSDT"));
             }
+            if (!accountManager.configuredTradingSymbols().contains(symbol)) {
+                return ResponseEntity.badRequest().body(Map.of("accepted", false,
+                        "message", symbol + " 未配置到任何账户，不能保存单独并发设置"));
+            }
             bySymbol.put(symbol, value);
         } else {
             defaultValue = value;
         }
-        DailyTradeStatsStore.TradingRuntimeSettings settings =
-                new DailyTradeStatsStore.TradingRuntimeSettings(defaultValue, Map.copyOf(bySymbol));
+        DailyTradeStatsStore.TradingRuntimeSettings settings = removeUnusedTradingLimits(
+                new DailyTradeStatsStore.TradingRuntimeSettings(defaultValue, Map.copyOf(bySymbol)), false);
+        bySymbol = new TreeMap<>(settings.maxConcurrentEntriesBySymbol());
         if (dailyStatsStore != null) dailyStatsStore.saveTradingRuntimeSettings(settings);
         properties.getStrategy().setMaxConcurrentEntriesPerSymbol(defaultValue);
         if (symbolTradeCoordinator != null) {
@@ -124,6 +130,29 @@ public class BotDashboardController {
             });
         }
         return Collections.unmodifiableMap(normalized);
+    }
+
+    private DailyTradeStatsStore.TradingRuntimeSettings removeUnusedTradingLimits(
+            DailyTradeStatsStore.TradingRuntimeSettings settings, boolean persistWhenChanged) {
+        List<String> configured = accountManager.configuredTradingSymbols();
+        Set<String> configuredSymbols = configured == null ? Set.of() : new HashSet<>(configured);
+        Map<String, Integer> current = normalizedTradingLimits(settings.maxConcurrentEntriesBySymbol());
+        Map<String, Integer> retained = new TreeMap<>();
+        current.forEach((symbol, value) -> {
+            if (configuredSymbols.contains(symbol)) retained.put(symbol, value);
+        });
+        DailyTradeStatsStore.TradingRuntimeSettings normalized =
+                new DailyTradeStatsStore.TradingRuntimeSettings(
+                        Math.max(0, Math.min(20, settings.maxConcurrentEntriesPerSymbol())),
+                        Map.copyOf(retained));
+        if (persistWhenChanged && dailyStatsStore != null && !retained.equals(current)) {
+            try {
+                dailyStatsStore.saveTradingRuntimeSettings(normalized);
+            } catch (RuntimeException e) {
+                log.warn("清理未使用的交易对并发配置失败，继续使用当前有效配置");
+            }
+        }
+        return normalized;
     }
 
     @GetMapping("/api/accounts/open-orders")
@@ -420,6 +449,13 @@ public class BotDashboardController {
         }
         TradingAccountManager.SymbolsUpdateResult result =
                 accountManager.updateAccountSymbols(accountId, request.symbols());
+        if (result.accepted()) {
+            try {
+                tradingSettings();
+            } catch (RuntimeException e) {
+                log.warn("账户交易对已保存，但清理未使用的并发配置失败: accountId={}", accountId);
+            }
+        }
         return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
     }
 

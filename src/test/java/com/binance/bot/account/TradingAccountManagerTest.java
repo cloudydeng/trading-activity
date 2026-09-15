@@ -23,6 +23,36 @@ import static org.mockito.Mockito.*;
 
 class TradingAccountManagerTest {
     @Test
+    void configuredTradingSymbolsPreferPersistedListsAndDeduplicateAcrossAccounts() {
+        BinanceProperties properties = propertiesWith("account-a", "A", "key-a", "secret-a",
+                "account-b", "B", "key-b", "secret-b");
+        AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
+        DailyTradeStatsStore store = mock(DailyTradeStatsStore.class);
+        AccountTradingRuntime accountA = mock(AccountTradingRuntime.class);
+        AccountTradingRuntime accountB = mock(AccountTradingRuntime.class);
+        com.binance.bot.strategy.HighFrequencyVolumeChurnEngine engineA =
+                mock(com.binance.bot.strategy.HighFrequencyVolumeChurnEngine.class);
+        com.binance.bot.strategy.HighFrequencyVolumeChurnEngine engineB =
+                mock(com.binance.bot.strategy.HighFrequencyVolumeChurnEngine.class);
+        when(accountA.accountId()).thenReturn("account-a");
+        when(accountA.engines()).thenReturn(List.of(engineA));
+        when(accountB.accountId()).thenReturn("account-b");
+        when(accountB.engines()).thenReturn(List.of(engineB));
+        when(engineA.getSymbol()).thenReturn("OLDUSDT");
+        when(engineB.getSymbol()).thenReturn("THEUSDT");
+        when(store.loadAccountSymbols("account-a"))
+                .thenReturn(Optional.of(List.of("REZUSDT", "THEUSDT")));
+        when(store.loadAccountSymbols("account-b")).thenReturn(Optional.empty());
+        when(factory.create(any())).thenAnswer(invocation ->
+                "account-a".equals(((AccountCredentials) invocation.getArgument(0)).accountId())
+                        ? accountA : accountB);
+        TradingAccountManager manager = new TradingAccountManager(properties, factory, store);
+        manager.initialize();
+
+        assertEquals(List.of("REZUSDT", "THEUSDT"), manager.configuredTradingSymbols());
+    }
+
+    @Test
     void savesStoppedAccountSymbolsToSqliteAndHotAppliesRuntime() {
         BinanceProperties properties = propertiesWith("account-a", "A", "key-a", "secret-a",
                 "account-b", "B", "key-b", "secret-b");
