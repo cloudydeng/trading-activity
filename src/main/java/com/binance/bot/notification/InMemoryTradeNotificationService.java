@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
@@ -126,6 +127,23 @@ public class InMemoryTradeNotificationService implements TradeNotificationServic
             return Map.copyOf(updated);
         });
         publishOpenOrders();
+    }
+
+    @Override
+    public void updateOpenOrderCancelCheckAt(String accountId, String symbol, long orderId, long cancelCheckAtMs) {
+        if (accountId == null || accountId.isBlank() || symbol == null || symbol.isBlank() || orderId <= 0) return;
+        String key = symbol.toUpperCase() + ":" + orderId;
+        AtomicBoolean changed = new AtomicBoolean(false);
+        openOrdersByAccount.computeIfPresent(accountId, (ignored, current) -> {
+            OpenOrderNotification order = current.get(key);
+            if (order == null || !"SELL".equalsIgnoreCase(order.side())
+                    || order.cancelCheckAtMs() == cancelCheckAtMs) return current;
+            Map<String, OpenOrderNotification> updated = new HashMap<>(current);
+            updated.put(key, order.withCancelCheckAtMs(cancelCheckAtMs));
+            changed.set(true);
+            return Map.copyOf(updated);
+        });
+        if (changed.get()) publishOpenOrders();
     }
 
     @Override

@@ -1517,6 +1517,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             long nextTimeoutMs = randomizedTimeoutMs(exitOrderTimeoutMs());
             activeOrderTimeoutMs.set(nextTimeoutMs);
             persistRuntimeState(true);
+            publishSellCancelCheckAt(now, nextTimeoutMs);
             statusReason.set("卖单满 " + durationLabel(completedTimeoutMs)
                     + " 但暂时无法确认最新卖一，保留当前 LIMIT 卖单；"
                     + durationLabel(nextTimeoutMs) + " 后复查");
@@ -1534,6 +1535,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         long nextTimeoutMs = randomizedTimeoutMs(exitOrderTimeoutMs());
         activeOrderTimeoutMs.set(nextTimeoutMs);
         persistRuntimeState(true);
+        publishSellCancelCheckAt(now, nextTimeoutMs);
         statusReason.set("卖单满 " + durationLabel(completedTimeoutMs)
                 + " 但仍在卖一，保留当前 LIMIT 卖单 @ "
                 + normalizedOrderPrice.toPlainString() + "；"
@@ -1798,6 +1800,22 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         BigDecimal exactOrderPrice = previousBuyOrderPrice.get();
         return exactOrderPrice != null && exactOrderPrice.signum() > 0
                 ? exactOrderPrice : currentEntryAverageExecutionPrice();
+    }
+
+    /** Exact end of the current randomized SELL working/review window for dashboard display. */
+    public long dashboardSellCancelCheckAtMs(long orderId) {
+        if (!Long.valueOf(orderId).equals(activeOrderId.get())
+                || currentStatus.get() != ChurnStatus.SELLING) return 0;
+        long placedAtMs = orderPlacedTimestamp.get();
+        long timeoutMs = currentActiveOrderTimeoutMs(ChurnStatus.SELLING);
+        return placedAtMs > 0 && timeoutMs > 0 ? placedAtMs + timeoutMs : 0;
+    }
+
+    private void publishSellCancelCheckAt(long windowStartedAtMs, long timeoutMs) {
+        Long orderId = activeOrderId.get();
+        if (orderId == null || windowStartedAtMs <= 0 || timeoutMs <= 0) return;
+        notificationService.updateOpenOrderCancelCheckAt(accountId,
+                properties.getStrategy().getSymbol(), orderId, windowStartedAtMs + timeoutMs);
     }
 
     private BigDecimal entryAverageStrictlyHigherPrice(SymbolRuleManager.SymbolRule rule) {

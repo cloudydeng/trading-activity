@@ -117,6 +117,7 @@ class AccountTradingRuntimeTest {
         HighFrequencyVolumeChurnEngine engine = mock(HighFrequencyVolumeChurnEngine.class);
         when(engine.getSymbol()).thenReturn("HOLOUSDT");
         when(engine.dashboardPreviousBuyPrice()).thenReturn(new BigDecimal("0.062700"));
+        when(engine.dashboardSellCancelCheckAtMs(77L)).thenReturn(456L);
         AccountTradingRuntime runtime = runtime("account-a", engine);
         OpenOrderNotification sell = new OpenOrderNotification(
                 "account-a", "cloud", "HOLOUSDT", "SELL", "LIMIT", "NEW",
@@ -125,6 +126,7 @@ class AccountTradingRuntimeTest {
         OpenOrderNotification enriched = runtime.enrichDashboardOpenOrder(sell);
 
         assertEquals("0.062700", enriched.entryPrice());
+        assertEquals(456L, enriched.cancelCheckAtMs());
     }
 
     @Test

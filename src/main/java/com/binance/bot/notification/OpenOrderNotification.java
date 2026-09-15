@@ -15,7 +15,8 @@ public record OpenOrderNotification(
         String originalQty,
         String executedQty,
         long orderId,
-        long timeMs
+        long timeMs,
+        long cancelCheckAtMs
 ) {
     public OpenOrderNotification {
         accountId = safe(accountId);
@@ -36,13 +37,19 @@ public record OpenOrderNotification(
             String price, String originalQty, String executedQty, long orderId, long timeMs
     ) {
         this(accountId, accountAlias, symbol, side, type, status, price, "0",
-                originalQty, executedQty, orderId, timeMs);
+                originalQty, executedQty, orderId, timeMs, 0);
     }
 
-    public OpenOrderNotification withEntryPrice(BigDecimal value) {
+    public OpenOrderNotification withDashboardSellDetails(BigDecimal value, long nextCancelCheckAtMs) {
         String normalized = value == null || value.signum() <= 0 ? "0" : value.toPlainString();
         return new OpenOrderNotification(accountId, accountAlias, symbol, side, type, status,
-                price, normalized, originalQty, executedQty, orderId, timeMs);
+                price, normalized, originalQty, executedQty, orderId, timeMs,
+                Math.max(0, nextCancelCheckAtMs));
+    }
+
+    public OpenOrderNotification withCancelCheckAtMs(long value) {
+        return new OpenOrderNotification(accountId, accountAlias, symbol, side, type, status,
+                price, entryPrice, originalQty, executedQty, orderId, timeMs, Math.max(0, value));
     }
 
     public boolean active() {

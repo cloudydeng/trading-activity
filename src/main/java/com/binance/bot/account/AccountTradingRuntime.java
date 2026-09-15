@@ -137,12 +137,12 @@ public class AccountTradingRuntime {
         }
     }
 
-    /** Adds the immediately preceding BUY price to SELL orders for dashboard display. */
+    /** Adds the preceding BUY price and exact randomized timeout deadline to dashboard SELL orders. */
     public OpenOrderNotification enrichDashboardOpenOrder(OpenOrderNotification order) {
         if (order == null || !"SELL".equalsIgnoreCase(order.side())) return order;
         return engine(order.symbol())
-                .map(HighFrequencyVolumeChurnEngine::dashboardPreviousBuyPrice)
-                .map(order::withEntryPrice)
+                .map(engine -> order.withDashboardSellDetails(engine.dashboardPreviousBuyPrice(),
+                        engine.dashboardSellCancelCheckAtMs(order.orderId())))
                 .orElse(order);
     }
 

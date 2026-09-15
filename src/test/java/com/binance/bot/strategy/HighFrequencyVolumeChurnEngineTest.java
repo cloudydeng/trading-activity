@@ -809,6 +809,10 @@ class HighFrequencyVolumeChurnEngineTest {
                 any(), any(), isNull(), anyString());
         assertTrue(placedAt.get() > expiredAt);
         assertTrue(engine.getStatusReason().get().contains("仍在卖一，保留当前 LIMIT 卖单"));
+        ArgumentCaptor<Long> cancelCheckAt = ArgumentCaptor.forClass(Long.class);
+        verify(notificationService).updateOpenOrderCancelCheckAt(
+                eq("test-account"), eq("ENSOUSDT"), eq(77L), cancelCheckAt.capture());
+        assertTrue(cancelCheckAt.getValue() > System.currentTimeMillis());
     }
 
     @Test

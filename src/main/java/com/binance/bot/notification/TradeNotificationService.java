@@ -10,6 +10,7 @@ public interface TradeNotificationService {
     AutoCloseable addFillListener(Consumer<FillNotification> listener);
     void replaceOpenOrders(String accountId, List<OpenOrderNotification> orders);
     void notifyOrderUpdate(OpenOrderNotification order);
+    void updateOpenOrderCancelCheckAt(String accountId, String symbol, long orderId, long cancelCheckAtMs);
     List<OpenOrderNotification> currentOpenOrders();
     AutoCloseable addOpenOrderListener(Consumer<List<OpenOrderNotification>> listener);
 }

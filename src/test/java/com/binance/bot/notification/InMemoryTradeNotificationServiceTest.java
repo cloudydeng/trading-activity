@@ -115,6 +115,21 @@ class InMemoryTradeNotificationServiceTest {
     }
 
     @Test
+    void sellCancelCheckDeadlineCanBeUpdatedWithoutLosingOrderDetails() {
+        InMemoryTradeNotificationService service = new InMemoryTradeNotificationService();
+        OpenOrderNotification order = new OpenOrderNotification(
+                "account-a", "A", "ENSOUSDT", "SELL", "LIMIT", "NEW",
+                "0.601000", "0.600000", "10", "0", 43, 200, 1_000);
+        service.notifyOrderUpdate(order);
+
+        service.updateOpenOrderCancelCheckAt("account-a", "ENSOUSDT", 43, 2_000);
+
+        OpenOrderNotification updated = service.currentOpenOrders().getFirst();
+        assertEquals("0.600000", updated.entryPrice());
+        assertEquals(2_000, updated.cancelCheckAtMs());
+    }
+
+    @Test
     void malformedAccountOrderCannotHideValidOrdersFromOtherAccounts() {
         InMemoryTradeNotificationService service = new InMemoryTradeNotificationService();
         OpenOrderNotification valid = new OpenOrderNotification(
