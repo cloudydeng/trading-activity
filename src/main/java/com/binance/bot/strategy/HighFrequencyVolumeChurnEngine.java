@@ -55,8 +55,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private static final long POSITION_RECOVERY_WINDOW_MS = TimeUnit.DAYS.toMillis(1);
     private static final int POSITION_RECOVERY_MAX_WINDOWS = 30;
     private static final BigDecimal MIN_BNB_BALANCE_USDT = BigDecimal.ONE;
-    private static final BigDecimal ORDER_AMOUNT_RANDOM_LOWER_OFFSET_USDT = new BigDecimal("8");
-    private static final BigDecimal ORDER_AMOUNT_RANDOM_UPPER_OFFSET_USDT = new BigDecimal("2");
+    private static final BigDecimal ORDER_AMOUNT_RANDOM_LOWER_MULTIPLIER = new BigDecimal("0.8");
+    private static final BigDecimal ORDER_AMOUNT_RANDOM_UPPER_MULTIPLIER = new BigDecimal("1.2");
     private final String accountId;
     private final String accountAlias;
     private final String accountTag;
@@ -2465,9 +2465,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         BigDecimal configured = orderAmountUsdt();
         if (configured == null || configured.signum() <= 0) return BigDecimal.ZERO;
 
-        long lower = configured.subtract(ORDER_AMOUNT_RANDOM_LOWER_OFFSET_USDT)
+        long lower = configured.multiply(ORDER_AMOUNT_RANDOM_LOWER_MULTIPLIER)
                 .setScale(0, RoundingMode.CEILING).longValue();
-        long upper = configured.add(ORDER_AMOUNT_RANDOM_UPPER_OFFSET_USDT)
+        long upper = configured.multiply(ORDER_AMOUNT_RANDOM_UPPER_MULTIPLIER)
                 .setScale(0, RoundingMode.FLOOR).longValue();
         long liveUpper = properties.getStrategy().getMaxLiveOrderNotionalUsdt()
                 .setScale(0, RoundingMode.FLOOR).longValue();

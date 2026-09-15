@@ -8,7 +8,9 @@ import com.binance.bot.strategy.PostFillOutcomeTracker;
 import com.binance.bot.strategy.TradingRiskGuard;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
+import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -89,7 +91,9 @@ class TradingAccountManagerTest {
                 .thenReturn(new AccountTradingRuntimeFactory.AccountSymbolRuntime(
                         saharaEngine, mock(TradingRiskGuard.class), mock(PostFillOutcomeTracker.class)));
         when(store.loadAccountSymbols("account-a"))
-                .thenReturn(Optional.of(List.of("PROMUSDT", "SAHARAUSDT")));
+                .thenReturn(Optional.of(List.of("PROMUSDT")),
+                        Optional.of(List.of("PROMUSDT", "SAHARAUSDT")));
+        when(store.loadStrategyOverrides("account-a")).thenReturn(Map.of());
         TradingAccountManager manager = new TradingAccountManager(properties, factory, store);
         manager.initialize();
 
@@ -102,8 +106,69 @@ class TradingAccountManagerTest {
         assertEquals(List.of("PROMUSDT", "SAHARAUSDT"), result.configuration().configuredSymbols());
         assertEquals(List.of("PROMUSDT", "SAHARAUSDT"), result.configuration().activeSymbols());
         verify(store).saveAccountSymbols("account-a", List.of("PROMUSDT", "SAHARAUSDT"));
+        ArgumentCaptor<BinanceProperties.SymbolStrategyProfile> profile =
+                ArgumentCaptor.forClass(BinanceProperties.SymbolStrategyProfile.class);
+        verify(store).saveStrategyOverride(eq("account-a"), eq("SAHARAUSDT"), profile.capture());
+        assertEquals("BUY_PRICE_MAKER", profile.getValue().getMode());
+        assertEquals(0, new BigDecimal("12").compareTo(profile.getValue().getOrderAmountUsdt()));
+        assertEquals(0, new BigDecimal("10000").compareTo(profile.getValue().getDailyVolumeLimitUsdt()));
+        assertEquals(119_000L, profile.getValue().getExitTimeoutMs());
+        verify(store, never()).saveStrategyOverride(eq("account-a"), eq("PROMUSDT"), any());
         verify(saharaEngine).initialize();
         verify(accountA).applyConfiguredSymbols(eq(List.of("PROMUSDT", "SAHARAUSDT")), anyMap());
+        InOrder persistenceBeforeRuntimeCreation = inOrder(store, factory);
+        persistenceBeforeRuntimeCreation.verify(store)
+                .saveStrategyOverride(eq("account-a"), eq("SAHARAUSDT"), any());
+        persistenceBeforeRuntimeCreation.verify(factory)
+                .createSymbolRuntime(any(), any(), any(), any(), eq("SAHARAUSDT"));
+    }
+
+    @Test
+    void addingSymbolNeverOverwritesAnExistingPersistedStrategy() {
+        BinanceProperties properties = new BinanceProperties();
+        properties.getApi().getProfiles().put("account-a", profile("A", "key-a", "secret-a"));
+        AccountTradingRuntimeFactory factory = mock(AccountTradingRuntimeFactory.class);
+        DailyTradeStatsStore store = mock(DailyTradeStatsStore.class);
+        AccountTradingRuntime runtime = mock(AccountTradingRuntime.class);
+        com.binance.bot.strategy.HighFrequencyVolumeChurnEngine oldEngine =
+                mock(com.binance.bot.strategy.HighFrequencyVolumeChurnEngine.class);
+        com.binance.bot.strategy.HighFrequencyVolumeChurnEngine newEngine =
+                mock(com.binance.bot.strategy.HighFrequencyVolumeChurnEngine.class);
+        BinanceProperties.SymbolStrategyProfile existing = new BinanceProperties.SymbolStrategyProfile();
+        existing.setMode("BID_ASK_MAKER");
+        existing.setOrderAmountUsdt(new BigDecimal("21"));
+
+        when(runtime.accountId()).thenReturn("account-a");
+        when(runtime.alias()).thenReturn("A");
+        when(runtime.credentials()).thenReturn(new AccountCredentials("account-a", "A", "key-a", "secret-a"));
+        when(runtime.tradeClient()).thenReturn(mock(BinanceAccountTradeClient.class));
+        when(runtime.userDataStream()).thenReturn(mock(AccountUserDataStream.class));
+        when(runtime.accountRiskCoordinator()).thenReturn(new AccountRiskCoordinator());
+        when(runtime.engines()).thenReturn(List.of(oldEngine, newEngine));
+        when(runtime.engine("PROMUSDT")).thenReturn(Optional.of(oldEngine));
+        when(runtime.engine("SAHARAUSDT")).thenReturn(Optional.empty());
+        when(runtime.canChangeConfiguredSymbols()).thenReturn(true);
+        when(runtime.applyConfiguredSymbols(eq(List.of("PROMUSDT", "SAHARAUSDT")), anyMap()))
+                .thenReturn(new AccountTradingRuntime.ApplySymbolsResult(true, "交易对配置已热应用"));
+        when(oldEngine.getSymbol()).thenReturn("PROMUSDT");
+        when(newEngine.getSymbol()).thenReturn("SAHARAUSDT");
+        when(factory.create(any())).thenReturn(runtime);
+        when(factory.createSymbolRuntime(any(), any(), any(), any(), eq("SAHARAUSDT")))
+                .thenReturn(new AccountTradingRuntimeFactory.AccountSymbolRuntime(
+                        newEngine, mock(TradingRiskGuard.class), mock(PostFillOutcomeTracker.class)));
+        when(store.loadAccountSymbols("account-a"))
+                .thenReturn(Optional.of(List.of("PROMUSDT")),
+                        Optional.of(List.of("PROMUSDT", "SAHARAUSDT")));
+        when(store.loadStrategyOverrides("account-a")).thenReturn(Map.of("SAHARAUSDT", existing));
+        TradingAccountManager manager = new TradingAccountManager(properties, factory, store);
+        manager.initialize();
+
+        TradingAccountManager.SymbolsUpdateResult result = manager.updateAccountSymbols(
+                "account-a", List.of("PROMUSDT", "SAHARAUSDT"));
+
+        assertTrue(result.accepted());
+        verify(store, never()).saveStrategyOverride(eq("account-a"), eq("SAHARAUSDT"), any());
+        verify(factory).createSymbolRuntime(any(), any(), any(), any(), eq("SAHARAUSDT"));
     }
 
     @Test

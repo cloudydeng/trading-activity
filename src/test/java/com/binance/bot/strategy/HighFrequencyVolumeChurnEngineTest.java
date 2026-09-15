@@ -653,9 +653,9 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void eachBuyUsesAnIntegerNotionalFromEightBelowToTwoAboveTheConfiguredBase() {
+    void eachBuyUsesAnIntegerNotionalFromEightyToOneHundredTwentyPercentOfBase() {
         properties.getStrategy().setMaxLiveOrderNotionalUsdt(new BigDecimal("30"));
-        assertTrue(engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("22"),
+        assertTrue(engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("12"),
                 20_000L, 120_000L).accepted());
         SymbolRuleManager.SymbolRule rule = ruleManager.getRule("ENSOUSDT");
 
@@ -663,8 +663,8 @@ class HighFrequencyVolumeChurnEngineTest {
             BigDecimal amount = ReflectionTestUtils.invokeMethod(engine,
                     "randomizedOrderAmountUsdt", new BigDecimal("0.6000"), rule);
             assertEquals(0, amount.scale());
-            assertTrue(amount.compareTo(new BigDecimal("14")) >= 0);
-            assertTrue(amount.compareTo(new BigDecimal("24")) <= 0);
+            assertTrue(amount.compareTo(new BigDecimal("10")) >= 0);
+            assertTrue(amount.compareTo(new BigDecimal("14")) <= 0);
         }
     }
 

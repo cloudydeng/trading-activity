@@ -9,15 +9,18 @@ import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -25,6 +28,10 @@ import java.util.concurrent.locks.ReentrantLock;
 @Slf4j
 @Service
 public class TradingAccountManager {
+    private static final BigDecimal NEW_SYMBOL_DEFAULT_ORDER_AMOUNT_USDT = new BigDecimal("12");
+    private static final BigDecimal NEW_SYMBOL_DEFAULT_DAILY_VOLUME_LIMIT_USDT = new BigDecimal("10000");
+    private static final long NEW_SYMBOL_DEFAULT_EXIT_TIMEOUT_MS = 119_000L;
+
     private final BinanceProperties properties;
     private final AccountTradingRuntimeFactory runtimeFactory;
     private final DailyTradeStatsStore dailyStatsStore;
@@ -218,8 +225,14 @@ public class TradingAccountManager {
                         accountSymbolsConfiguration(accountId).orElse(null));
             }
             try {
+                List<String> previousSymbols = dailyStatsStore.loadAccountSymbols(accountId)
+                        .orElseGet(() -> runtime.engines().stream()
+                                .map(engine -> normalizeSymbol(engine.getSymbol()))
+                                .filter(symbol -> !symbol.isBlank())
+                                .toList());
                 dailyStatsStore.saveAccountSymbols(accountId, symbols);
                 List<String> configuredSymbols = dailyStatsStore.loadAccountSymbols(accountId).orElse(symbols);
+                saveDefaultStrategiesForNewSymbols(runtime, previousSymbols, configuredSymbols);
                 HotApplySymbolsResult hotApply = hotApplyAccountSymbols(runtime, configuredSymbols);
                 AccountSymbolsConfiguration configuration = accountSymbolsConfiguration(accountId).orElseThrow();
                 String message = hotApply.applied()
@@ -235,6 +248,54 @@ public class TradingAccountManager {
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * A symbol added from the dashboard starts with an explicit, predictable profile. Existing
+     * persisted or credential-provided profiles are never replaced, including when a removed symbol
+     * is later added again.
+     */
+    private void saveDefaultStrategiesForNewSymbols(AccountTradingRuntime runtime,
+                                                     List<String> previousSymbols,
+                                                     List<String> configuredSymbols) {
+        Set<String> previous = new HashSet<>();
+        if (previousSymbols != null) {
+            previousSymbols.stream().map(TradingAccountManager::normalizeSymbol)
+                    .filter(symbol -> !symbol.isBlank()).forEach(previous::add);
+        }
+        Set<String> explicitlyConfigured = new HashSet<>();
+        Map<String, BinanceProperties.SymbolStrategyProfile> credentialStrategies =
+                runtime.credentials().symbolStrategies();
+        if (credentialStrategies != null) {
+            credentialStrategies.keySet().stream().map(TradingAccountManager::normalizeSymbol)
+                    .filter(symbol -> !symbol.isBlank()).forEach(explicitlyConfigured::add);
+        }
+        Map<String, BinanceProperties.SymbolStrategyProfile> persistedStrategies =
+                dailyStatsStore.loadStrategyOverrides(runtime.accountId());
+        if (persistedStrategies != null) {
+            persistedStrategies.keySet().stream().map(TradingAccountManager::normalizeSymbol)
+                    .filter(symbol -> !symbol.isBlank()).forEach(explicitlyConfigured::add);
+        }
+
+        Map<String, BigDecimal> configuredAmounts = runtime.credentials().orderAmountsUsdt();
+        for (String configuredSymbol : configuredSymbols) {
+            String symbol = normalizeSymbol(configuredSymbol);
+            if (symbol.isBlank() || previous.contains(symbol) || explicitlyConfigured.contains(symbol)) continue;
+
+            BinanceProperties.SymbolStrategyProfile profile = new BinanceProperties.SymbolStrategyProfile();
+            profile.setMode("BUY_PRICE_MAKER");
+            BigDecimal configuredAmount = configuredAmounts == null ? null : configuredAmounts.get(symbol);
+            profile.setOrderAmountUsdt(configuredAmount != null && configuredAmount.signum() > 0
+                    ? configuredAmount : NEW_SYMBOL_DEFAULT_ORDER_AMOUNT_USDT);
+            profile.setDailyVolumeLimitUsdt(NEW_SYMBOL_DEFAULT_DAILY_VOLUME_LIMIT_USDT);
+            profile.setExitTimeoutMs(NEW_SYMBOL_DEFAULT_EXIT_TIMEOUT_MS);
+            dailyStatsStore.saveStrategyOverride(runtime.accountId(), symbol, profile);
+            explicitlyConfigured.add(symbol);
+        }
+    }
+
+    private static String normalizeSymbol(String symbol) {
+        return symbol == null ? "" : symbol.trim().toUpperCase();
     }
 
     private HotApplySymbolsResult hotApplyAccountSymbols(AccountTradingRuntime runtime, List<String> configuredSymbols) {
