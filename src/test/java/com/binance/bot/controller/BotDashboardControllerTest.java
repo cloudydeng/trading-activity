@@ -193,7 +193,7 @@ class BotDashboardControllerTest {
                 new DailyTradeStatsStore.AccountSymbolVolumeSummary(
                         "account-a", "healthy", "SAHARAUSDT", java.time.LocalDate.now(),
                         java.time.LocalDate.now(), new BigDecimal("12"), new BigDecimal("11.9"),
-                        new BigDecimal("23.9"), new BigDecimal("0.02"), null,
+                        new BigDecimal("23.9"), new BigDecimal("0.02"), new BigDecimal("0.00003"), null,
                         new BigDecimal("-0.08"), new BigDecimal("-0.10"), 2, 1, true)));
         when(brokenEngine.getAccountSymbolVolumeSummaries(1))
                 .thenThrow(new IllegalStateException("damaged row"));

@@ -251,11 +251,13 @@ class DailyTradeStatsStoreTest {
         DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
         long now = System.currentTimeMillis();
         store.recordTrade("account-a", "huaqin-bot", "ENSOUSDT", 61, 6101, "BUY",
-                new BigDecimal("10"), new BigDecimal("6.00"), BigDecimal.ZERO,
-                BigDecimal.ZERO, BigDecimal.ZERO, now);
+                new BigDecimal("10"), new BigDecimal("10"), new BigDecimal("0.60"),
+                new BigDecimal("6.00"), new BigDecimal("0.00001"), "BNB",
+                new BigDecimal("0.006"), new BigDecimal("0.006"), now);
         store.recordTrade("account-a", "huaqin-bot", "BTCUSDT", 62, 6201, "BUY",
-                new BigDecimal("1"), new BigDecimal("8.00"), BigDecimal.ZERO,
-                BigDecimal.ZERO, BigDecimal.ZERO, now);
+                new BigDecimal("1"), new BigDecimal("1"), new BigDecimal("8.00"),
+                new BigDecimal("8.00"), new BigDecimal("0.00002"), "BNB",
+                new BigDecimal("0.012"), new BigDecimal("0.012"), now);
 
         List<DailyTradeStatsStore.AccountSymbolVolumeSummary> rows = store.accountSymbolVolumeSummaries(
                 "account-a", "huaqin-bot", 10);
@@ -264,7 +266,9 @@ class DailyTradeStatsStoreTest {
         assertEquals(List.of("BTCUSDT", "ENSOUSDT"), rows.stream()
                 .map(DailyTradeStatsStore.AccountSymbolVolumeSummary::symbol).toList());
         assertDecimal("8.00", rows.get(0).totalVolumeQuote());
+        assertDecimal("0.00002", rows.get(0).totalCommissionBnb());
         assertDecimal("6.00", rows.get(1).totalVolumeQuote());
+        assertDecimal("0.00001", rows.get(1).totalCommissionBnb());
         store.close();
     }
 

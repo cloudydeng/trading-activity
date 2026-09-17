@@ -793,6 +793,24 @@ public class DailyTradeStatsStore {
             } catch (Exception e) {
                 throw new IllegalStateException("读取账户交易对成交量汇总失败", e);
             }
+            String bnbCommissionSql = "SELECT symbol, commission FROM trade_fill WHERE account_id=? "
+                    + "AND trade_date>=? AND trade_date<=? AND UPPER(commission_asset)='BNB'";
+            try (PreparedStatement statement = connection.prepareStatement(bnbCommissionSql)) {
+                statement.setString(1, normalizedAccountId);
+                statement.setString(2, start.toString());
+                statement.setString(3, end.toString());
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        MutableSymbolSummary summary = grouped.get(rows.getString("symbol"));
+                        if (summary != null) {
+                            summary.totalCommissionBnb = summary.totalCommissionBnb.add(
+                                    decimal(rows.getString("commission")));
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                throw new IllegalStateException("读取账户 BNB 手续费汇总失败", e);
+            }
             return grouped.values().stream().filter(summary -> summary.total.signum() > 0)
                     .map(MutableSymbolSummary::snapshot).toList();
         });
@@ -1178,6 +1196,7 @@ public class DailyTradeStatsStore {
                                              BigDecimal buyVolumeQuote, BigDecimal sellVolumeQuote,
                                              BigDecimal totalVolumeQuote,
                                              BigDecimal totalCommissionQuoteEquivalent,
+                                             BigDecimal totalCommissionBnb,
                                              BigDecimal costPerMillionVolume,
                                              BigDecimal realizedGrossPnlQuote, BigDecimal netRealizedPnlQuote,
                                              int tradeCount, int roundTrips,
@@ -1232,6 +1251,7 @@ public class DailyTradeStatsStore {
         private BigDecimal sell = BigDecimal.ZERO;
         private BigDecimal total = BigDecimal.ZERO;
         private BigDecimal commission = BigDecimal.ZERO;
+        private BigDecimal totalCommissionBnb = BigDecimal.ZERO;
         private BigDecimal economicFee = BigDecimal.ZERO;
         private BigDecimal grossPnl = BigDecimal.ZERO;
         private int tradeCount;
@@ -1263,7 +1283,8 @@ public class DailyTradeStatsStore {
             BigDecimal cost = commissionComplete && total.signum() > 0
                     ? commission.multiply(ONE_MILLION).divide(total, MC) : null;
             return new AccountSymbolVolumeSummary(accountId, accountAlias, symbol, startDate, endDate,
-                    buy, sell, total, commission, cost, grossPnl, grossPnl.subtract(economicFee),
+                    buy, sell, total, commission, totalCommissionBnb, cost,
+                    grossPnl, grossPnl.subtract(economicFee),
                     tradeCount, roundTrips, commissionComplete);
         }
     }
