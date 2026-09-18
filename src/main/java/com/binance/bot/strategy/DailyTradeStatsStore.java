@@ -21,6 +21,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -44,6 +45,7 @@ public class DailyTradeStatsStore {
     private static final String ACCOUNT_SYMBOLS_PREFIX = "account_symbols:";
     private static final String TRADING_RUNTIME_SETTINGS_KEY = "trading_runtime_settings";
     private static final int TRADE_FILL_RETENTION_DAYS = 10;
+    private static final int SYMBOL_FILL_ROW_LIMIT = 2000;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Connection connection;
@@ -855,6 +857,76 @@ public class DailyTradeStatsStore {
         });
     }
 
+    /**
+     * Returns one row per recorded fill, newest first, for one symbol across every account. A blank
+     * symbol returns every symbol. The window is clamped to the retained fill window because older
+     * detail rows are purged on startup and once per UTC day.
+     */
+    public List<SymbolFill> symbolFills(String symbol, LocalDate start, LocalDate end) {
+        return symbolFills(symbol == null || symbol.isBlank() ? List.of() : List.of(symbol), start, end);
+    }
+
+    /**
+     * Returns one row per recorded fill, newest first, for the given symbols across every account. An
+     * empty symbol list means every symbol. The window is clamped to the retained fill window.
+     */
+    public List<SymbolFill> symbolFills(Collection<String> symbols, LocalDate start, LocalDate end) {
+        return withLock(() -> {
+            LocalDate today = LocalDate.now(ZoneOffset.UTC);
+            LocalDate oldestRetained = today.minusDays(TRADE_FILL_RETENTION_DAYS - 1L);
+            LocalDate safeStart = start == null ? oldestRetained : start;
+            LocalDate safeEnd = end == null ? today : end;
+            if (safeEnd.isAfter(today)) safeEnd = today;
+            if (safeStart.isBefore(oldestRetained)) safeStart = oldestRetained;
+            if (safeStart.isAfter(safeEnd)) return List.<SymbolFill>of();
+            List<String> normalized = new ArrayList<>();
+            if (symbols != null) {
+                for (String symbol : symbols) {
+                    if (symbol == null || symbol.isBlank()) continue;
+                    String value = normalizeSymbol(symbol);
+                    if (!normalized.contains(value)) normalized.add(value);
+                }
+            }
+            StringBuilder placeholders = new StringBuilder();
+            for (int i = 0; i < normalized.size(); i++) {
+                if (i > 0) placeholders.append(',');
+                placeholders.append('?');
+            }
+            String sql = "SELECT account_id, account_alias, symbol, side, price, quantity, quote_quantity, "
+                    + "commission, commission_asset, trade_date, trade_time FROM trade_fill "
+                    + "WHERE trade_date>=? AND trade_date<=?"
+                    + (normalized.isEmpty() ? "" : " AND symbol IN (" + placeholders + ")")
+                    + " ORDER BY trade_time DESC, account_id, trade_id DESC LIMIT ?";
+            List<SymbolFill> fills = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, safeStart.toString());
+                statement.setString(2, safeEnd.toString());
+                int index = 3;
+                for (String symbol : normalized) statement.setString(index++, symbol);
+                statement.setInt(index, SYMBOL_FILL_ROW_LIMIT);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        fills.add(new SymbolFill(
+                                rows.getString("account_id"),
+                                rows.getString("account_alias"),
+                                rows.getString("symbol"),
+                                rows.getString("side"),
+                                decimal(rows.getString("price")),
+                                decimal(rows.getString("quantity")),
+                                decimal(rows.getString("quote_quantity")),
+                                decimal(rows.getString("commission")),
+                                rows.getString("commission_asset"),
+                                rows.getLong("trade_time"),
+                                LocalDate.parse(rows.getString("trade_date"))));
+                    }
+                }
+            } catch (Exception e) {
+                throw new IllegalStateException("读取成交明细失败", e);
+            }
+            return List.copyOf(fills);
+        });
+    }
+
     public void saveActiveSymbol(String accountId, String symbol) {
         withLock(() -> saveSetting("active_symbol:" + normalizeAccountId(accountId),
                 symbol.toUpperCase(), "保存当前交易对失败"));
@@ -1240,6 +1312,12 @@ public class DailyTradeStatsStore {
                                              BigDecimal realizedGrossPnlQuote, BigDecimal netRealizedPnlQuote,
                                              int tradeCount, int roundTrips,
                                              boolean commissionConversionComplete) { }
+
+    /** One executed trade as recorded in the fill-detail ledger. */
+    public record SymbolFill(String accountId, String accountAlias, String symbol, String side,
+                             BigDecimal price, BigDecimal quantity, BigDecimal quoteQuantity,
+                             BigDecimal commission, String commissionAsset,
+                             long tradeTimeMs, LocalDate tradeDate) { }
 
     public record RuntimeState(String accountId, String symbol, String status, Long orderId,
                                String clientOrderId, String side, BigDecimal orderPrice,

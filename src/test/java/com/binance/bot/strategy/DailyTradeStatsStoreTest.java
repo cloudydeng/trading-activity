@@ -196,6 +196,40 @@ class DailyTradeStatsStoreTest {
     }
 
     @Test
+    void symbolFillsReturnEveryAccountFillNewestFirstAndClampToRetainedWindow() {
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
+        LocalDate today = LocalDate.now(ZoneOffset.UTC);
+        long earlier = today.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
+        long later = earlier + 60_000L;
+        store.recordTrade("account-a", "yanzi", "PROMUSDT", 9101, 7101, "BUY",
+                new BigDecimal("4"), new BigDecimal("4"), new BigDecimal("2.5"), new BigDecimal("10"),
+                new BigDecimal("0.00001"), "BNB", new BigDecimal("0.006"), new BigDecimal("0.006"), earlier);
+        store.recordTrade("account-b", "huaqin-bot", "PROMUSDT", 9102, 7102, "SELL",
+                new BigDecimal("4"), new BigDecimal("4"), new BigDecimal("2.6"), new BigDecimal("10.4"),
+                new BigDecimal("0.00002"), "BNB", new BigDecimal("0.012"), new BigDecimal("0.012"), later);
+        store.recordTrade("account-b", "huaqin-bot", "ENSOUSDT", 9103, 7103, "BUY",
+                new BigDecimal("1"), new BigDecimal("1"), new BigDecimal("0.96"), new BigDecimal("0.96"),
+                new BigDecimal("0.00003"), "BNB", new BigDecimal("0.018"), new BigDecimal("0.018"), earlier);
+
+        List<DailyTradeStatsStore.SymbolFill> prom = store.symbolFills("PROMUSDT", today, today);
+        assertEquals(2, prom.size());
+        assertEquals("account-b", prom.get(0).accountId());
+        assertEquals("SELL", prom.get(0).side());
+        assertDecimal("2.6", prom.get(0).price());
+        assertEquals("account-a", prom.get(1).accountId());
+        assertEquals("BUY", prom.get(1).side());
+        assertDecimal("4", prom.get(1).quantity());
+        assertEquals(1, store.symbolFills("ENSOUSDT", today, today).size());
+        assertEquals(3, store.symbolFills("", today, today).size());
+        assertEquals(0, store.symbolFills("PROMUSDT", today.minusDays(30), today.minusDays(20)).size());
+        assertEquals(3, store.symbolFills(List.of("promusdt", "ENSOUSDT"), today, today).size());
+        assertEquals(2, store.symbolFills(List.of("PROMUSDT", "promusdt"), today, today).size());
+        assertEquals(3, store.symbolFills(java.util.Arrays.asList("", null), today, today).size());
+        assertEquals(1, store.symbolFills(List.of("ENSOUSDT", "NOSUCHUSDT"), today, today).size());
+        store.close();
+    }
+
+    @Test
     void exchangeFlatReconciliationNormalizesSubStepDust() {
         BinanceProperties properties = properties();
         DailyTradeStatsStore store = new DailyTradeStatsStore(properties);

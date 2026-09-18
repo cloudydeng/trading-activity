@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
 import java.util.*;
 
 @RestController
@@ -175,6 +176,36 @@ public class BotDashboardController {
                         .thenComparing(DailyTradeStatsStore.AccountSymbolVolumeSummary::accountId,
                                 String.CASE_INSENSITIVE_ORDER))
                 .toList();
+    }
+
+    /**
+     * Per-fill detail for one symbol across every account. Accepts either an explicit UTC date range
+     * or a day count; the store clamps the window to the retained fill window.
+     */
+    @GetMapping("/api/accounts/stats/fills")
+    public List<DailyTradeStatsStore.SymbolFill> symbolFills(
+            @RequestParam(required = false) List<String> symbol,
+            @RequestParam(required = false) String from,
+            @RequestParam(required = false) String to,
+            @RequestParam(required = false) Integer days) {
+        if (dailyStatsStore == null) return List.of();
+        LocalDate start = parseUtcDate(from);
+        LocalDate end = parseUtcDate(to);
+        if (start == null || end == null) {
+            int safeDays = Math.max(1, Math.min(10, days == null ? 1 : days));
+            end = LocalDate.now(ZoneOffset.UTC);
+            start = end.minusDays(safeDays - 1L);
+        }
+        return dailyStatsStore.symbolFills(symbol == null ? List.of() : symbol, start, end);
+    }
+
+    private LocalDate parseUtcDate(String value) {
+        if (value == null || value.isBlank()) return null;
+        try {
+            return LocalDate.parse(value.trim());
+        } catch (DateTimeParseException e) {
+            return null;
+        }
     }
 
     /**
