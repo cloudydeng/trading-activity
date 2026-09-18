@@ -164,7 +164,7 @@ public class BotDashboardController {
     @GetMapping("/api/accounts/stats/summary")
     public List<DailyTradeStatsStore.AccountSymbolVolumeSummary> accountVolumeSummary(
             @RequestParam(defaultValue = "10") int days) {
-        int safeDays = Math.max(1, Math.min(90, days));
+        int safeDays = Math.max(1, Math.min(10, days));
         return accountManager.runtimes().stream()
                 .flatMap(runtime -> runtime.engine().getAccountSymbolVolumeSummaries(safeDays).stream())
                 .sorted(Comparator

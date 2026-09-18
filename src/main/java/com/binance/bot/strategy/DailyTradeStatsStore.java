@@ -4,6 +4,7 @@ import com.binance.bot.config.BinanceProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
@@ -42,6 +43,7 @@ public class DailyTradeStatsStore {
     private static final String RUNTIME_STATE_PREFIX = "runtime_state:";
     private static final String ACCOUNT_SYMBOLS_PREFIX = "account_symbols:";
     private static final String TRADING_RUNTIME_SETTINGS_KEY = "trading_runtime_settings";
+    private static final int TRADE_FILL_RETENTION_DAYS = 10;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Connection connection;
@@ -54,6 +56,7 @@ public class DailyTradeStatsStore {
             if (parent != null) Files.createDirectories(parent);
             connection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
             initializeSchema(properties);
+            purgeExpiredTradeFills();
             log.info("每日交易统计已启用: {}", dbPath);
         } catch (Exception e) {
             throw new IllegalStateException("无法初始化每日交易统计数据库", e);
@@ -123,6 +126,10 @@ public class DailyTradeStatsStore {
             statement.execute("""
                     CREATE INDEX IF NOT EXISTS idx_trade_fill_account_date
                     ON trade_fill(account_id, trade_date, symbol, trade_id)
+                    """);
+            statement.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_trade_fill_date
+                    ON trade_fill(trade_date)
                     """);
         }
         if (tableExists("daily_trade_stats") && !columnExists("daily_trade_stats", "account_id")) {
@@ -531,6 +538,38 @@ public class DailyTradeStatsStore {
         });
     }
 
+    /**
+     * Keeps the current UTC date plus the previous nine UTC dates in the fill-detail table.
+     * Daily aggregates and processed-trade identities are intentionally retained because they are
+     * respectively the durable position ledger and the REST reconciliation deduplication ledger.
+     */
+    @Scheduled(cron = "0 30 0 * * *", zone = "UTC")
+    public void purgeExpiredTradeFills() {
+        LocalDate oldestRetainedDate = LocalDate.now(ZoneOffset.UTC)
+                .minusDays(TRADE_FILL_RETENTION_DAYS - 1L);
+        try {
+            int deleted = deleteTradeFillsBefore(oldestRetainedDate);
+            if (deleted > 0) {
+                log.info("已删除 {} 条十天窗口外的成交明细，保留日期从 {} 起", deleted, oldestRetainedDate);
+            }
+        } catch (RuntimeException e) {
+            log.warn("自动清理十天窗口外的成交明细失败，将在下次计划任务重试", e);
+        }
+    }
+
+    int deleteTradeFillsBefore(LocalDate oldestRetainedDate) {
+        if (oldestRetainedDate == null) throw new IllegalArgumentException("最早保留日期不能为空");
+        return withLock(() -> {
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "DELETE FROM trade_fill WHERE trade_date<?")) {
+                statement.setString(1, oldestRetainedDate.toString());
+                return statement.executeUpdate();
+            } catch (SQLException e) {
+                throw new IllegalStateException("清理过期成交明细失败", e);
+            }
+        });
+    }
+
     private boolean insertProcessedTrade(String accountId, String symbol, String tradeIdentity,
                                          LocalDate tradeDate, long processedAtMs) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
@@ -769,7 +808,7 @@ public class DailyTradeStatsStore {
                                                                          String accountAlias,
                                                                          int days) {
         return withLock(() -> {
-            int safeDays = Math.max(1, Math.min(days, 90));
+            int safeDays = Math.max(1, Math.min(days, TRADE_FILL_RETENTION_DAYS));
             String normalizedAccountId = normalizeAccountId(accountId);
             String normalizedAlias = normalizeAlias(accountAlias);
             LocalDate end = LocalDate.now(ZoneOffset.UTC);

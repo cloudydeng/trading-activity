@@ -153,6 +153,49 @@ class DailyTradeStatsStoreTest {
     }
 
     @Test
+    void startupPurgesOnlyFillDetailsOutsideTheTenDayUtcWindow() throws Exception {
+        BinanceProperties properties = properties();
+        DailyTradeStatsStore first = new DailyTradeStatsStore(properties);
+        LocalDate today = LocalDate.now(ZoneOffset.UTC);
+        long expiredAt = today.minusDays(10).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
+        long boundaryAt = today.minusDays(9).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
+        long todayAt = today.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
+
+        first.recordTrade("account-a", "yanzi", "PROMUSDT", 9101, 7101, "BUY",
+                BigDecimal.ONE, BigDecimal.ONE, BigDecimal.TEN, BigDecimal.TEN,
+                new BigDecimal("0.00001"), "BNB", new BigDecimal("0.006"),
+                new BigDecimal("0.006"), expiredAt);
+        first.recordTrade("account-a", "yanzi", "PROMUSDT", 9102, 7102, "BUY",
+                BigDecimal.ONE, BigDecimal.ONE, BigDecimal.TEN, BigDecimal.TEN,
+                new BigDecimal("0.00002"), "BNB", new BigDecimal("0.012"),
+                new BigDecimal("0.012"), boundaryAt);
+        first.recordTrade("account-a", "yanzi", "PROMUSDT", 9103, 7103, "BUY",
+                BigDecimal.ONE, BigDecimal.ONE, BigDecimal.TEN, BigDecimal.TEN,
+                new BigDecimal("0.00003"), "BNB", new BigDecimal("0.018"),
+                new BigDecimal("0.018"), todayAt);
+        first.close();
+
+        DailyTradeStatsStore restarted = new DailyTradeStatsStore(properties());
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + tempDir.resolve("daily.db"));
+             var statement = connection.createStatement()) {
+            try (var count = statement.executeQuery("SELECT COUNT(*) FROM trade_fill")) {
+                assertEquals(2, count.getInt(1));
+            }
+            try (var count = statement.executeQuery("SELECT COUNT(*) FROM daily_trade_stats")) {
+                assertEquals(3, count.getInt(1));
+            }
+            try (var count = statement.executeQuery("SELECT COUNT(*) FROM processed_trade")) {
+                assertEquals(3, count.getInt(1));
+            }
+        }
+        List<DailyTradeStatsStore.AccountSymbolVolumeSummary> rows =
+                restarted.accountSymbolVolumeSummaries("account-a", "yanzi", 10);
+        assertEquals(1, rows.size());
+        assertDecimal("0.00005", rows.get(0).totalCommissionBnb());
+        restarted.close();
+    }
+
+    @Test
     void exchangeFlatReconciliationNormalizesSubStepDust() {
         BinanceProperties properties = properties();
         DailyTradeStatsStore store = new DailyTradeStatsStore(properties);
@@ -269,6 +312,10 @@ class DailyTradeStatsStoreTest {
         assertDecimal("0.00002", rows.get(0).totalCommissionBnb());
         assertDecimal("6.00", rows.get(1).totalVolumeQuote());
         assertDecimal("0.00001", rows.get(1).totalCommissionBnb());
+        DailyTradeStatsStore.AccountSymbolVolumeSummary clamped = store.accountSymbolVolumeSummaries(
+                "account-a", "huaqin-bot", 90).get(0);
+        assertEquals(LocalDate.now(ZoneOffset.UTC).minusDays(9), clamped.startDate());
+        assertEquals(LocalDate.now(ZoneOffset.UTC), clamped.endDate());
         store.close();
     }
 
