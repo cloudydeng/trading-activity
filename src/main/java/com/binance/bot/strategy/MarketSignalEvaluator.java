@@ -18,8 +18,10 @@ import java.util.concurrent.locks.ReentrantLock;
 public class MarketSignalEvaluator {
     private static final MathContext MC = MathContext.DECIMAL64;
     private static final long REFERENCE_SAMPLE_INTERVAL_MS = 1_000L;
+    private static final long MINUTE_MS = 60_000L;
     private final Deque<Quote> quotes = new ArrayDeque<>();
     private final Deque<Quote> referenceQuotes = new ArrayDeque<>();
+    private final Deque<MinuteClose> minuteCloses = new ArrayDeque<>();
     private final Deque<TradeFlow> trades = new ArrayDeque<>();
     private final AtomicReference<EntryDecision> lastDecision = new AtomicReference<>(EntryDecision.block("AWAITING_MARKET_DATA"));
     private final ReentrantLock lock = new ReentrantLock();
@@ -135,6 +137,48 @@ public class MarketSignalEvaluator {
 
     public EntryDecision getLastDecision() { return lastDecision.get(); }
 
+    /** A minute's latest traded close, including the still-forming current minute. */
+    public void recordMinuteClose(long openTimeMs, BigDecimal close, long receivedAtMs) {
+        lock.lock();
+        try {
+            if (close == null || close.signum() <= 0 || openTimeMs < 0
+                    || openTimeMs % MINUTE_MS != 0 || openTimeMs > receivedAtMs) return;
+            MinuteClose latest = minuteCloses.peekLast();
+            if (latest != null && openTimeMs < latest.openTimeMs()) return;
+            if (latest != null && openTimeMs == latest.openTimeMs()) minuteCloses.removeLast();
+            minuteCloses.addLast(new MinuteClose(openTimeMs, close, receivedAtMs));
+            while (minuteCloses.size() > 25) minuteCloses.removeFirst();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Null when either average cannot be computed from 25 consecutive fresh 1-minute closes. */
+    public MinuteMovingAverages minuteMovingAverages(long nowMs, long maxAgeMs) {
+        lock.lock();
+        try {
+            if (minuteCloses.size() < 25) return null;
+            MinuteClose latest = minuteCloses.peekLast();
+            if (latest == null || latest.openTimeMs() != nowMs / MINUTE_MS * MINUTE_MS
+                    || nowMs - latest.receivedAtMs() > Math.max(5_000L, maxAgeMs)) return null;
+            BigDecimal sum7 = BigDecimal.ZERO;
+            BigDecimal sum25 = BigDecimal.ZERO;
+            int index = 0;
+            for (MinuteClose candle : minuteCloses) {
+                if (candle.openTimeMs() != latest.openTimeMs() - (24L - index) * MINUTE_MS) return null;
+                sum25 = sum25.add(candle.close());
+                if (index >= 18) sum7 = sum7.add(candle.close());
+                index++;
+            }
+            return new MinuteMovingAverages(sum7.divide(BigDecimal.valueOf(7), MC),
+                    sum25.divide(BigDecimal.valueOf(25), MC));
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public record MinuteMovingAverages(BigDecimal ma7, BigDecimal ma25) { }
+
     /** Returns a robust 60-second median mid-price after at least 30 seconds of local history. */
     public BigDecimal getBreakEvenReferencePrice(long nowMs, long maxAgeMs) {
         lock.lock();
@@ -218,6 +262,7 @@ public class MarketSignalEvaluator {
         try {
         quotes.clear();
         referenceQuotes.clear();
+        minuteCloses.clear();
         trades.clear();
         latestDepth = null;
         selloff = null;
@@ -250,6 +295,7 @@ public class MarketSignalEvaluator {
     }
 
     private record Quote(BigDecimal bid, BigDecimal bidQty, BigDecimal ask, BigDecimal askQty, long timestampMs) { }
+    private record MinuteClose(long openTimeMs, BigDecimal close, long receivedAtMs) { }
     private record TradeFlow(BigDecimal signedQuantity, BigDecimal totalQuantity, long timestampMs) { }
     private record DepthSnapshot(BigDecimal bidDepth, BigDecimal askDepth, long timestampMs) { }
     private record Selloff(long detectedAtMs, BigDecimal lowMid) { }

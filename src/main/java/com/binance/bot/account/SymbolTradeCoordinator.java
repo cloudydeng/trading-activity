@@ -16,6 +16,7 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 @Component
 public final class SymbolTradeCoordinator {
+    private static final long CROSS_ACCOUNT_BUY_GAP_MS = 2_000L;
     /**
      * Fair lock defines the ordering of truly concurrent first requests; the per-symbol
      * waiting maps below preserve that order across later retries.
@@ -24,6 +25,7 @@ public final class SymbolTradeCoordinator {
     private final Map<String, LinkedHashMap<String, Holder>> holdersBySymbol = new LinkedHashMap<>();
     private final Map<String, LinkedHashMap<String, Waiter>> waitersBySymbol = new LinkedHashMap<>();
     private final Map<String, Integer> maxConcurrentEntriesBySymbol = new LinkedHashMap<>();
+    private final Map<String, LastAccountActivity> lastAccountActivityBySymbol = new LinkedHashMap<>();
     private final AtomicInteger maxConcurrentEntriesPerSymbol = new AtomicInteger(1);
 
     public void configureMaxConcurrentEntriesPerSymbol(int value) {
@@ -64,6 +66,59 @@ public final class SymbolTradeCoordinator {
         try {
             return maxConcurrentEntriesBySymbol.getOrDefault(
                     normalizedSymbol, maxConcurrentEntriesPerSymbol.get());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Atomically spaces a new BUY from another account's recent order or completed cycle. */
+    public BuyPacePermit reserveBuySubmission(String symbol, String accountId) {
+        return reserveBuySubmission(symbol, accountId, System.currentTimeMillis());
+    }
+
+    BuyPacePermit reserveBuySubmission(String symbol, String accountId, long nowMs) {
+        String normalizedSymbol = normalizeSymbol(symbol);
+        String normalizedAccountId = normalizeEngineId(accountId);
+        if (normalizedSymbol.isBlank() || normalizedAccountId.isBlank()) {
+            return new BuyPacePermit(false, CROSS_ACCOUNT_BUY_GAP_MS, "同交易对买单间隔参数无效");
+        }
+        lock.lock();
+        try {
+            LastAccountActivity previous = lastAccountActivityBySymbol.get(normalizedSymbol);
+            if (previous != null && !previous.accountId().equals(normalizedAccountId)) {
+                long elapsedMs = Math.max(0L, nowMs - previous.atMs());
+                if (elapsedMs < CROSS_ACCOUNT_BUY_GAP_MS) {
+                    long waitMs = CROSS_ACCOUNT_BUY_GAP_MS - elapsedMs;
+                    return new BuyPacePermit(false, waitMs,
+                            normalizedSymbol + " 不同 API Key 的买单需间隔 2 秒；约 " + waitMs + " ms 后重试");
+                }
+            }
+            lastAccountActivityBySymbol.put(normalizedSymbol,
+                    new LastAccountActivity(normalizedAccountId, nowMs));
+            return new BuyPacePermit(true, 0L, "");
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** SELL is never delayed, but a later BUY from another account observes this timestamp. */
+    public void noteSellSubmission(String symbol, String accountId) {
+        noteAccountActivity(symbol, accountId, System.currentTimeMillis());
+    }
+
+    /** A new account waits after the prior account's full cycle has actually finished. */
+    public void noteCompletedCycle(String symbol, String accountId) {
+        noteAccountActivity(symbol, accountId, System.currentTimeMillis());
+    }
+
+    void noteAccountActivity(String symbol, String accountId, long nowMs) {
+        String normalizedSymbol = normalizeSymbol(symbol);
+        String normalizedAccountId = normalizeEngineId(accountId);
+        if (normalizedSymbol.isBlank() || normalizedAccountId.isBlank()) return;
+        lock.lock();
+        try {
+            lastAccountActivityBySymbol.put(normalizedSymbol,
+                    new LastAccountActivity(normalizedAccountId, nowMs));
         } finally {
             lock.unlock();
         }
@@ -296,6 +351,8 @@ public final class SymbolTradeCoordinator {
 
     public enum Phase { BUYING, HOLDING, SELLING }
     public record EntryPermit(boolean accepted, String reason) { }
+    public record BuyPacePermit(boolean allowed, long retryAfterMs, String reason) { }
+    private record LastAccountActivity(String accountId, long atMs) { }
     public record Holder(String engineId, String accountAlias, Phase phase,
                          long acquiredAtMs, long phaseChangedAtMs) { }
     public record Waiter(String engineId, String accountAlias, long enqueuedAtMs) { }

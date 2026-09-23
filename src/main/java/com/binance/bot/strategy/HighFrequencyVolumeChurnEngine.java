@@ -289,6 +289,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
     }
 
+    /** A paced entry owns a slot without an order; do not drop unrelated FIFO waiters. */
+    private void releasePacedEntrySlotIfFlat() {
+        if (symbolTradeSlotHeld.get()) releaseSymbolTradeSlotIfFlat();
+    }
+
     private void markSymbolTradeSlotHolding() {
         if (!symbolTradeSlotHeld.get() || activeOrderId.get() != null
                 || currentStatus.get() == ChurnStatus.BUYING) return;
@@ -330,8 +335,23 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (!acceptingMarketConnections.get()) return;
         if (!marketConnectInProgress.compareAndSet(false, true)) return;
         String symbol = properties.getStrategy().getSymbol().toLowerCase();
+        JsonNode minuteHistory = tradeService.getRecentMinuteKlines(symbol);
+        if (minuteHistory != null) {
+            long receivedAtMs = System.currentTimeMillis();
+            for (JsonNode candle : minuteHistory) {
+                if (candle.isArray() && candle.size() > 4) {
+                    try {
+                        marketSignalEvaluator.recordMinuteClose(candle.get(0).asLong(),
+                                new BigDecimal(candle.get(4).asText()), receivedAtMs);
+                    } catch (NumberFormatException ignored) {
+                        // Malformed public market data cannot bypass the fail-closed entry gate.
+                    }
+                }
+            }
+        }
         String baseUrl = properties.getApi().getWsMarketUrl().replaceFirst("/ws/?$", "");
-        String wsUrl = baseUrl + "/stream?streams=" + symbol + "@bookTicker/" + symbol + "@aggTrade/" + symbol + "@depth5@100ms";
+        String wsUrl = baseUrl + "/stream?streams=" + symbol + "@bookTicker/" + symbol
+                + "@aggTrade/" + symbol + "@depth5@100ms/" + symbol + "@kline_1m";
         httpClient.newWebSocketBuilder().buildAsync(URI.create(wsUrl), this)
                 .thenAccept(ws -> {
                     if (!acceptingMarketConnections.get()) {
@@ -986,7 +1006,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         try {
             JsonNode envelope = objectMapper.readTree(payload);
             JsonNode node = envelope.has("data") ? envelope.get("data") : envelope;
-            if (node.has("b") && node.has("B") && node.has("a") && node.has("A")) {
+            if ("kline".equals(node.path("e").asText()) && "1m".equals(node.path("k").path("i").asText())) {
+                JsonNode candle = node.path("k");
+                marketSignalEvaluator.recordMinuteClose(candle.path("t").asLong(),
+                        new BigDecimal(candle.path("c").asText("0")), System.currentTimeMillis());
+            } else if (node.has("b") && node.has("B") && node.has("a") && node.has("A")) {
                 BigDecimal bid = new BigDecimal(node.get("b").asText());
                 BigDecimal bidQty = new BigDecimal(node.get("B").asText());
                 BigDecimal ask = new BigDecimal(node.get("a").asText());
@@ -1024,17 +1048,21 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (bestAsk != null && bestAsk.signum() > 0) lastBestAsk.set(bestAsk);
         applyPendingStrategyIfSafe();
         var rule = ruleManager.getRule(properties.getStrategy().getSymbol());
-        if (rule == null || !isRunning.get()) return;
+        if (rule == null || !isRunning.get()) {
+            releasePacedEntrySlotIfFlat();
+            return;
+        }
         if (!accountStreamReady.getAsBoolean()) {
             statusReason.set("账户成交流暂不可用，等待自动重连");
+            releasePacedEntrySlotIfFlat();
             return;
         }
         refreshDailyVolumeCounterDate();
         long now = System.currentTimeMillis();
-        if (enforceAccountRiskLimit()) return;
-        if (enforceDailyVolumeLimit(rule)) return;
-        if (enforceBnbBalanceMinimum(rule)) return;
-        if (enforceBreakEvenMaxHold(now, rule)) return;
+        if (enforceAccountRiskLimit()) { releasePacedEntrySlotIfFlat(); return; }
+        if (enforceDailyVolumeLimit(rule)) { releasePacedEntrySlotIfFlat(); return; }
+        if (enforceBnbBalanceMinimum(rule)) { releasePacedEntrySlotIfFlat(); return; }
+        if (enforceBreakEvenMaxHold(now, rule)) { releasePacedEntrySlotIfFlat(); return; }
         if (now < nextOrderAttemptAt.get()) return;
         String symbol = properties.getStrategy().getSymbol();
         switch (currentStatus.get()) {
@@ -1050,23 +1078,37 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     }
                     updateDustState(residual, "残余库存等待后续 BUY 合并");
                 }
-                if (postSellEntryDelayActive(now)) return;
-                if (entryTimeoutCooldownActive(now)) return;
+                if (postSellEntryDelayActive(now)) {
+                    releasePacedEntrySlotIfFlat();
+                    return;
+                }
+                if (entryTimeoutCooldownActive(now)) {
+                    releasePacedEntrySlotIfFlat();
+                    return;
+                }
                 MarketSignalEvaluator.EntryDecision decision = entryDecisionForStrategy(now);
                 activeEntrySignalReason.set(decision.reason());
                 activeEntryContext.set(marketSignalEvaluator.getMarketContext(now));
                 if (!decision.allowed()) {
                     statusReason.set("等待入场信号: " + decision.reason());
+                    releasePacedEntrySlotIfFlat();
                     return;
                 }
                 BigDecimal price = entryPriceForStrategy(bestBid, rule, now);
-                if (price == null || price.signum() <= 0) return;
+                if (price == null || price.signum() <= 0) {
+                    releasePacedEntrySlotIfFlat();
+                    return;
+                }
                 BigDecimal qty = capEntryQuantity(buyQuantity(price, rule), price, rule);
-                if (!isValidOrder(qty, price, rule)) return;
+                if (!isValidOrder(qty, price, rule)) {
+                    releasePacedEntrySlotIfFlat();
+                    return;
+                }
                 boolean dustMergeEntry = holdingInventory.get().signum() > 0 && !residual.sellable();
                 if (!riskGuard.permitsNewEntry(qty, price, now, properties.getStrategy(), dustMergeEntry)) {
                     log.warn("[accountId={} alias={}] 新开仓被风险熔断阻止: {}",
                             accountId, accountAlias, riskGuard.getEntryBlockReason());
+                    releasePacedEntrySlotIfFlat();
                     return;
                 }
                 targetEntryQuantity.set(qty);
@@ -1079,6 +1121,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             case BUYING -> {
                 Long orderId = activeOrderId.get();
                 if (orderId == null) { halt("买单状态没有活动订单"); return; }
+                if (!entryCancellationPending.get()
+                        && !buyBelowMinuteMovingAverages(activeOrderPrice.get(), now)) {
+                    cancelActiveEntryOrder(statusReason.get() + "；撤销活动买单");
+                    return;
+                }
                 long restingMs = now - orderPlacedTimestamp.get();
                 long makerTimeoutMs = Math.max(currentActiveOrderTimeoutMs(ChurnStatus.BUYING),
                         properties.getStrategy().getMinEntryOrderRestMs());
@@ -1490,6 +1537,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         pendingClientOrderIds.add(clientOrderId);
         activeClientOrderId.set(clientOrderId);
         reserveActiveSellQuantity(quantity);
+        symbolTradeCoordinator.noteSellSubmission(properties.getStrategy().getSymbol(), accountId);
         JsonNode response = tradeService.placeLimitGtcSell(properties.getStrategy().getSymbol(), quantity,
                 floorPrice, clientOrderId);
         if (response != null && response.has("orderId")) {
@@ -1615,6 +1663,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             pendingClientOrderIds.add(clientOrderId);
             activeClientOrderId.set(clientOrderId);
             reserveActiveSellQuantity(quantity);
+            symbolTradeCoordinator.noteSellSubmission(symbol, accountId);
             JsonNode response = tradeService.placeLimitGtcSell(symbol, quantity, price, clientOrderId);
             if (response != null && response.has("orderId")) {
                 trackOrder(response.get("orderId").asLong(), clientOrderId, ChurnStatus.SELLING);
@@ -2032,11 +2081,22 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             statusReason.set(reservation.reason());
             return;
         }
+        if (buy) {
+            SymbolTradeCoordinator.BuyPacePermit pace = symbolTradeCoordinator.reserveBuySubmission(
+                    symbol, accountId);
+            if (!pace.allowed()) {
+                accountRiskCoordinator.releaseEntry(accountEngineKey);
+                nextOrderAttemptAt.set(System.currentTimeMillis() + Math.max(1L, pace.retryAfterMs()));
+                statusReason.set(pace.reason());
+                return;
+            }
+        }
         String clientOrderId = nextClientOrderId(side);
         pendingClientOrderIds.add(clientOrderId);
         activeClientOrderId.set(clientOrderId);
         replacingOrderId.set(cancelOrderId);
         try {
+            if (!buy) symbolTradeCoordinator.noteSellSubmission(symbol, accountId);
             JsonNode response = buy
                     ? accountRiskCoordinator.submitBuy(() -> tradeService.cancelAndReplaceOrder(
                             symbol, side, price, qty, cancelOrderId, clientOrderId))
@@ -2365,6 +2425,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         rememberFeeAwareEntryPriceCeiling(rule);
         resetEntryTarget();
         persistRuntimeState(false);
+        symbolTradeCoordinator.noteCompletedCycle(properties.getStrategy().getSymbol(), accountId);
         releaseSymbolTradeSlot();
         if (dailyVolumeLimitReached()) {
             dailyVolumeStopPending.set(false);
@@ -3553,6 +3614,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 ? configuredBookPrice
                 : PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(BigDecimal.valueOf(
                 properties.getStrategy().getBidDepthOffsetTicks()))), rule.tickSize());
+        if (!buyBelowMinuteMovingAverages(price, nowMs)) return null;
         if (usesFeeAwareMakerStrategy() && !feeAwareEntryAllowedByAnchor(price, rule)) {
             statusReason.set(feeAwareAnchorWaitMessage(price, rule, "等待价格回落或等待时间满足后再挂买单"));
             return null;
@@ -3588,6 +3650,20 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 + "，参考价 " + reference.toPlainString() + "，需低至少 "
                 + minimumDiscountBps.stripTrailingZeros().toPlainString() + " bps（含费用与 5 bps 缓冲）；当前折让 "
                 + currentDiscountBps.stripTrailingZeros().toPlainString() + " bps");
+        return false;
+    }
+
+    private boolean buyBelowMinuteMovingAverages(BigDecimal price, long nowMs) {
+        MarketSignalEvaluator.MinuteMovingAverages averages = marketSignalEvaluator.minuteMovingAverages(
+                nowMs, properties.getStrategy().getMarketDataStaleMs());
+        if (averages == null) {
+            statusReason.set("等待有效的分时 MA(7)/MA(25) 分钟价格数据");
+            return false;
+        }
+        if (price != null && price.signum() > 0
+                && price.compareTo(averages.ma7()) < 0 && price.compareTo(averages.ma25()) < 0) return true;
+        statusReason.set("等待买价同时低于分时 MA(7) " + averages.ma7().stripTrailingZeros().toPlainString()
+                + " 和 MA(25) " + averages.ma25().stripTrailingZeros().toPlainString());
         return false;
     }
 

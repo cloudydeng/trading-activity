@@ -366,6 +366,24 @@ public class BinanceAccountTradeClient {
         }
     }
 
+    /** Public 1-minute candles used to warm up MA(7)/MA(25); null means unavailable. */
+    public JsonNode getRecentMinuteKlines(String symbol) {
+        rateLimitCoordinator.reserveSafetyRequest(2);
+        try {
+            return restClient.get()
+                    .uri("/api/v3/klines?symbol=" + symbol.toUpperCase() + "&interval=1m&limit=25")
+                    .exchange((request, response) -> {
+                        rateLimitCoordinator.updateFromHeaders(response.getHeaders());
+                        if (!response.getStatusCode().is2xxSuccessful()) return null;
+                        JsonNode body = objectMapper.readTree(response.getBody());
+                        return body.isArray() ? body : null;
+                    });
+        } catch (Exception e) {
+            log.warn("读取分钟均线历史失败: symbol={}, {}", symbol, e.getMessage());
+            return null;
+        }
+    }
+
     /** Returns null on an indeterminate API failure; callers must fail closed in that case. */
     public JsonNode getOpenOrders(String symbol) {
         Map<String, String> params = new LinkedHashMap<>();

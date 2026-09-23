@@ -11,6 +11,38 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SymbolTradeCoordinatorTest {
     @Test
+    void spacesDifferentAccountsBuySubmissionsPerSymbolWithoutDelayingSameAccount() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+
+        assertTrue(coordinator.reserveBuySubmission("ensousdt", "account-a", 10_000L).allowed());
+        assertTrue(coordinator.reserveBuySubmission("ENSOUSDT", "account-a", 10_500L).allowed());
+        SymbolTradeCoordinator.BuyPacePermit early = coordinator.reserveBuySubmission(
+                "ENSOUSDT", "account-b", 11_000L);
+        assertFalse(early.allowed());
+        assertEquals(1_500L, early.retryAfterMs());
+        assertTrue(early.reason().contains("2 秒"));
+        assertTrue(coordinator.reserveBuySubmission("BTCUSDT", "account-b", 11_000L).allowed());
+        assertTrue(coordinator.reserveBuySubmission("ENSOUSDT", "account-b", 12_500L).allowed());
+        assertFalse(coordinator.reserveBuySubmission("ENSOUSDT", "account-a", 13_000L).allowed());
+        assertTrue(coordinator.reserveBuySubmission("ENSOUSDT", "account-a", 14_500L).allowed());
+    }
+
+    @Test
+    void newBuyWaitsAfterAnotherAccountSellsOrFinishesItsCycle() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        assertTrue(coordinator.reserveBuySubmission("ENSOUSDT", "account-a", 10_000L).allowed());
+
+        coordinator.noteAccountActivity("ENSOUSDT", "account-a", 30_000L); // SELL submission
+        assertEquals(1_500L, coordinator.reserveBuySubmission(
+                "ENSOUSDT", "account-b", 30_500L).retryAfterMs());
+
+        coordinator.noteAccountActivity("ENSOUSDT", "account-a", 40_000L); // flat cycle completion
+        assertEquals(1_000L, coordinator.reserveBuySubmission(
+                "ENSOUSDT", "account-b", 41_000L).retryAfterMs());
+        assertTrue(coordinator.reserveBuySubmission("ENSOUSDT", "account-b", 42_000L).allowed());
+    }
+
+    @Test
     void concurrencyTwoAllowsTwoCompleteCyclesAndBlocksThirdUntilOneCloses() {
         SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
         coordinator.configureMaxConcurrentEntriesPerSymbol(2);
