@@ -404,7 +404,7 @@ public class BotDashboardController {
                 request.maxCumulativeEntryAnchorDriftBps(), request.manualEntryAnchorPrice(),
                 request.postSellEntryDelayMs(), request.dailyVolumeLimitUsdt(),
                 request.bidAskInitialSellMarkupTicks(), request.bidAskEntryBookLevel(),
-                request.entryTimeoutCooldownMs());
+                request.entryTimeoutCooldownMs(), request.breakEvenMaxHoldMs());
         return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
     }
 
@@ -424,7 +424,7 @@ public class BotDashboardController {
                 request.maxCumulativeEntryAnchorDriftBps(), request.manualEntryAnchorPrice(),
                 request.postSellEntryDelayMs(), request.dailyVolumeLimitUsdt(),
                 request.bidAskInitialSellMarkupTicks(), request.bidAskEntryBookLevel(),
-                request.entryTimeoutCooldownMs());
+                request.entryTimeoutCooldownMs(), request.breakEvenMaxHoldMs());
         return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
     }
 
@@ -692,7 +692,8 @@ public class BotDashboardController {
                                         BigDecimal dailyVolumeLimitUsdt,
                                         Integer bidAskInitialSellMarkupTicks,
                                         Integer bidAskEntryBookLevel,
-                                        Long entryTimeoutCooldownMs) { }
+                                        Long entryTimeoutCooldownMs,
+                                        Long breakEvenMaxHoldMs) { }
     public record AccountSnapshot(String accountId, String symbol, String apiKeyAlias, String accountType,
                                   boolean canTrade, long accountUpdateTimeMs, List<BalanceView> balances,
                                   List<OrderView> filledOrders, List<OrderView> openOrders, int usedApiWeight1m) { }

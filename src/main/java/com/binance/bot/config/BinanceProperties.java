@@ -55,8 +55,8 @@ public class BinanceProperties {
     @Data
     public static class SymbolStrategyProfile {
         /**
-         * BID_ASK_MAKER starts at best ask, BUY_PRICE_MAKER starts at the actual buy average,
-         * and FEE_AWARE_MAKER protects fees and remains the default.
+         * BREAK_EVEN_MAKER enters only with a fee-adjusted discount and protects net break-even;
+         * FEE_AWARE_MAKER protects initial exit fees and remains the default.
          */
         private String mode = "FEE_AWARE_MAKER";
         private BigDecimal orderAmountUsdt;
@@ -66,6 +66,8 @@ public class BinanceProperties {
         private Long entryTimeoutCooldownMs = 300_000L;
         /** Exit timeout before canceling and re-placing at the latest ask. */
         private Long exitTimeoutMs;
+        /** BREAK_EVEN_MAKER absolute wait from first buy fill; zero disables the deadline. */
+        private Long breakEvenMaxHoldMs = 1_800_000L;
         /** Optional manual maker fee override in bps; null reads the account/symbol rate from Binance. */
         private BigDecimal makerFeeBps;
         /** Legacy runtime field retained for API compatibility; FEE_AWARE_MAKER ignores profit targets. */

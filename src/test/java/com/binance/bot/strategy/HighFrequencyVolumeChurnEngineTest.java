@@ -326,6 +326,49 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void breakEvenHoldDeadlineKeepsProtectedSellAndStopsAfterFlatExit() {
+        HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
+                "ENSOUSDT", "BREAK_EVEN_MAKER", new BigDecimal("6"), 20_000L, 1_800_000L,
+                null, null, null, null, null, null, 60_000L,
+                new BigDecimal("510"), 1, 1, null, 1_800_000L);
+        assertTrue(result.accepted());
+        assertEquals(1_800_000L, engine.getStrategyProfile().getBreakEvenMaxHoldMs());
+
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("activeOrderId", Long.class).set(77L);
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis());
+        TradingRiskGuard guard = (TradingRiskGuard) ReflectionTestUtils.getField(engine, "riskGuard");
+        guard.restoreOpenPosition(new BigDecimal("10"), new BigDecimal("6"), new BigDecimal("0.6"),
+                System.currentTimeMillis() - 1_000_000L, properties.getStrategy());
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6"), new BigDecimal("0.601"));
+        assertFalse(((AtomicBoolean) ReflectionTestUtils.getField(engine, "breakEvenMaxHoldStopPending")).get());
+
+        guard.restoreOpenPosition(new BigDecimal("10"), new BigDecimal("6"), new BigDecimal("0.6"),
+                System.currentTimeMillis() - 1_800_100L, properties.getStrategy());
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.6"), new BigDecimal("0.601"));
+
+        assertTrue(((AtomicBoolean) ReflectionTestUtils.getField(engine, "breakEvenMaxHoldStopPending")).get());
+        assertEquals(77L, atomic("activeOrderId", Long.class).get());
+        assertTrue(engine.getStatusReason().get().contains("停止后续买入"));
+        verify(tradeService, never()).placeMarketSell(anyString(), any(), anyString());
+        verify(tradeService, never()).cancelOrder(anyString(), anyLong());
+
+        atomic("activeOrderId", Long.class).set(null);
+        ReflectionTestUtils.invokeMethod(engine, "completeFlatExit", false);
+
+        assertFalse(engine.getIsRunning().get());
+        assertFalse(((AtomicBoolean) ReflectionTestUtils.getField(engine, "breakEvenMaxHoldStopPending")).get());
+        assertTrue(engine.getStatusReason().get().contains("已确认空仓并停止后续买入"));
+    }
+
+    @Test
     void sellCheckAllowsUpToTwentyFourHoursWhileBuyTimeoutKeepsThirtyMinuteLimit() {
         HighFrequencyVolumeChurnEngine.StrategySwitchResult accepted = engine.switchStrategy(
                 "ENSOUSDT", "FEE_AWARE_MAKER", new BigDecimal("6"), 1_800_000L, 86_400_000L,

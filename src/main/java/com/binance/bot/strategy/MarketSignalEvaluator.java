@@ -6,17 +6,20 @@ import java.math.BigDecimal;
 import java.math.MathContext;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Collects market diagnostics and retains the legacy conservative evaluator. The three current
+ * Collects market diagnostics and retains the legacy conservative evaluator. The current
  * maker-entry strategies call {@link #evaluateBestBidMaker(long, BinanceProperties.Strategy)}, which
  * records these metrics but does not use thin-book, imbalance, taker-flow or volatility as gates.
  */
 public class MarketSignalEvaluator {
     private static final MathContext MC = MathContext.DECIMAL64;
+    private static final long REFERENCE_SAMPLE_INTERVAL_MS = 1_000L;
     private final Deque<Quote> quotes = new ArrayDeque<>();
+    private final Deque<Quote> referenceQuotes = new ArrayDeque<>();
     private final Deque<TradeFlow> trades = new ArrayDeque<>();
     private final AtomicReference<EntryDecision> lastDecision = new AtomicReference<>(EntryDecision.block("AWAITING_MARKET_DATA"));
     private final ReentrantLock lock = new ReentrantLock();
@@ -31,6 +34,14 @@ public class MarketSignalEvaluator {
         quotes.addLast(new Quote(bid, bidQty, ask, askQty, timestampMs));
         long cutoff = timestampMs - config.getSignalLookbackMs();
         while (!quotes.isEmpty() && quotes.peekFirst().timestampMs() < cutoff) quotes.removeFirst();
+        Quote lastReference = referenceQuotes.peekLast();
+        if (lastReference == null || timestampMs - lastReference.timestampMs() >= REFERENCE_SAMPLE_INTERVAL_MS) {
+            referenceQuotes.addLast(new Quote(bid, bidQty, ask, askQty, timestampMs));
+        }
+        long referenceCutoff = timestampMs - 60_000L;
+        while (!referenceQuotes.isEmpty() && referenceQuotes.peekFirst().timestampMs() < referenceCutoff) {
+            referenceQuotes.removeFirst();
+        }
         } finally {
             lock.unlock();
         }
@@ -124,6 +135,31 @@ public class MarketSignalEvaluator {
 
     public EntryDecision getLastDecision() { return lastDecision.get(); }
 
+    /** Returns a robust 60-second median mid-price after at least 30 seconds of local history. */
+    public BigDecimal getBreakEvenReferencePrice(long nowMs, long maxAgeMs) {
+        lock.lock();
+        try {
+            Quote latest = referenceQuotes.peekLast();
+            if (latest == null || nowMs - latest.timestampMs() > Math.max(5_000L, maxAgeMs)) return null;
+            List<BigDecimal> mids = new java.util.ArrayList<>();
+            long cutoff = nowMs - 60_000L;
+            for (Quote quote : referenceQuotes) {
+                if (quote.timestampMs() >= cutoff) {
+                    mids.add(quote.bid().add(quote.ask()).divide(BigDecimal.valueOf(2), MC));
+                }
+            }
+            if (mids.size() < 10 || latest.timestampMs() - referenceQuotes.peekFirst().timestampMs() < 30_000L) {
+                return null;
+            }
+            mids.sort(BigDecimal::compareTo);
+            int middle = mids.size() / 2;
+            if (mids.size() % 2 == 1) return mids.get(middle);
+            return mids.get(middle - 1).add(mids.get(middle)).divide(BigDecimal.valueOf(2), MC);
+        } finally {
+            lock.unlock();
+        }
+    }
+
     public EntryDecision evaluateBestBidMaker(long nowMs, BinanceProperties.Strategy config) {
         lock.lock();
         try {
@@ -181,6 +217,7 @@ public class MarketSignalEvaluator {
         lock.lock();
         try {
         quotes.clear();
+        referenceQuotes.clear();
         trades.clear();
         latestDepth = null;
         selloff = null;
