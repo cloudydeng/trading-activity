@@ -366,12 +366,12 @@ public class BinanceAccountTradeClient {
         }
     }
 
-    /** Public 1-minute candles used to warm up MA(7)/MA(25); null means unavailable. */
+    /** Public 1-minute candles used to warm up MA(7); null means unavailable. */
     public JsonNode getRecentMinuteKlines(String symbol) {
         rateLimitCoordinator.reserveSafetyRequest(2);
         try {
             return restClient.get()
-                    .uri("/api/v3/klines?symbol=" + symbol.toUpperCase() + "&interval=1m&limit=25")
+                    .uri("/api/v3/klines?symbol=" + symbol.toUpperCase() + "&interval=1m&limit=7")
                     .exchange((request, response) -> {
                         rateLimitCoordinator.updateFromHeaders(response.getHeaders());
                         if (!response.getStatusCode().is2xxSuccessful()) return null;

@@ -1122,7 +1122,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 Long orderId = activeOrderId.get();
                 if (orderId == null) { halt("买单状态没有活动订单"); return; }
                 if (!entryCancellationPending.get()
-                        && !buyBelowMinuteMovingAverages(activeOrderPrice.get(), now)) {
+                        && !buyBelowMinuteMa7(activeOrderPrice.get(), now)) {
                     cancelActiveEntryOrder(statusReason.get() + "；撤销活动买单");
                     return;
                 }
@@ -3614,7 +3614,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 ? configuredBookPrice
                 : PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(BigDecimal.valueOf(
                 properties.getStrategy().getBidDepthOffsetTicks()))), rule.tickSize());
-        if (!buyBelowMinuteMovingAverages(price, nowMs)) return null;
+        if (!buyBelowMinuteMa7(price, nowMs)) return null;
         if (usesFeeAwareMakerStrategy() && !feeAwareEntryAllowedByAnchor(price, rule)) {
             statusReason.set(feeAwareAnchorWaitMessage(price, rule, "等待价格回落或等待时间满足后再挂买单"));
             return null;
@@ -3653,17 +3653,15 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return false;
     }
 
-    private boolean buyBelowMinuteMovingAverages(BigDecimal price, long nowMs) {
-        MarketSignalEvaluator.MinuteMovingAverages averages = marketSignalEvaluator.minuteMovingAverages(
+    private boolean buyBelowMinuteMa7(BigDecimal price, long nowMs) {
+        BigDecimal ma7 = marketSignalEvaluator.minuteMovingAverage7(
                 nowMs, properties.getStrategy().getMarketDataStaleMs());
-        if (averages == null) {
-            statusReason.set("等待有效的分时 MA(7)/MA(25) 分钟价格数据");
+        if (ma7 == null) {
+            statusReason.set("等待有效的分时 MA(7) 分钟价格数据");
             return false;
         }
-        if (price != null && price.signum() > 0
-                && price.compareTo(averages.ma7()) < 0 && price.compareTo(averages.ma25()) < 0) return true;
-        statusReason.set("等待买价同时低于分时 MA(7) " + averages.ma7().stripTrailingZeros().toPlainString()
-                + " 和 MA(25) " + averages.ma25().stripTrailingZeros().toPlainString());
+        if (price != null && price.signum() > 0 && price.compareTo(ma7) < 0) return true;
+        statusReason.set("等待买价低于分时 MA(7) " + ma7.stripTrailingZeros().toPlainString());
         return false;
     }
 

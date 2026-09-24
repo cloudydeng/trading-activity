@@ -147,37 +147,32 @@ public class MarketSignalEvaluator {
             if (latest != null && openTimeMs < latest.openTimeMs()) return;
             if (latest != null && openTimeMs == latest.openTimeMs()) minuteCloses.removeLast();
             minuteCloses.addLast(new MinuteClose(openTimeMs, close, receivedAtMs));
-            while (minuteCloses.size() > 25) minuteCloses.removeFirst();
+            while (minuteCloses.size() > 7) minuteCloses.removeFirst();
         } finally {
             lock.unlock();
         }
     }
 
-    /** Null when either average cannot be computed from 25 consecutive fresh 1-minute closes. */
-    public MinuteMovingAverages minuteMovingAverages(long nowMs, long maxAgeMs) {
+    /** Null unless seven consecutive 1-minute closes include a fresh current minute. */
+    public BigDecimal minuteMovingAverage7(long nowMs, long maxAgeMs) {
         lock.lock();
         try {
-            if (minuteCloses.size() < 25) return null;
+            if (minuteCloses.size() < 7) return null;
             MinuteClose latest = minuteCloses.peekLast();
             if (latest == null || latest.openTimeMs() != nowMs / MINUTE_MS * MINUTE_MS
                     || nowMs - latest.receivedAtMs() > Math.max(5_000L, maxAgeMs)) return null;
-            BigDecimal sum7 = BigDecimal.ZERO;
-            BigDecimal sum25 = BigDecimal.ZERO;
+            BigDecimal sum = BigDecimal.ZERO;
             int index = 0;
             for (MinuteClose candle : minuteCloses) {
-                if (candle.openTimeMs() != latest.openTimeMs() - (24L - index) * MINUTE_MS) return null;
-                sum25 = sum25.add(candle.close());
-                if (index >= 18) sum7 = sum7.add(candle.close());
+                if (candle.openTimeMs() != latest.openTimeMs() - (6L - index) * MINUTE_MS) return null;
+                sum = sum.add(candle.close());
                 index++;
             }
-            return new MinuteMovingAverages(sum7.divide(BigDecimal.valueOf(7), MC),
-                    sum25.divide(BigDecimal.valueOf(25), MC));
+            return sum.divide(BigDecimal.valueOf(7), MC);
         } finally {
             lock.unlock();
         }
     }
-
-    public record MinuteMovingAverages(BigDecimal ma7, BigDecimal ma25) { }
 
     /** Returns a robust 60-second median mid-price after at least 30 seconds of local history. */
     public BigDecimal getBreakEvenReferencePrice(long nowMs, long maxAgeMs) {

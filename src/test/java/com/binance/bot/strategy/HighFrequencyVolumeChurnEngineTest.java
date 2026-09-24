@@ -116,9 +116,8 @@ class HighFrequencyVolumeChurnEngineTest {
         when(marketSignalEvaluator.evaluate(anyLong(), eq(properties.getStrategy()))).thenReturn(
                 MarketSignalEvaluator.EntryDecision.allow(new BigDecimal("0.2"), new BigDecimal("0.2"),
                         new BigDecimal("0.2"), BigDecimal.ZERO, BigDecimal.ZERO));
-        when(marketSignalEvaluator.minuteMovingAverages(anyLong(), anyLong()))
-                .thenReturn(new MarketSignalEvaluator.MinuteMovingAverages(
-                        new BigDecimal("100"), new BigDecimal("100")));
+        when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong()))
+                .thenReturn(new BigDecimal("100"));
         AccountCredentials credentials = new AccountCredentials("test-account", "test-bot", "test-api-key", "test-secret-key");
         notificationService = mock(TradeNotificationService.class);
         engine = new HighFrequencyVolumeChurnEngine("test-account", "test-bot", credentials,
@@ -372,7 +371,7 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void everyMakerStrategyRequiresBuyPriceStrictlyBelowBothMinuteAverages() {
+    void everyMakerStrategyRequiresBuyPriceStrictlyBelowMinuteMa7Only() {
         long now = System.currentTimeMillis();
         SymbolRuleManager.SymbolRule rule = ruleManager.getRule("ENSOUSDT");
         when(marketSignalEvaluator.getBreakEvenReferencePrice(anyLong(), anyLong()))
@@ -380,35 +379,27 @@ class HighFrequencyVolumeChurnEngineTest {
         for (String mode : List.of("FEE_AWARE_MAKER", "BID_ASK_MAKER", "BUY_PRICE_MAKER", "BREAK_EVEN_MAKER")) {
             assertTrue(engine.switchStrategy("ENSOUSDT", mode, new BigDecimal("6"),
                     20_000L, 1_800_000L).accepted());
-            when(marketSignalEvaluator.minuteMovingAverages(anyLong(), anyLong())).thenReturn(null);
+            when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong())).thenReturn(null);
             assertNull(ReflectionTestUtils.invokeMethod(engine, "entryPriceForStrategy",
                     new BigDecimal("0.6"), rule, now), mode);
-            assertTrue(engine.getStatusReason().get().contains("MA(7)/MA(25)"));
+            assertTrue(engine.getStatusReason().get().contains("MA(7)"));
 
-            when(marketSignalEvaluator.minuteMovingAverages(anyLong(), anyLong()))
-                    .thenReturn(new MarketSignalEvaluator.MinuteMovingAverages(
-                            new BigDecimal("0.6"), new BigDecimal("0.7")));
-            assertNull(ReflectionTestUtils.invokeMethod(engine, "entryPriceForStrategy",
-                    new BigDecimal("0.6"), rule, now), mode);
-            when(marketSignalEvaluator.minuteMovingAverages(anyLong(), anyLong()))
-                    .thenReturn(new MarketSignalEvaluator.MinuteMovingAverages(
-                            new BigDecimal("0.7"), new BigDecimal("0.59")));
+            when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong()))
+                    .thenReturn(new BigDecimal("0.6"));
             assertNull(ReflectionTestUtils.invokeMethod(engine, "entryPriceForStrategy",
                     new BigDecimal("0.6"), rule, now), mode);
 
-            when(marketSignalEvaluator.minuteMovingAverages(anyLong(), anyLong()))
-                    .thenReturn(new MarketSignalEvaluator.MinuteMovingAverages(
-                            new BigDecimal("0.7"), new BigDecimal("0.8")));
+            when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong()))
+                    .thenReturn(new BigDecimal("0.7"));
             assertEquals(0, new BigDecimal("0.6").compareTo(ReflectionTestUtils.invokeMethod(
                     engine, "entryPriceForStrategy", new BigDecimal("0.6"), rule, now)), mode);
         }
     }
 
     @Test
-    void workingBuyIsCancelledWhenMinuteAverageDropsBelowItsPrice() throws Exception {
-        when(marketSignalEvaluator.minuteMovingAverages(anyLong(), anyLong()))
-                .thenReturn(new MarketSignalEvaluator.MinuteMovingAverages(
-                        new BigDecimal("0.59"), new BigDecimal("0.58")));
+    void workingBuyIsCancelledWhenMinuteMa7DropsBelowItsPrice() throws Exception {
+        when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong()))
+                .thenReturn(new BigDecimal("0.59"));
         when(tradeService.cancelOrder("ENSOUSDT", 77L))
                 .thenReturn(new ObjectMapper().readTree("{\"orderId\":77,\"status\":\"CANCELED\"}"));
         when(tradeService.getOrder("ENSOUSDT", 77L))
@@ -2259,7 +2250,7 @@ class HighFrequencyVolumeChurnEngineTest {
                 new BigDecimal("0.862"), new BigDecimal("0.863"));
         assertEquals(1, coordinator.snapshot("ENSOUSDT").holders().size());
 
-        when(marketSignalEvaluator.minuteMovingAverages(anyLong(), anyLong())).thenReturn(null);
+        when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong())).thenReturn(null);
         ((AtomicLong) ReflectionTestUtils.getField(engineB, "nextOrderAttemptAt")).set(0L);
         ReflectionTestUtils.invokeMethod(engineB, "driveChurnStateMachine",
                 new BigDecimal("0.862"), new BigDecimal("0.863"));
