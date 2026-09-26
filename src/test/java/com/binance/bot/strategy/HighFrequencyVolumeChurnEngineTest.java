@@ -415,6 +415,17 @@ class HighFrequencyVolumeChurnEngineTest {
         when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong()))
                 .thenReturn(new BigDecimal("0.7"));
 
+        assertTrue(concurrentEngine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
+                20_000L, 1_800_000L, null, null, null, null, null, null,
+                60_000L, new BigDecimal("510"), 1, 3).accepted());
+        depthAt.set(System.currentTimeMillis());
+        assertEquals(3, concurrentEngine.getEffectiveEntryBookLevel());
+        assertEquals(0, new BigDecimal("0.5998").compareTo(ReflectionTestUtils.invokeMethod(
+                concurrentEngine, "entryPriceForStrategy", new BigDecimal("0.6000"), rule,
+                System.currentTimeMillis())));
+        coordinator.claimExistingSell("ENSOUSDT", "other", "Other");
+        coordinator.markActiveSellOrder("ENSOUSDT", "other", 101L);
+
         for (String mode : List.of("FEE_AWARE_MAKER", "BID_ASK_MAKER",
                 "BUY_PRICE_MAKER", "BREAK_EVEN_MAKER")) {
             assertTrue(("BID_ASK_MAKER".equals(mode)
@@ -453,6 +464,7 @@ class HighFrequencyVolumeChurnEngineTest {
     void concurrencyOverrideWaitsForFreshFourthBidAndPreservesMinuteMaGate() {
         SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
         coordinator.configureMaxConcurrentEntriesPerSymbol(2);
+        coordinator.markActiveSellOrder("ENSOUSDT", "other", 101L);
         HighFrequencyVolumeChurnEngine concurrentEngine = engineFor(
                 "account-a", "A", tradeService, coordinator);
         SymbolRuleManager.SymbolRule rule = ruleManager.getRule("ENSOUSDT");
@@ -489,6 +501,7 @@ class HighFrequencyVolumeChurnEngineTest {
     void concurrentBuyPriceStrategyActuallySubmitsFourthBidPrice() throws Exception {
         SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
         coordinator.configureMaxConcurrentEntriesPerSymbol(2);
+        coordinator.markActiveSellOrder("ENSOUSDT", "other", 101L);
         HighFrequencyVolumeChurnEngine concurrentEngine = engineFor(
                 "account-a", "A", tradeService, coordinator);
         assertTrue(concurrentEngine.switchStrategy("ENSOUSDT", "BUY_PRICE_MAKER",
@@ -508,6 +521,24 @@ class HighFrequencyVolumeChurnEngineTest {
 
         verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
                 decimalEquals("0.5997"), any(), isNull(), anyString());
+    }
+
+    @Test
+    void confirmedSellOrderControlsFourthBidUntilThatOrderIsCleared() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        coordinator.configureMaxConcurrentEntriesPerSymbol(2);
+        HighFrequencyVolumeChurnEngine seller = engineFor("account-a", "A", tradeService, coordinator);
+        HighFrequencyVolumeChurnEngine nextBuyer = engineFor("account-b", "B", tradeService, coordinator);
+        assertEquals(1, nextBuyer.getEffectiveEntryBookLevel());
+
+        ReflectionTestUtils.invokeMethod(seller, "trackOrder", 77L, "sell-77",
+                HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        assertEquals(4, nextBuyer.getEffectiveEntryBookLevel());
+        assertTrue(nextBuyer.isEntryBookLevelOverriddenByConcurrency());
+
+        ReflectionTestUtils.invokeMethod(seller, "clearActiveOrder");
+        assertEquals(1, nextBuyer.getEffectiveEntryBookLevel());
+        assertFalse(nextBuyer.isEntryBookLevelOverriddenByConcurrency());
     }
 
     @Test
@@ -1335,6 +1366,8 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(150_000L, ((AtomicLong) ReflectionTestUtils.getField(
                 engine, "activeOrderTimeoutMs")).get());
         assertTrue(engine.getStatusReason().get().contains("重启后已恢复本进程卖单"));
+        assertTrue(((SymbolTradeCoordinator) ReflectionTestUtils.getField(
+                engine, "symbolTradeCoordinator")).hasActiveSellOrder("ENSOUSDT"));
     }
 
     @Test

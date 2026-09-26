@@ -24,6 +24,7 @@ public final class SymbolTradeCoordinator {
     private final ReentrantLock lock = new ReentrantLock(true);
     private final Map<String, LinkedHashMap<String, Holder>> holdersBySymbol = new LinkedHashMap<>();
     private final Map<String, LinkedHashMap<String, Waiter>> waitersBySymbol = new LinkedHashMap<>();
+    private final Map<String, LinkedHashMap<String, Long>> activeSellOrdersBySymbol = new LinkedHashMap<>();
     private final Map<String, Integer> maxConcurrentEntriesBySymbol = new LinkedHashMap<>();
     private final Map<String, LastAccountActivity> lastAccountActivityBySymbol = new LinkedHashMap<>();
     private final AtomicInteger maxConcurrentEntriesPerSymbol = new AtomicInteger(1);
@@ -66,6 +67,46 @@ public final class SymbolTradeCoordinator {
         try {
             return maxConcurrentEntriesBySymbol.getOrDefault(
                     normalizedSymbol, maxConcurrentEntriesPerSymbol.get());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Only confirmed, locally managed SELL orders affect the next BUY's entry level. */
+    public boolean hasActiveSellOrder(String symbol) {
+        String normalizedSymbol = normalizeSymbol(symbol);
+        lock.lock();
+        try {
+            Map<String, Long> orders = activeSellOrdersBySymbol.get(normalizedSymbol);
+            return orders != null && !orders.isEmpty();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public void markActiveSellOrder(String symbol, String engineId, long orderId) {
+        String normalizedSymbol = normalizeSymbol(symbol);
+        String normalizedEngineId = normalizeEngineId(engineId);
+        if (normalizedSymbol.isBlank() || normalizedEngineId.isBlank() || orderId <= 0) return;
+        lock.lock();
+        try {
+            activeSellOrdersBySymbol.computeIfAbsent(normalizedSymbol,
+                    ignored -> new LinkedHashMap<>()).put(normalizedEngineId, orderId);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public void clearActiveSellOrder(String symbol, String engineId, Long orderId) {
+        String normalizedSymbol = normalizeSymbol(symbol);
+        String normalizedEngineId = normalizeEngineId(engineId);
+        if (normalizedSymbol.isBlank() || normalizedEngineId.isBlank() || orderId == null) return;
+        lock.lock();
+        try {
+            Map<String, Long> orders = activeSellOrdersBySymbol.get(normalizedSymbol);
+            if (orders == null) return;
+            orders.remove(normalizedEngineId, orderId);
+            if (orders.isEmpty()) activeSellOrdersBySymbol.remove(normalizedSymbol);
         } finally {
             lock.unlock();
         }
@@ -154,6 +195,25 @@ public final class SymbolTradeCoordinator {
             }
             if (current != null && current.phase() == Phase.SELLING) {
                 return new EntryPermit(false, normalizedSymbol + " 当前持仓正在卖出，不能再次买入");
+            }
+            if (current == null && holders.size() >= limit) {
+                waiters.putIfAbsent(normalizedEngineId, new Waiter(normalizedEngineId,
+                        displayAlias(normalizedEngineId, accountAlias), System.currentTimeMillis()));
+                return new EntryPermit(false, waitingReason(normalizedSymbol, normalizedEngineId,
+                        holders, waiters, limit));
+            }
+            Holder activeBuyer = holders.values().stream()
+                    .filter(holder -> holder.phase() == Phase.BUYING
+                            && !holder.engineId().equals(normalizedEngineId))
+                    .findFirst().orElse(null);
+            if (activeBuyer != null) {
+                if (current == null) {
+                    waiters.putIfAbsent(normalizedEngineId, new Waiter(normalizedEngineId,
+                            displayAlias(normalizedEngineId, accountAlias), System.currentTimeMillis()));
+                }
+                return new EntryPermit(false, normalizedSymbol + " 同币种已有买单或买单报单中："
+                        + activeBuyer.accountAlias() + "；一次只允许一张买单"
+                        + (current == null ? "；FIFO 排队第 " + queuePosition(waiters, normalizedEngineId) + " 位" : ""));
             }
             if (current != null && current.phase() == Phase.HOLDING) {
                 waiters.remove(normalizedEngineId);
@@ -245,6 +305,11 @@ public final class SymbolTradeCoordinator {
             LinkedHashMap<String, Waiter> waiters = waitersBySymbol.get(normalizedSymbol);
             if (holders != null) holders.remove(normalizedEngineId);
             if (waiters != null) waiters.remove(normalizedEngineId);
+            Map<String, Long> orders = activeSellOrdersBySymbol.get(normalizedSymbol);
+            if (orders != null) {
+                orders.remove(normalizedEngineId);
+                if (orders.isEmpty()) activeSellOrdersBySymbol.remove(normalizedSymbol);
+            }
             cleanupEmptyState(normalizedSymbol, holders, waiters);
         } finally {
             lock.unlock();

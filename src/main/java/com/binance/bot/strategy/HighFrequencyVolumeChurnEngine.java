@@ -571,6 +571,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (!openOrders.isEmpty()) {
             if (restoreActiveSellOrder(openOrders, runtimeState)) {
                 claimExistingSellSymbolTradeSlot(properties.getStrategy().getSymbol());
+                Long restoredSellOrderId = activeOrderId.get();
+                if (restoredSellOrderId != null) {
+                    symbolTradeCoordinator.markActiveSellOrder(properties.getStrategy().getSymbol(),
+                            accountEngineKey, restoredSellOrderId);
+                }
                 return true;
             }
             halt("发现未由本进程恢复的活动订单，需先人工对账");
@@ -2348,6 +2353,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         activeOrderTimeoutMs.set(randomizedTimeoutMs(status == ChurnStatus.BUYING
                 ? entryOrderTimeoutMs() : exitOrderTimeoutMs()));
         currentStatus.set(status);
+        if (status == ChurnStatus.SELLING) {
+            symbolTradeCoordinator.markActiveSellOrder(properties.getStrategy().getSymbol(),
+                    accountEngineKey, orderId);
+        }
         persistRuntimeState(true);
         if (currentStatus.get() != ChurnStatus.HALTED) scheduleOrderReconciliation(orderId);
     }
@@ -2493,6 +2502,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     private void clearActiveOrder() {
         Long orderId = activeOrderId.getAndSet(null);
+        symbolTradeCoordinator.clearActiveSellOrder(properties.getStrategy().getSymbol(), accountEngineKey,
+                orderId);
         if (orderId != null) knownOrderIds.remove(orderId);
         if (orderId != null) tradeReconcileFailures.remove(orderId);
         String clientOrderId = activeClientOrderId.getAndSet(null);
@@ -3531,12 +3542,15 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     public int getEffectiveEntryBookLevel() {
         String symbol = properties.getStrategy().getSymbol();
-        if (symbolTradeCoordinator.maxConcurrentEntriesPerSymbol(symbol) > 1) return 4;
+        if (symbolTradeCoordinator.maxConcurrentEntriesPerSymbol(symbol) > 1
+                && symbolTradeCoordinator.hasActiveSellOrder(symbol)) return 4;
         return usesBidAskMakerStrategy() ? bidAskEntryBookLevel() : 1;
     }
 
     public boolean isEntryBookLevelOverriddenByConcurrency() {
-        return symbolTradeCoordinator.maxConcurrentEntriesPerSymbol(properties.getStrategy().getSymbol()) > 1;
+        String symbol = properties.getStrategy().getSymbol();
+        return symbolTradeCoordinator.maxConcurrentEntriesPerSymbol(symbol) > 1
+                && symbolTradeCoordinator.hasActiveSellOrder(symbol);
     }
 
     private String effectiveEntryBookLevelLabel() {
