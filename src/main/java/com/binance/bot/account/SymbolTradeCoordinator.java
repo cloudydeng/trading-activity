@@ -1,7 +1,11 @@
 package com.binance.bot.account;
 
+import com.binance.bot.strategy.DailyTradeStatsStore;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.math.BigDecimal;
+import java.math.MathContext;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -17,6 +21,8 @@ import java.util.concurrent.locks.ReentrantLock;
 @Component
 public final class SymbolTradeCoordinator {
     private static final long CROSS_ACCOUNT_BUY_GAP_MS = 2_000L;
+    private static final BigDecimal MAX_BUY_PRICE_GAP = new BigDecimal("0.005");
+    private static final long BUY_PRICE_GAP_MAX_WAIT_MS = 3_600_000L;
     /**
      * Fair lock defines the ordering of truly concurrent first requests; the per-symbol
      * waiting maps below preserve that order across later retries.
@@ -27,7 +33,19 @@ public final class SymbolTradeCoordinator {
     private final Map<String, LinkedHashMap<String, Long>> activeSellOrdersBySymbol = new LinkedHashMap<>();
     private final Map<String, Integer> maxConcurrentEntriesBySymbol = new LinkedHashMap<>();
     private final Map<String, LastAccountActivity> lastAccountActivityBySymbol = new LinkedHashMap<>();
+    private final Map<String, LastBuyFill> lastBuyFillBySymbol = new LinkedHashMap<>();
+    private final Map<String, Long> buyPriceGapWaitStartedBySymbol = new LinkedHashMap<>();
     private final AtomicInteger maxConcurrentEntriesPerSymbol = new AtomicInteger(1);
+    private final DailyTradeStatsStore priceGapStateStore;
+
+    public SymbolTradeCoordinator() {
+        this(null);
+    }
+
+    @Autowired
+    public SymbolTradeCoordinator(DailyTradeStatsStore priceGapStateStore) {
+        this.priceGapStateStore = priceGapStateStore;
+    }
 
     public void configureMaxConcurrentEntriesPerSymbol(int value) {
         int normalized = Math.max(0, Math.min(20, value));
@@ -70,6 +88,92 @@ public final class SymbolTradeCoordinator {
         } finally {
             lock.unlock();
         }
+    }
+
+    /** Restores the durable reference without resetting an already-running wait window. */
+    public void restoreBuyFill(String symbol, BigDecimal price, long tradeTimeMs) {
+        updateBuyFill(symbol, price, tradeTimeMs, false);
+    }
+
+    /** Accepted BUY fills, never unfilled orders, provide the reference across all API keys. */
+    public void recordBuyFill(String symbol, BigDecimal price, long tradeTimeMs) {
+        updateBuyFill(symbol, price, tradeTimeMs, true);
+    }
+
+    private void updateBuyFill(String symbol, BigDecimal price, long tradeTimeMs, boolean newFill) {
+        String normalizedSymbol = normalizeSymbol(symbol);
+        if (normalizedSymbol.isBlank() || price == null || price.signum() <= 0 || tradeTimeMs <= 0) return;
+        lock.lock();
+        try {
+            LastBuyFill previous = lastBuyFillBySymbol.get(normalizedSymbol);
+            if (previous == null || tradeTimeMs >= previous.tradeTimeMs()) {
+                lastBuyFillBySymbol.put(normalizedSymbol, new LastBuyFill(price, tradeTimeMs));
+                if (newFill) {
+                    buyPriceGapWaitStartedBySymbol.put(normalizedSymbol, 0L);
+                }
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public PriceGapPermit checkBuyPriceGap(String symbol, BigDecimal candidatePrice) {
+        return checkBuyPriceGap(symbol, candidatePrice, System.currentTimeMillis());
+    }
+
+    PriceGapPermit checkBuyPriceGap(String symbol, BigDecimal candidatePrice, long nowMs) {
+        String normalizedSymbol = normalizeSymbol(symbol);
+        if (normalizedSymbol.isBlank() || candidatePrice == null || candidatePrice.signum() <= 0) {
+            return new PriceGapPermit(false, "买入价格无效");
+        }
+        lock.lock();
+        try {
+            LastBuyFill previous = lastBuyFillBySymbol.get(normalizedSymbol);
+            if (previous == null) {
+                clearBuyPriceGapWait(normalizedSymbol);
+                return new PriceGapPermit(true, "");
+            }
+            BigDecimal difference = candidatePrice.subtract(previous.price()).abs();
+            if (difference.compareTo(previous.price().multiply(MAX_BUY_PRICE_GAP)) <= 0) {
+                clearBuyPriceGapWait(normalizedSymbol);
+                return new PriceGapPermit(true, "");
+            }
+            long waitStartedAtMs = buyPriceGapWaitStartedAt(normalizedSymbol);
+            if (waitStartedAtMs == 0) {
+                waitStartedAtMs = nowMs;
+                if (priceGapStateStore != null) {
+                    priceGapStateStore.saveBuyPriceGapWaitStartedAt(normalizedSymbol, waitStartedAtMs);
+                }
+                buyPriceGapWaitStartedBySymbol.put(normalizedSymbol, waitStartedAtMs);
+            }
+            long elapsedMs = Math.max(0L, nowMs - waitStartedAtMs);
+            if (elapsedMs >= BUY_PRICE_GAP_MAX_WAIT_MS) return new PriceGapPermit(true, "");
+            BigDecimal gap = difference.divide(previous.price(), MathContext.DECIMAL64);
+            long remainingSeconds = Math.max(1L,
+                    (BUY_PRICE_GAP_MAX_WAIT_MS - elapsedMs + 999L) / 1_000L);
+            return new PriceGapPermit(false, normalizedSymbol + " 暂停新买入：当前候选买价 "
+                    + candidatePrice.stripTrailingZeros().toPlainString() + " 与上次 BUY 成交价 "
+                    + previous.price().stripTrailingZeros().toPlainString() + " 相差 "
+                    + gap.movePointRight(2).setScale(2, java.math.RoundingMode.HALF_UP).toPlainString()
+                    + "%（超过 0.5%）；价差回到范围内或约 " + remainingSeconds + " 秒后恢复");
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private long buyPriceGapWaitStartedAt(String symbol) {
+        Long cached = buyPriceGapWaitStartedBySymbol.get(symbol);
+        if (cached != null) return cached;
+        long startedAtMs = priceGapStateStore == null ? 0L
+                : priceGapStateStore.loadBuyPriceGapWaitStartedAt(symbol).orElse(0L);
+        buyPriceGapWaitStartedBySymbol.put(symbol, startedAtMs);
+        return startedAtMs;
+    }
+
+    private void clearBuyPriceGapWait(String symbol) {
+        if (buyPriceGapWaitStartedAt(symbol) == 0L) return;
+        if (priceGapStateStore != null) priceGapStateStore.clearBuyPriceGapWait(symbol);
+        buyPriceGapWaitStartedBySymbol.put(symbol, 0L);
     }
 
     /** Only confirmed, locally managed SELL orders affect the next BUY's entry level. */
@@ -417,6 +521,8 @@ public final class SymbolTradeCoordinator {
     public enum Phase { BUYING, HOLDING, SELLING }
     public record EntryPermit(boolean accepted, String reason) { }
     public record BuyPacePermit(boolean allowed, long retryAfterMs, String reason) { }
+    public record PriceGapPermit(boolean allowed, String reason) { }
+    private record LastBuyFill(BigDecimal price, long tradeTimeMs) { }
     private record LastAccountActivity(String accountId, long atMs) { }
     public record Holder(String engineId, String accountAlias, Phase phase,
                          long acquiredAtMs, long phaseChangedAtMs) { }

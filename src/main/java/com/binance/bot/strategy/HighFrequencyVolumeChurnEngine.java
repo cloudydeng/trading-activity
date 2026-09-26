@@ -213,6 +213,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 ? new AccountRiskCoordinator() : accountRiskCoordinator;
         this.symbolTradeCoordinator = symbolTradeCoordinator == null
                 ? new SymbolTradeCoordinator() : symbolTradeCoordinator;
+        var lastBuyFill = dailyStatsStore.latestBuyFill(properties.getStrategy().getSymbol());
+        if (lastBuyFill != null) {
+            lastBuyFill.ifPresent(fill -> this.symbolTradeCoordinator.restoreBuyFill(
+                    properties.getStrategy().getSymbol(), fill.price(), fill.tradeTimeMs()));
+        }
         this.accountRiskCoordinator.register(accountEngineKey, riskGuard::snapshot, accountRiskReconciled::get);
         if (properties.getStrategy().getSymbolStrategies() != null) {
             properties.getStrategy().getSymbolStrategies().forEach((symbol, profile) -> {
@@ -1317,6 +1322,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             log.error("[accountId={} alias={}] 未关联成交写入每日统计失败: orderId={} tradeId={}",
                     accountId, accountAlias, update.orderId(), update.tradeId());
         } else {
+            if (result == DailyTradeStatsStore.RecordResult.APPLIED && "BUY".equalsIgnoreCase(update.side())) {
+                symbolTradeCoordinator.recordBuyFill(update.symbol(), price,
+                        update.eventTime() > 0 ? update.eventTime() : System.currentTimeMillis());
+            }
             syncDailyCounters();
         }
     }
@@ -1366,6 +1375,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 quoteQuantity, notificationEntryPrice, notificationEntryQuote, notificationEntryTime,
                 commission, commissionAsset, tradeTimeMs));
         if ("BUY".equalsIgnoreCase(side)) {
+            symbolTradeCoordinator.recordBuyFill(properties.getStrategy().getSymbol(), price,
+                    tradeTimeMs > 0 ? tradeTimeMs : System.currentTimeMillis());
             BigDecimal submittedBuyPrice = activeOrderPrice.get();
             previousBuyOrderPrice.set(submittedBuyPrice != null && submittedBuyPrice.signum() > 0
                     ? submittedBuyPrice : price);
@@ -2076,6 +2087,15 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private void submitMakerOrder(String symbol, String side, BigDecimal price, BigDecimal qty,
                                   Long cancelOrderId, ChurnStatus status) {
         boolean buy = "BUY".equalsIgnoreCase(side);
+        if (buy) {
+            // Another account may have filled after this engine calculated its candidate price.
+            SymbolTradeCoordinator.PriceGapPermit priceGap = symbolTradeCoordinator.checkBuyPriceGap(symbol, price);
+            if (!priceGap.allowed()) {
+                statusReason.set(priceGap.reason());
+                releasePacedEntrySlotIfFlat();
+                return;
+            }
+        }
         SymbolTradeCoordinator.EntryPermit symbolPermit = buy ? acquireSymbolTradeSlot(symbol) : null;
         if (buy && !symbolPermit.accepted()) {
             nextOrderAttemptAt.set(System.currentTimeMillis() + 1_000);
@@ -2731,7 +2751,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                         + " " + baseAsset(target) + "，成本未知，拒绝自动接管");
             }
 
+        java.util.Optional<DailyTradeStatsStore.BuyFillReference> lastTargetBuyFill;
         try {
+            lastTargetBuyFill = dailyStatsStore.latestBuyFill(target);
             dailyStatsStore.clearRuntimeState(accountId, current);
             dailyStatsStore.saveActiveSymbol(accountId, target);
         } catch (RuntimeException e) {
@@ -2739,6 +2761,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return SymbolSwitchResult.rejected(current, "无法持久化目标交易对，已保持原交易对");
         }
         properties.getStrategy().setSymbol(target);
+        if (lastTargetBuyFill != null) {
+            lastTargetBuyFill.ifPresent(fill -> symbolTradeCoordinator.restoreBuyFill(
+                    target, fill.price(), fill.tradeTimeMs()));
+        }
         clearTrackedOrders();
         resetEntryTarget();
         accountingLedger.reset();
@@ -3648,6 +3674,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 : PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(BigDecimal.valueOf(
                 properties.getStrategy().getBidDepthOffsetTicks()))), rule.tickSize());
         if (!buyBelowMinuteMa7(price, nowMs)) return null;
+        SymbolTradeCoordinator.PriceGapPermit priceGap = symbolTradeCoordinator.checkBuyPriceGap(
+                properties.getStrategy().getSymbol(), price);
+        if (!priceGap.allowed()) {
+            statusReason.set(priceGap.reason());
+            return null;
+        }
         if (usesFeeAwareMakerStrategy() && !feeAwareEntryAllowedByAnchor(price, rule)) {
             statusReason.set(feeAwareAnchorWaitMessage(price, rule, "等待价格回落或等待时间满足后再挂买单"));
             return null;
@@ -3978,6 +4010,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     trade.path("id").asLong(-1), side, inventoryQuantity, quantity, price, quote,
                     commission, commissionAsset, commissionQuote, economicFeeQuote, tradeTime);
             if (stored == DailyTradeStatsStore.RecordResult.FAILED) return null;
+            if (stored == DailyTradeStatsStore.RecordResult.APPLIED && "BUY".equals(side)) {
+                symbolTradeCoordinator.recordBuyFill(symbol, price, tradeTime);
+            }
         }
 
         SymbolRuleManager.SymbolRule rule = ruleManager.getRule(symbol);
@@ -4169,10 +4204,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 ? ("BUY".equals(side) ? quantity.subtract(commission).max(BigDecimal.ZERO) : quantity.add(commission))
                 : quantity;
         BigDecimal economicFeeQuote = baseCommission ? BigDecimal.ZERO : commissionQuote;
-        dailyStatsStore.recordTrade(accountId, accountAlias, symbol,
+        DailyTradeStatsStore.RecordResult result = dailyStatsStore.recordTrade(accountId, accountAlias, symbol,
                 trade.path("orderId").asLong(-1), trade.path("id").asLong(-1), side,
                 inventoryQuantity, quantity, price, quote, commission, commissionAsset,
                 commissionQuote, economicFeeQuote, tradeTime);
+        if (result == DailyTradeStatsStore.RecordResult.APPLIED && "BUY".equals(side)) {
+            symbolTradeCoordinator.recordBuyFill(symbol, price, tradeTime);
+        }
     }
 
     private RemoteTodayStatusSnapshot localTodayStatusSnapshot(long nowMs) {

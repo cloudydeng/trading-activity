@@ -44,6 +44,8 @@ public class DailyTradeStatsStore {
     private static final String RUNTIME_STATE_PREFIX = "runtime_state:";
     private static final String ACCOUNT_SYMBOLS_PREFIX = "account_symbols:";
     private static final String TRADING_RUNTIME_SETTINGS_KEY = "trading_runtime_settings";
+    private static final String LAST_BUY_FILL_PREFIX = "last_buy_fill:";
+    private static final String BUY_PRICE_GAP_WAIT_PREFIX = "buy_price_gap_wait:";
     private static final int TRADE_FILL_RETENTION_DAYS = 10;
     private static final int SYMBOL_FILL_ROW_LIMIT = 2000;
 
@@ -471,6 +473,13 @@ public class DailyTradeStatsStore {
                 applyTrade(stats, side, inventoryQuantity, quoteQuantity, commission,
                         commissionQuoteEquivalent, economicFeeQuote);
                 upsert(stats);
+                if ("BUY".equalsIgnoreCase(side)) {
+                    if (saveLastBuyFill(normalizedSymbol, price,
+                            tradeTimeMs > 0 ? tradeTimeMs : System.currentTimeMillis())) {
+                        deleteSetting(BUY_PRICE_GAP_WAIT_PREFIX + normalizedSymbol,
+                                "清理买入价差等待时间失败");
+                    }
+                }
                 connection.commit();
                 return RecordResult.APPLIED;
             } catch (Exception e) {
@@ -516,6 +525,80 @@ public class DailyTradeStatsStore {
             statement.setLong(i, tradeTimeMs > 0 ? tradeTimeMs : System.currentTimeMillis());
             statement.executeUpdate();
         }
+    }
+
+    /** Durable, cross-account reference; an older reconciled fill cannot replace a newer one. */
+    private boolean saveLastBuyFill(String symbol, BigDecimal price, long tradeTimeMs) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                INSERT INTO runtime_setting(setting_key, setting_value, updated_at) VALUES(?, ?, ?)
+                ON CONFLICT(setting_key) DO UPDATE SET
+                  setting_value=excluded.setting_value, updated_at=excluded.updated_at
+                WHERE runtime_setting.updated_at <= excluded.updated_at
+                """)) {
+            statement.setString(1, LAST_BUY_FILL_PREFIX + symbol);
+            statement.setString(2, price.toPlainString());
+            statement.setLong(3, tradeTimeMs);
+            return statement.executeUpdate() > 0;
+        }
+    }
+
+    public java.util.Optional<BuyFillReference> latestBuyFill(String symbol) {
+        String normalizedSymbol = normalizeSymbol(symbol);
+        return withLock(() -> {
+            BuyFillReference saved = null;
+            try (PreparedStatement setting = connection.prepareStatement(
+                    "SELECT setting_value, updated_at FROM runtime_setting WHERE setting_key=?")) {
+                setting.setString(1, LAST_BUY_FILL_PREFIX + normalizedSymbol);
+                try (ResultSet row = setting.executeQuery()) {
+                    if (row.next()) saved = new BuyFillReference(
+                            new BigDecimal(row.getString(1)), row.getLong(2));
+                }
+            } catch (SQLException e) {
+                throw new IllegalStateException("读取最近买入成交价失败", e);
+            }
+            // Existing deployments have fill rows but no scalar reference yet; historical
+            // reconciliation must also never make the scalar older than the retained fills.
+            try (PreparedStatement fills = connection.prepareStatement("""
+                    SELECT price, trade_time FROM trade_fill
+                    WHERE symbol=? AND side='BUY'
+                    ORDER BY trade_time DESC, trade_id DESC LIMIT 1
+                    """)) {
+                fills.setString(1, normalizedSymbol);
+                try (ResultSet row = fills.executeQuery()) {
+                    if (row.next() && (saved == null || row.getLong(2) > saved.tradeTimeMs())) {
+                        saved = new BuyFillReference(new BigDecimal(row.getString(1)), row.getLong(2));
+                        saveLastBuyFill(normalizedSymbol, saved.price(), saved.tradeTimeMs());
+                    }
+                    return java.util.Optional.ofNullable(saved);
+                }
+            } catch (SQLException e) {
+                throw new IllegalStateException("读取最近买入成交价失败", e);
+            }
+        });
+    }
+
+    public java.util.OptionalLong loadBuyPriceGapWaitStartedAt(String symbol) {
+        String key = BUY_PRICE_GAP_WAIT_PREFIX + normalizeSymbol(symbol);
+        return withLock(() -> {
+            try {
+                java.util.Optional<String> value = loadSetting(key);
+                return value.isPresent() ? java.util.OptionalLong.of(Long.parseLong(value.get()))
+                        : java.util.OptionalLong.empty();
+            } catch (SQLException | NumberFormatException e) {
+                throw new IllegalStateException("读取买入价差等待时间失败", e);
+            }
+        });
+    }
+
+    public void saveBuyPriceGapWaitStartedAt(String symbol, long startedAtMs) {
+        if (startedAtMs <= 0) throw new IllegalArgumentException("买入价差等待开始时间无效");
+        String key = BUY_PRICE_GAP_WAIT_PREFIX + normalizeSymbol(symbol);
+        withLock(() -> saveSetting(key, Long.toString(startedAtMs), "保存买入价差等待时间失败"));
+    }
+
+    public void clearBuyPriceGapWait(String symbol) {
+        String key = BUY_PRICE_GAP_WAIT_PREFIX + normalizeSymbol(symbol);
+        withLock(() -> deleteSetting(key, "清理买入价差等待时间失败"));
     }
 
     public java.util.OptionalLong latestTradeId(String accountId, String symbol, LocalDate date) {
@@ -1318,6 +1401,8 @@ public class DailyTradeStatsStore {
                              BigDecimal price, BigDecimal quantity, BigDecimal quoteQuantity,
                              BigDecimal commission, String commissionAsset,
                              long tradeTimeMs, LocalDate tradeDate) { }
+
+    public record BuyFillReference(BigDecimal price, long tradeTimeMs) { }
 
     public record RuntimeState(String accountId, String symbol, String status, Long orderId,
                                String clientOrderId, String side, BigDecimal orderPrice,

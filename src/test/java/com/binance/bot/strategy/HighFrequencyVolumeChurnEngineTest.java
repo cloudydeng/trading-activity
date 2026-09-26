@@ -397,6 +397,32 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void everyMakerStrategyWaitsWhenCandidateDiffersFromPreviousSymbolBuyFillByMoreThanHalfPercent() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        coordinator.recordBuyFill("ENSOUSDT", new BigDecimal("0.6000"), System.currentTimeMillis());
+        HighFrequencyVolumeChurnEngine nextAccount = engineFor("account-b", "B", tradeService, coordinator);
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule("ENSOUSDT");
+        when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong()))
+                .thenReturn(new BigDecimal("1"));
+        when(marketSignalEvaluator.getBreakEvenReferencePrice(anyLong(), anyLong()))
+                .thenReturn(new BigDecimal("1"));
+        for (String mode : List.of("FEE_AWARE_MAKER", "BID_ASK_MAKER",
+                "BUY_PRICE_MAKER", "BREAK_EVEN_MAKER")) {
+            assertTrue(nextAccount.switchStrategy("ENSOUSDT", mode, new BigDecimal("6"),
+                    20_000L, 1_800_000L).accepted());
+            assertNull(ReflectionTestUtils.invokeMethod(nextAccount, "entryPriceForStrategy",
+                    new BigDecimal("0.5969"), rule, System.currentTimeMillis()), mode);
+            assertTrue(nextAccount.getStatusReason().get().contains("超过 0.5%"), mode);
+            assertNull(ReflectionTestUtils.invokeMethod(nextAccount, "entryPriceForStrategy",
+                    new BigDecimal("0.6031"), rule, System.currentTimeMillis()), mode);
+            assertTrue(nextAccount.getStatusReason().get().contains("超过 0.5%"), mode);
+            assertEquals(0, new BigDecimal("0.6030").compareTo(ReflectionTestUtils.invokeMethod(
+                    nextAccount, "entryPriceForStrategy", new BigDecimal("0.6030"), rule,
+                    System.currentTimeMillis())), mode);
+        }
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void everyStrategyUsesFourthBidWhenEffectiveSymbolConcurrencyExceedsOne() {
         SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
@@ -1742,7 +1768,7 @@ class HighFrequencyVolumeChurnEngineTest {
         orderUpdate(42L, "churn-BUY-1", "BUY", "CANCELED", "CANCELED",
                 "0", "0", "0", "USDT");
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
-                new BigDecimal("0.862"), new BigDecimal("0.863"));
+                new BigDecimal("0.601"), new BigDecimal("0.602"));
 
         assertEquals(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING, engine.getCurrentStatus().get());
         assertTrue(engine.getSellabilitySnapshot().dustReason()

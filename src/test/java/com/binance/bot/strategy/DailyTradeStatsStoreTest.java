@@ -19,6 +19,67 @@ class DailyTradeStatsStoreTest {
     @TempDir Path tempDir;
 
     @Test
+    void remembersLatestBuyFillAcrossAccountsRestartAndOlderReconciliation() {
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
+        long now = System.currentTimeMillis();
+        assertEquals(true, store.latestBuyFill("BABYUSDT").isEmpty());
+        assertEquals(DailyTradeStatsStore.RecordResult.APPLIED, store.recordTrade(
+                "account-a", "A", "BABYUSDT", 1, 11, "BUY", BigDecimal.ONE,
+                BigDecimal.ONE, new BigDecimal("0.01340"), new BigDecimal("0.01340"),
+                BigDecimal.ZERO, "USDT", BigDecimal.ZERO, BigDecimal.ZERO, now - 1_000));
+        assertEquals(DailyTradeStatsStore.RecordResult.APPLIED, store.recordTrade(
+                "account-b", "B", "BABYUSDT", 2, 12, "BUY", BigDecimal.ONE,
+                BigDecimal.ONE, new BigDecimal("0.01333"), new BigDecimal("0.01333"),
+                BigDecimal.ZERO, "USDT", BigDecimal.ZERO, BigDecimal.ZERO, now));
+        store.saveBuyPriceGapWaitStartedAt("BABYUSDT", now);
+        assertEquals(DailyTradeStatsStore.RecordResult.APPLIED, store.recordTrade(
+                "account-c", "C", "BABYUSDT", 3, 13, "BUY", BigDecimal.ONE,
+                BigDecimal.ONE, new BigDecimal("0.01200"), new BigDecimal("0.01200"),
+                BigDecimal.ZERO, "USDT", BigDecimal.ZERO, BigDecimal.ZERO, now - 500));
+        assertDecimal("0.01333", store.latestBuyFill("BABYUSDT").orElseThrow().price());
+        assertEquals(now, store.latestBuyFill("BABYUSDT").orElseThrow().tradeTimeMs());
+        assertEquals(now, store.loadBuyPriceGapWaitStartedAt("BABYUSDT").orElseThrow());
+        store.close();
+
+        DailyTradeStatsStore restarted = new DailyTradeStatsStore(properties());
+        assertDecimal("0.01333", restarted.latestBuyFill("babyusdt").orElseThrow().price());
+        assertEquals(true, restarted.latestBuyFill("VTHOUSDT").isEmpty());
+        assertEquals(now, restarted.loadBuyPriceGapWaitStartedAt("BABYUSDT").orElseThrow());
+        assertEquals(DailyTradeStatsStore.RecordResult.APPLIED, restarted.recordTrade(
+                "account-d", "D", "BABYUSDT", 4, 14, "BUY", BigDecimal.ONE,
+                BigDecimal.ONE, new BigDecimal("0.01335"), new BigDecimal("0.01335"),
+                BigDecimal.ZERO, "USDT", BigDecimal.ZERO, BigDecimal.ZERO, now + 1_000));
+        assertEquals(true, restarted.loadBuyPriceGapWaitStartedAt("BABYUSDT").isEmpty());
+        restarted.close();
+    }
+
+    @Test
+    void upgradesExistingBuyFillRowsToDurablePriceReference() throws Exception {
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
+        long now = System.currentTimeMillis();
+        assertEquals(DailyTradeStatsStore.RecordResult.APPLIED, store.recordTrade(
+                "account-a", "A", "BABYUSDT", 1, 11, "BUY", BigDecimal.ONE,
+                BigDecimal.ONE, new BigDecimal("0.01340"), new BigDecimal("0.01340"),
+                BigDecimal.ZERO, "USDT", BigDecimal.ZERO, BigDecimal.ZERO, now));
+        store.close();
+        try (var connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + tempDir.resolve("daily.db"))) {
+            connection.createStatement().executeUpdate(
+                    "DELETE FROM runtime_setting WHERE setting_key='last_buy_fill:BABYUSDT'");
+        }
+        DailyTradeStatsStore upgraded = new DailyTradeStatsStore(properties());
+        assertDecimal("0.01340", upgraded.latestBuyFill("BABYUSDT").orElseThrow().price());
+        upgraded.close();
+        try (var connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + tempDir.resolve("daily.db"));
+             var rows = connection.createStatement().executeQuery(
+                     "SELECT setting_value FROM runtime_setting WHERE setting_key='last_buy_fill:BABYUSDT'")) {
+            assertEquals(true, rows.next());
+            assertEquals("0.01340", rows.getString(1));
+        }
+    }
+
+    @Test
     void persistsNormalizedAccountSymbolsAcrossRestart() {
         BinanceProperties properties = properties();
         DailyTradeStatsStore first = new DailyTradeStatsStore(properties);

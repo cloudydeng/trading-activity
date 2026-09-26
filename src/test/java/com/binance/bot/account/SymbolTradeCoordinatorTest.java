@@ -1,7 +1,12 @@
 package com.binance.bot.account;
 
+import com.binance.bot.config.BinanceProperties;
+import com.binance.bot.strategy.DailyTradeStatsStore;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.math.BigDecimal;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
@@ -10,6 +15,59 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SymbolTradeCoordinatorTest {
+    @TempDir Path tempDir;
+
+    @Test
+    void priceGapWaitExpiresAtOneHourAndSurvivesRestartButResetsOnReentry() {
+        BinanceProperties properties = new BinanceProperties();
+        properties.getStorage().setDailyStatsDb(tempDir.resolve("daily.db").toString());
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties);
+        long now = System.currentTimeMillis();
+        assertEquals(DailyTradeStatsStore.RecordResult.APPLIED, store.recordTrade(
+                "account-a", "A", "BABYUSDT", 1, 11, "BUY", BigDecimal.ONE,
+                BigDecimal.ONE, new BigDecimal("0.6000"), new BigDecimal("0.6000"),
+                BigDecimal.ZERO, "USDT", BigDecimal.ZERO, BigDecimal.ZERO, now - 1_000L));
+        SymbolTradeCoordinator first = new SymbolTradeCoordinator(store);
+        var reference = store.latestBuyFill("BABYUSDT").orElseThrow();
+        first.restoreBuyFill("BABYUSDT", reference.price(), reference.tradeTimeMs());
+
+        assertFalse(first.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.6031"), now).allowed());
+        assertEquals(now, store.loadBuyPriceGapWaitStartedAt("BABYUSDT").orElseThrow());
+        assertFalse(first.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.5969"),
+                now + 3_599_999L).allowed());
+
+        SymbolTradeCoordinator restarted = new SymbolTradeCoordinator(store);
+        restarted.restoreBuyFill("BABYUSDT", reference.price(), reference.tradeTimeMs());
+        assertTrue(restarted.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.5969"),
+                now + 3_600_000L).allowed());
+        assertTrue(restarted.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.6030"),
+                now + 3_600_001L).allowed());
+        assertTrue(store.loadBuyPriceGapWaitStartedAt("BABYUSDT").isEmpty());
+        assertFalse(restarted.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.6031"),
+                now + 3_600_002L).allowed());
+        assertEquals(now + 3_600_002L,
+                store.loadBuyPriceGapWaitStartedAt("BABYUSDT").orElseThrow());
+        store.close();
+    }
+
+    @Test
+    void crossAccountBuyFillBlocksBothPriceDirectionsOnlyBeyondHalfPercent() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        assertTrue(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01330")).allowed());
+        coordinator.recordBuyFill("babyusdt", new BigDecimal("0.01340"), 1_000L);
+
+        assertTrue(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01333300")).allowed());
+        assertTrue(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01346700")).allowed());
+        assertFalse(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01333299")).allowed());
+        assertFalse(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01346701")).allowed());
+        assertTrue(coordinator.checkBuyPriceGap("VTHOUSDT", new BigDecimal("0.00100")).allowed());
+
+        coordinator.recordBuyFill("BABYUSDT", new BigDecimal("0.01200"), 999L);
+        assertFalse(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01333299")).allowed());
+        coordinator.recordBuyFill("BABYUSDT", new BigDecimal("0.01333"), 1_001L);
+        assertTrue(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01333299")).allowed());
+    }
+
     @Test
     void spacesDifferentAccountsBuySubmissionsPerSymbolWithoutDelayingSameAccount() {
         SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
