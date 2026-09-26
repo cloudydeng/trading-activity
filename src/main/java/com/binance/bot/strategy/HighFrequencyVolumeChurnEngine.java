@@ -68,6 +68,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final SymbolRuleManager ruleManager;
     private final BooleanSupplier accountStreamReady;
     private final MarketSignalEvaluator marketSignalEvaluator;
+    private final MarketActivityTracker marketActivityTracker = new MarketActivityTracker();
     private final PostFillOutcomeTracker postFillOutcomeTracker;
     private final TradingRiskGuard riskGuard;
     private final DailyTradeStatsStore dailyStatsStore;
@@ -417,6 +418,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         transientMarketRecoveryPending.set(false);
         preMarketRecoveryStatusReason.set(null);
         marketSignalEvaluator.reset();
+        marketActivityTracker.reset();
         latestBidDepthPrices.set(List.of());
         lastDepthDataTimestamp.set(0);
         log.warn("[accountId={} alias={}] 行情流不可用: {}", accountId, accountAlias, reason);
@@ -436,6 +438,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return;
         }
         marketSignalEvaluator.reset();
+        marketActivityTracker.reset();
         latestBidDepthPrices.set(List.of());
         lastDepthDataTimestamp.set(0);
         lastMarketDataTimestamp.set(0);
@@ -1026,7 +1029,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 marketSignalEvaluator.recordQuote(bid, bidQty, ask, askQty, now, properties.getStrategy());
                 if (isRunning.get()) driveChurnStateMachine(bid, ask);
             } else if (node.has("q") && node.has("m")) {
-                marketSignalEvaluator.recordAggTrade(new BigDecimal(node.get("q").asText()), node.get("m").asBoolean(), System.currentTimeMillis(), properties.getStrategy());
+                long now = System.currentTimeMillis();
+                BigDecimal quantity = new BigDecimal(node.get("q").asText());
+                boolean buyerIsMaker = node.get("m").asBoolean();
+                marketSignalEvaluator.recordAggTrade(quantity, buyerIsMaker, now, properties.getStrategy());
+                marketActivityTracker.recordTrade(new BigDecimal(node.get("p").asText()), quantity, buyerIsMaker, now);
             } else if ((node.has("bids") && node.has("asks")) || (node.has("b") && node.has("a"))) {
                 // Binance depth payloads use bids/asks on partial-depth streams and b/a on diff-depth streams.
                 JsonNode bids = node.has("bids") ? node.get("bids") : node.get("b");
@@ -1149,10 +1156,10 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     }
                     if (orderPrice != null && orderPrice.compareTo(currentEntryPrice) == 0) {
                         statusReason.set("Maker 买单已满 " + durationLabel(makerTimeoutMs)
-                                + " 但仍处于" + configuredEntryBookLevelLabel() + "，继续挂单 @ "
+                                + " 但仍处于" + effectiveEntryBookLevelLabel() + "，继续挂单 @ "
                                 + orderPrice.toPlainString());
                     } else {
-                        cancelActiveEntryOrder("Maker 买单已不在" + configuredEntryBookLevelLabel()
+                        cancelActiveEntryOrder("Maker 买单已不在" + effectiveEntryBookLevelLabel()
                                 + "，撤单等待重新挂单（不转 IOC）", true);
                     }
                 }
@@ -2726,6 +2733,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         accountingLedger.reset();
         riskGuard.resetForFlatSymbol();
         marketSignalEvaluator.reset();
+        marketActivityTracker.reset();
         postFillOutcomeTracker.reset();
         holdingInventory.set(BigDecimal.ZERO);
         activeSellCoveredQty.set(BigDecimal.ZERO);
@@ -3521,21 +3529,32 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return level == null ? 1 : Math.max(1, Math.min(5, level));
     }
 
-    private String configuredEntryBookLevelLabel() {
-        return usesBidAskMakerStrategy() ? "买" + bidAskEntryBookLevel() : "买一";
+    public int getEffectiveEntryBookLevel() {
+        String symbol = properties.getStrategy().getSymbol();
+        if (symbolTradeCoordinator.maxConcurrentEntriesPerSymbol(symbol) > 1) return 4;
+        return usesBidAskMakerStrategy() ? bidAskEntryBookLevel() : 1;
+    }
+
+    public boolean isEntryBookLevelOverriddenByConcurrency() {
+        return symbolTradeCoordinator.maxConcurrentEntriesPerSymbol(properties.getStrategy().getSymbol()) > 1;
+    }
+
+    private String effectiveEntryBookLevelLabel() {
+        int level = getEffectiveEntryBookLevel();
+        return level == 1 ? "买一" : "买" + level;
     }
 
     private BigDecimal configuredEntryBookPrice(BigDecimal bestBid, SymbolRuleManager.SymbolRule rule, long nowMs) {
-        if (!usesBidAskMakerStrategy() || bidAskEntryBookLevel() == 1) {
+        int level = getEffectiveEntryBookLevel();
+        if (level == 1) {
             return bestBid == null || bestBid.signum() <= 0
                     ? null : PrecisionUtil.roundDownToStep(bestBid, rule.tickSize());
         }
-        int level = bidAskEntryBookLevel();
         List<BigDecimal> prices = latestBidDepthPrices.get();
         long depthAgeMs = nowMs - lastDepthDataTimestamp.get();
         if (lastDepthDataTimestamp.get() <= 0 || depthAgeMs > properties.getStrategy().getDepthDataStaleMs()
                 || prices.size() < level) {
-            statusReason.set("等待" + configuredEntryBookLevelLabel() + "深度行情后再挂买单");
+            statusReason.set("等待" + effectiveEntryBookLevelLabel() + "深度行情后再挂买单");
             return null;
         }
         BigDecimal price = prices.get(level - 1);
@@ -4400,6 +4419,41 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 latestBidDepthPrices.get(), lastMarketDataTimestamp.get(), lastDepthDataTimestamp.get(),
                 lastMarketFrameTimestamp.get());
     }
+
+    public MarketActivitySnapshot getMarketActivitySnapshot() {
+        long now = System.currentTimeMillis();
+        long lastFrame = lastMarketFrameTimestamp.get();
+        MarketActivityTracker.Snapshot activity = marketActivityTracker.snapshot(now,
+                getOrderAmountUsdt(), lastFrame > 0 && now - lastFrame <= 10_000);
+        MarketSignalEvaluator.MinuteDataSnapshot minute = marketSignalEvaluator.minuteDataSnapshot(
+                now, properties.getStrategy().getMarketDataStaleMs());
+        BigDecimal bestBid = lastBestBid.get();
+        BigDecimal bestAsk = lastBestAsk.get();
+        BigDecimal entryPrice = bestBid;
+        if (getEffectiveEntryBookLevel() > 1) {
+            List<BigDecimal> prices = latestBidDepthPrices.get();
+            int index = getEffectiveEntryBookLevel() - 1;
+            entryPrice = lastDepthDataTimestamp.get() > 0
+                    && now - lastDepthDataTimestamp.get() <= properties.getStrategy().getDepthDataStaleMs()
+                    && prices.size() > index ? prices.get(index) : null;
+        }
+        Boolean entryBelowMa7 = entryPrice == null || minute.ma7() == null ? null
+                : entryPrice.compareTo(minute.ma7()) < 0;
+        BigDecimal spreadBps = null;
+        if (bestBid != null && bestAsk != null && bestBid.signum() > 0 && bestAsk.compareTo(bestBid) >= 0) {
+            BigDecimal mid = bestBid.add(bestAsk).divide(BigDecimal.valueOf(2), 12, RoundingMode.HALF_UP);
+            spreadBps = bestAsk.subtract(bestBid).multiply(BigDecimal.valueOf(10_000))
+                    .divide(mid, 2, RoundingMode.HALF_UP);
+        }
+        long bookAt = lastMarketDataTimestamp.get();
+        boolean bookFresh = bookAt > 0 && now - bookAt <= properties.getStrategy().getMarketDataStaleMs();
+        return new MarketActivitySnapshot(activity, minute.ma7(), minute.lastUpdateAgeMs(),
+                entryPrice, entryBelowMa7, bookFresh, spreadBps);
+    }
+
+    public record MarketActivitySnapshot(MarketActivityTracker.Snapshot activity, BigDecimal ma7,
+                                         Long minuteKlineAgeMs, BigDecimal proposedEntryPrice,
+                                         Boolean entryBelowMa7, boolean bookFresh, BigDecimal spreadBps) { }
 
     public record MarketDataSnapshot(BigDecimal bestBid, BigDecimal bestAsk, BigDecimal midPrice,
                                      List<BigDecimal> bidPrices, long updatedAtMs, long depthUpdatedAtMs,

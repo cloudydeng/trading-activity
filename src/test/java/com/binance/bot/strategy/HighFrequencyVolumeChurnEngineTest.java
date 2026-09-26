@@ -397,6 +397,120 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void everyStrategyUsesFourthBidWhenEffectiveSymbolConcurrencyExceedsOne() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        coordinator.configureMaxConcurrentEntriesPerSymbol(2);
+        HighFrequencyVolumeChurnEngine concurrentEngine = engineFor(
+                "account-a", "A", tradeService, coordinator);
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule("ENSOUSDT");
+        AtomicReference<List<BigDecimal>> prices = (AtomicReference<List<BigDecimal>>)
+                ReflectionTestUtils.getField(concurrentEngine, "latestBidDepthPrices");
+        prices.set(List.of(new BigDecimal("0.6000"), new BigDecimal("0.5999"),
+                new BigDecimal("0.5998"), new BigDecimal("0.5997")));
+        AtomicLong depthAt = (AtomicLong) ReflectionTestUtils.getField(
+                concurrentEngine, "lastDepthDataTimestamp");
+        when(marketSignalEvaluator.getBreakEvenReferencePrice(anyLong(), anyLong()))
+                .thenReturn(BigDecimal.ONE);
+        when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong()))
+                .thenReturn(new BigDecimal("0.7"));
+
+        for (String mode : List.of("FEE_AWARE_MAKER", "BID_ASK_MAKER",
+                "BUY_PRICE_MAKER", "BREAK_EVEN_MAKER")) {
+            assertTrue(("BID_ASK_MAKER".equals(mode)
+                    ? concurrentEngine.switchStrategy("ENSOUSDT", mode, new BigDecimal("6"),
+                    20_000L, 1_800_000L, null, null, null, null, null, null,
+                    60_000L, new BigDecimal("510"), 1, 3)
+                    : concurrentEngine.switchStrategy("ENSOUSDT", mode, new BigDecimal("6"),
+                    20_000L, 1_800_000L)).accepted());
+            long now = System.currentTimeMillis();
+            depthAt.set(now);
+            assertEquals(4, concurrentEngine.getEffectiveEntryBookLevel(), mode);
+            assertEquals(0, new BigDecimal("0.5997").compareTo(ReflectionTestUtils.invokeMethod(
+                    concurrentEngine, "entryPriceForStrategy", new BigDecimal("0.6000"), rule, now)), mode);
+        }
+
+        coordinator.configureMaxConcurrentEntriesBySymbol(Map.of("ENSOUSDT", 1));
+        long now = System.currentTimeMillis();
+        assertEquals(1, concurrentEngine.getEffectiveEntryBookLevel());
+        assertEquals(0, new BigDecimal("0.6000").compareTo(ReflectionTestUtils.invokeMethod(
+                concurrentEngine, "entryPriceForStrategy", new BigDecimal("0.6000"), rule, now)));
+        assertTrue(concurrentEngine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
+                20_000L, 1_800_000L, null, null, null, null, null, null,
+                60_000L, new BigDecimal("510"), 1, 3).accepted());
+        depthAt.set(System.currentTimeMillis());
+        assertEquals(3, concurrentEngine.getEffectiveEntryBookLevel());
+        assertEquals(0, new BigDecimal("0.5998").compareTo(ReflectionTestUtils.invokeMethod(
+                concurrentEngine, "entryPriceForStrategy", new BigDecimal("0.6000"), rule,
+                System.currentTimeMillis())));
+        coordinator.configureMaxConcurrentEntriesPerSymbol(1);
+        coordinator.configureMaxConcurrentEntriesBySymbol(Map.of("ENSOUSDT", 2));
+        assertEquals(4, concurrentEngine.getEffectiveEntryBookLevel());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void concurrencyOverrideWaitsForFreshFourthBidAndPreservesMinuteMaGate() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        coordinator.configureMaxConcurrentEntriesPerSymbol(2);
+        HighFrequencyVolumeChurnEngine concurrentEngine = engineFor(
+                "account-a", "A", tradeService, coordinator);
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule("ENSOUSDT");
+        assertTrue(concurrentEngine.switchStrategy("ENSOUSDT", "BUY_PRICE_MAKER",
+                new BigDecimal("6"), 20_000L, 120_000L).accepted());
+        AtomicReference<List<BigDecimal>> prices = (AtomicReference<List<BigDecimal>>)
+                ReflectionTestUtils.getField(concurrentEngine, "latestBidDepthPrices");
+        prices.set(List.of(new BigDecimal("0.6000"), new BigDecimal("0.5999"),
+                new BigDecimal("0.5998")));
+        AtomicLong depthAt = (AtomicLong) ReflectionTestUtils.getField(
+                concurrentEngine, "lastDepthDataTimestamp");
+        long now = System.currentTimeMillis();
+        depthAt.set(now);
+        assertNull(ReflectionTestUtils.invokeMethod(concurrentEngine, "entryPriceForStrategy",
+                new BigDecimal("0.6000"), rule, now));
+        assertTrue(concurrentEngine.getStatusReason().get().contains("等待买4深度行情"));
+
+        prices.set(List.of(new BigDecimal("0.6000"), new BigDecimal("0.5999"),
+                new BigDecimal("0.5998"), new BigDecimal("0.5997")));
+        depthAt.set(now - properties.getStrategy().getDepthDataStaleMs() - 1);
+        assertNull(ReflectionTestUtils.invokeMethod(concurrentEngine, "entryPriceForStrategy",
+                new BigDecimal("0.6000"), rule, now));
+
+        depthAt.set(now);
+        when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong()))
+                .thenReturn(new BigDecimal("0.5997"));
+        assertNull(ReflectionTestUtils.invokeMethod(concurrentEngine, "entryPriceForStrategy",
+                new BigDecimal("0.6000"), rule, now));
+        assertTrue(concurrentEngine.getStatusReason().get().contains("MA(7)"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void concurrentBuyPriceStrategyActuallySubmitsFourthBidPrice() throws Exception {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        coordinator.configureMaxConcurrentEntriesPerSymbol(2);
+        HighFrequencyVolumeChurnEngine concurrentEngine = engineFor(
+                "account-a", "A", tradeService, coordinator);
+        assertTrue(concurrentEngine.switchStrategy("ENSOUSDT", "BUY_PRICE_MAKER",
+                new BigDecimal("6"), 20_000L, 120_000L).accepted());
+        AtomicReference<List<BigDecimal>> prices = (AtomicReference<List<BigDecimal>>)
+                ReflectionTestUtils.getField(concurrentEngine, "latestBidDepthPrices");
+        prices.set(List.of(new BigDecimal("0.6000"), new BigDecimal("0.5999"),
+                new BigDecimal("0.5998"), new BigDecimal("0.5997")));
+        ((AtomicLong) ReflectionTestUtils.getField(concurrentEngine, "lastDepthDataTimestamp"))
+                .set(System.currentTimeMillis());
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(),
+                isNull(), anyString())).thenReturn(new ObjectMapper().readTree("{\"orderId\":101}"));
+        concurrentEngine.getIsRunning().set(true);
+
+        ReflectionTestUtils.invokeMethod(concurrentEngine, "driveChurnStateMachine",
+                new BigDecimal("0.6000"), new BigDecimal("0.6001"));
+
+        verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                decimalEquals("0.5997"), any(), isNull(), anyString());
+    }
+
+    @Test
     void workingBuyIsCancelledWhenMinuteMa7DropsBelowItsPrice() throws Exception {
         when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong()))
                 .thenReturn(new BigDecimal("0.59"));

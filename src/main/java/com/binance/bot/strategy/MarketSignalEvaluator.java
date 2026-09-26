@@ -174,6 +174,18 @@ public class MarketSignalEvaluator {
         }
     }
 
+    public MinuteDataSnapshot minuteDataSnapshot(long nowMs, long maxAgeMs) {
+        lock.lock();
+        try {
+            MinuteClose latest = minuteCloses.peekLast();
+            return new MinuteDataSnapshot(minuteMovingAverage7(nowMs, maxAgeMs),
+                    latest == null ? null : latest.openTimeMs(),
+                    latest == null ? null : Math.max(0, nowMs - latest.receivedAtMs()));
+        } finally {
+            lock.unlock();
+        }
+    }
+
     /** Returns a robust 60-second median mid-price after at least 30 seconds of local history. */
     public BigDecimal getBreakEvenReferencePrice(long nowMs, long maxAgeMs) {
         lock.lock();
@@ -291,6 +303,7 @@ public class MarketSignalEvaluator {
 
     private record Quote(BigDecimal bid, BigDecimal bidQty, BigDecimal ask, BigDecimal askQty, long timestampMs) { }
     private record MinuteClose(long openTimeMs, BigDecimal close, long receivedAtMs) { }
+    public record MinuteDataSnapshot(BigDecimal ma7, Long latestOpenTimeMs, Long lastUpdateAgeMs) { }
     private record TradeFlow(BigDecimal signedQuantity, BigDecimal totalQuantity, long timestampMs) { }
     private record DepthSnapshot(BigDecimal bidDepth, BigDecimal askDepth, long timestampMs) { }
     private record Selloff(long detectedAtMs, BigDecimal lowMid) { }

@@ -555,6 +555,8 @@ public class BotDashboardController {
                 Map.entry("symbol", engine.getSymbol()),
                 Map.entry("strategyMode", engine.getStrategyMode()),
                 Map.entry("strategyProfile", engine.getStrategyProfile()),
+                Map.entry("effectiveEntryBookLevel", engine.getEffectiveEntryBookLevel()),
+                Map.entry("entryBookLevelOverriddenByConcurrency", engine.isEntryBookLevelOverriddenByConcurrency()),
                 Map.entry("tickSize", engine.getTickSize()),
                 Map.entry("feeAwareRecommendedEntryAnchorPrice", engine.getFeeAwareRecommendedEntryAnchorPrice()),
                 Map.entry("strategyChangePending", engine.hasPendingStrategyChange()),
@@ -568,6 +570,7 @@ public class BotDashboardController {
                         new HighFrequencyVolumeChurnEngine.BnbBalanceSnapshot(
                                 BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, false, 0L))),
                 Map.entry("marketData", engine.getMarketDataSnapshot()),
+                Map.entry("marketActivity", engine.getMarketActivitySnapshot()),
                 Map.entry("entrySignal", engine.getLastEntryDecision()),
                 Map.entry("sellability", engine.getSellabilitySnapshot()),
                 Map.entry("risk", remoteToday.risk()),

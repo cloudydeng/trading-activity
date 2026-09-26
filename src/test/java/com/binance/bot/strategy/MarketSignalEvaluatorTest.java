@@ -26,11 +26,17 @@ class MarketSignalEvaluatorTest {
         evaluator.recordMinuteClose(currentMinute, decimal("90"), currentMinute + 1_000L);
         assertEquals(0, decimal("98.57142857142857").compareTo(evaluator.minuteMovingAverage7(
                 currentMinute + 2_000L, 5_000L)));
+        MarketSignalEvaluator.MinuteDataSnapshot diagnostics = evaluator.minuteDataSnapshot(
+                currentMinute + 2_000L, 5_000L);
+        assertEquals(currentMinute, diagnostics.latestOpenTimeMs());
+        assertEquals(1_000L, diagnostics.lastUpdateAgeMs());
+        assertEquals(0, decimal("98.57142857142857").compareTo(diagnostics.ma7()));
 
         evaluator.recordMinuteClose(currentMinute, decimal("80"), currentMinute + 3_000L);
         assertEquals(0, decimal("97.14285714285714").compareTo(evaluator.minuteMovingAverage7(
                 currentMinute + 4_000L, 5_000L)));
         assertNull(evaluator.minuteMovingAverage7(currentMinute + 10_000L, 5_000L));
+        assertNull(evaluator.minuteDataSnapshot(currentMinute + 10_000L, 5_000L).ma7());
         evaluator.reset();
         assertNull(evaluator.minuteMovingAverage7(currentMinute + 4_000L, 5_000L));
     }
