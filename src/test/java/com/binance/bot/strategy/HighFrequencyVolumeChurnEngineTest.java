@@ -961,7 +961,7 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void buyPriceMakerBuysAtBestBidAndInitialSellUsesActualBuyAverage() throws Exception {
+    void buyPriceMakerBuysAtBestBidAndInitialSellIsOneTickBelowRoundedBuyAverage() throws Exception {
         HighFrequencyVolumeChurnEngine.StrategySwitchResult result = engine.switchStrategy(
                 "ENSOUSDT", "BUY_PRICE_MAKER", new BigDecimal("6"), 20_000L, 120_000L);
         assertTrue(result.accepted());
@@ -984,16 +984,34 @@ class HighFrequencyVolumeChurnEngineTest {
         atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
         atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6.0005"));
         when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
-                decimalEquals("0.6001"), anyString()))
+                decimalEquals("0.6000"), anyString()))
                 .thenReturn(new ObjectMapper().readTree("{\"orderId\":77}"));
 
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
                 new BigDecimal("0.5990"), new BigDecimal("0.6020"));
 
         verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
-                decimalEquals("0.6001"), anyString());
+                decimalEquals("0.6000"), anyString());
         assertEquals(77L, atomic("activeOrderId", Long.class).get());
-        assertTrue(engine.getStatusReason().get().contains("实际买入均价"));
+        assertTrue(engine.getStatusReason().get().contains("下调 1 tick"));
+    }
+
+    @Test
+    void buyPriceMakerInitialSellRoundsBeforeSubtractingOneTickAndNeverUsesZeroPrice() {
+        assertTrue(engine.switchStrategy("ENSOUSDT", "BUY_PRICE_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L).accepted());
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule("ENSOUSDT");
+        atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
+
+        atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6.0000"));
+        BigDecimal exactTickPrice = ReflectionTestUtils.invokeMethod(engine,
+                "initialStrategyExitPrice", rule);
+        assertEquals(0, new BigDecimal("0.5999").compareTo(exactTickPrice));
+
+        atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("0.0010"));
+        BigDecimal minimumTickPrice = ReflectionTestUtils.invokeMethod(engine,
+                "initialStrategyExitPrice", rule);
+        assertEquals(0, rule.tickSize().compareTo(minimumTickPrice));
     }
 
     @Test
