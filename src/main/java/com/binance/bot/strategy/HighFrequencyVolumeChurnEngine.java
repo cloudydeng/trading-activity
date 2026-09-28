@@ -1571,13 +1571,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     ? "BUY 成交后按卖一/买入均价上方 " + bidAskInitialSellMarkupTicks()
                     + " tick 挂 LIMIT 卖单 @ " + floorPrice.toPlainString()
                     : usesBuyPriceMakerStrategy()
-                    ? "BUY 成交后按实际买入均价下调 1 tick 挂 LIMIT 卖单 @ " + floorPrice.toPlainString()
+                    ? "BUY 成交后按实际买入均价挂 LIMIT 卖单 @ " + floorPrice.toPlainString()
                     : "BUY 成交后按买入均价下限卖出中 @ " + floorPrice.toPlainString();
             statusReason.set(initialExitReason);
             log.info("[accountId={} alias={}] BUY 成交后已挂 GTC 限价卖出 {} {} @ {}",
                     accountId, accountAlias, quantity, baseAsset(), floorPrice);
         } else {
-            reconcileAmbiguousSubmission(clientOrderId, ChurnStatus.SELLING, "初始 GTC 卖单结果未知");
+            reconcileAmbiguousSubmission(clientOrderId, ChurnStatus.SELLING, "买入均价 GTC 卖单结果未知");
         }
     }
 
@@ -1587,8 +1587,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
      * Only an order that is no longer at the best ask is canceled, reconciled,
      * and repriced. All strategies use the latest best ask when repricing;
      * FEE_AWARE_MAKER enforces its fee floor only on the initial exit. BREAK_EVEN_MAKER
-     * enforces its net break-even floor on every exit. BUY_PRICE_MAKER uses one tick below
-     * the rounded buy average only on the initial exit. No path falls back to MARKET.
+     * enforces its net break-even floor on every exit. BUY_PRICE_MAKER enforces the actual
+     * buy average only on the initial exit. No path falls back to MARKET.
      */
     private boolean deferTimedOutExitIfStillBestAsk(SymbolRuleManager.SymbolRule rule,
                                                     BigDecimal bestAsk, long now,
@@ -1708,9 +1708,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     }
 
     private boolean canSubmitImmediateExit(SymbolRuleManager.SymbolRule rule) {
-        BigDecimal price = usesBuyPriceMakerStrategy()
-                ? buyPriceMakerInitialExitPrice(rule) : entryAverageFloorPrice(rule);
-        return currentSellability(rule, price).sellable();
+        return currentSellability(rule, entryAverageFloorPrice(rule)).sellable();
     }
 
     private void transitionAfterInventoryChange(SymbolRuleManager.SymbolRule rule, String sellMessage) {
@@ -1932,12 +1930,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return PrecisionUtil.roundUpToStep(average, rule.tickSize());
     }
 
-    private BigDecimal buyPriceMakerInitialExitPrice(SymbolRuleManager.SymbolRule rule) {
-        BigDecimal roundedAverage = entryAveragePrice(rule);
-        if (roundedAverage.signum() <= 0) return BigDecimal.ZERO;
-        return roundedAverage.subtract(rule.tickSize()).max(rule.tickSize());
-    }
-
     private BigDecimal bidAskMakerExitPrice(SymbolRuleManager.SymbolRule rule, BigDecimal bestAsk) {
         BigDecimal ask = positiveOrZero(bestAsk).signum() > 0
                 ? PrecisionUtil.roundDownToStep(bestAsk, rule.tickSize()) : BigDecimal.ZERO;
@@ -1961,10 +1953,6 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     private BigDecimal exitReferencePrice(SymbolRuleManager.SymbolRule rule, BigDecimal fallbackPrice) {
         if (usesBidAskMakerStrategy()) return bidAskMakerExitPrice(rule, fallbackPrice);
-        if (usesBuyPriceMakerStrategy()) {
-            BigDecimal price = buyPriceMakerInitialExitPrice(rule);
-            return price.signum() > 0 ? price : positiveOrZero(fallbackPrice);
-        }
         BigDecimal entryFloor = entryAverageFloorPrice(rule);
         return entryFloor.signum() > 0 ? entryFloor : positiveOrZero(fallbackPrice);
     }
@@ -3668,7 +3656,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return feeProtectedExitPrice(rule, lastBestAskOrZero());
         }
         if (usesBuyPriceMakerStrategy()) {
-            BigDecimal price = buyPriceMakerInitialExitPrice(rule);
+            BigDecimal price = entryAveragePrice(rule);
             if (price.signum() > 0) return price;
         }
         if (usesBidAskMakerStrategy()) {
