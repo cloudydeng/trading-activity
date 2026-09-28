@@ -397,7 +397,7 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void everyMakerStrategyWaitsWhenCandidateDiffersFromPreviousSymbolBuyFillByMoreThanHalfPercent() {
+    void everyMakerStrategyWaitsOnlyWhenCandidateRisesMoreThanHalfPercent() {
         SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
         coordinator.recordBuyFill("ENSOUSDT", new BigDecimal("0.6000"), System.currentTimeMillis());
         HighFrequencyVolumeChurnEngine nextAccount = engineFor("account-b", "B", tradeService, coordinator);
@@ -410,9 +410,9 @@ class HighFrequencyVolumeChurnEngineTest {
                 "BUY_PRICE_MAKER", "BREAK_EVEN_MAKER")) {
             assertTrue(nextAccount.switchStrategy("ENSOUSDT", mode, new BigDecimal("6"),
                     20_000L, 1_800_000L).accepted());
-            assertNull(ReflectionTestUtils.invokeMethod(nextAccount, "entryPriceForStrategy",
-                    new BigDecimal("0.5969"), rule, System.currentTimeMillis()), mode);
-            assertTrue(nextAccount.getStatusReason().get().contains("超过 0.5%"), mode);
+            assertEquals(0, new BigDecimal("0.5969").compareTo(ReflectionTestUtils.invokeMethod(
+                    nextAccount, "entryPriceForStrategy", new BigDecimal("0.5969"), rule,
+                    System.currentTimeMillis())), mode);
             assertNull(ReflectionTestUtils.invokeMethod(nextAccount, "entryPriceForStrategy",
                     new BigDecimal("0.6031"), rule, System.currentTimeMillis()), mode);
             assertTrue(nextAccount.getStatusReason().get().contains("超过 0.5%"), mode);

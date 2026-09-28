@@ -109,6 +109,9 @@ public final class SymbolTradeCoordinator {
             if (previous == null || tradeTimeMs >= previous.tradeTimeMs()) {
                 lastBuyFillBySymbol.put(normalizedSymbol, new LastBuyFill(price, tradeTimeMs));
                 if (newFill) {
+                    if (priceGapStateStore != null) {
+                        priceGapStateStore.clearBuyPriceGapWait(normalizedSymbol);
+                    }
                     buyPriceGapWaitStartedBySymbol.put(normalizedSymbol, 0L);
                 }
             }
@@ -133,8 +136,8 @@ public final class SymbolTradeCoordinator {
                 clearBuyPriceGapWait(normalizedSymbol);
                 return new PriceGapPermit(true, "");
             }
-            BigDecimal difference = candidatePrice.subtract(previous.price()).abs();
-            if (difference.compareTo(previous.price().multiply(MAX_BUY_PRICE_GAP)) <= 0) {
+            BigDecimal increase = candidatePrice.subtract(previous.price());
+            if (increase.compareTo(previous.price().multiply(MAX_BUY_PRICE_GAP)) <= 0) {
                 clearBuyPriceGapWait(normalizedSymbol);
                 return new PriceGapPermit(true, "");
             }
@@ -148,14 +151,14 @@ public final class SymbolTradeCoordinator {
             }
             long elapsedMs = Math.max(0L, nowMs - waitStartedAtMs);
             if (elapsedMs >= BUY_PRICE_GAP_MAX_WAIT_MS) return new PriceGapPermit(true, "");
-            BigDecimal gap = difference.divide(previous.price(), MathContext.DECIMAL64);
+            BigDecimal gap = increase.divide(previous.price(), MathContext.DECIMAL64);
             long remainingSeconds = Math.max(1L,
                     (BUY_PRICE_GAP_MAX_WAIT_MS - elapsedMs + 999L) / 1_000L);
             return new PriceGapPermit(false, normalizedSymbol + " 暂停新买入：当前候选买价 "
-                    + candidatePrice.stripTrailingZeros().toPlainString() + " 与上次 BUY 成交价 "
-                    + previous.price().stripTrailingZeros().toPlainString() + " 相差 "
+                    + candidatePrice.stripTrailingZeros().toPlainString() + " 比上次 BUY 成交价 "
+                    + previous.price().stripTrailingZeros().toPlainString() + " 上涨 "
                     + gap.movePointRight(2).setScale(2, java.math.RoundingMode.HALF_UP).toPlainString()
-                    + "%（超过 0.5%）；价差回到范围内或约 " + remainingSeconds + " 秒后恢复");
+                    + "%（超过 0.5%）；涨幅回到范围内或约 " + remainingSeconds + " 秒后恢复");
         } finally {
             lock.unlock();
         }

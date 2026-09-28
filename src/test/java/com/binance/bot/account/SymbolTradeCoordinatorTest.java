@@ -33,37 +33,59 @@ class SymbolTradeCoordinatorTest {
 
         assertFalse(first.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.6031"), now).allowed());
         assertEquals(now, store.loadBuyPriceGapWaitStartedAt("BABYUSDT").orElseThrow());
-        assertFalse(first.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.5969"),
+        assertFalse(first.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.6031"),
                 now + 3_599_999L).allowed());
 
         SymbolTradeCoordinator restarted = new SymbolTradeCoordinator(store);
         restarted.restoreBuyFill("BABYUSDT", reference.price(), reference.tradeTimeMs());
-        assertTrue(restarted.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.5969"),
+        assertTrue(restarted.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.6031"),
                 now + 3_600_000L).allowed());
-        assertTrue(restarted.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.6030"),
+        assertTrue(restarted.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.5969"),
                 now + 3_600_001L).allowed());
         assertTrue(store.loadBuyPriceGapWaitStartedAt("BABYUSDT").isEmpty());
         assertFalse(restarted.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.6031"),
                 now + 3_600_002L).allowed());
         assertEquals(now + 3_600_002L,
                 store.loadBuyPriceGapWaitStartedAt("BABYUSDT").orElseThrow());
+        restarted.recordBuyFill("BABYUSDT", new BigDecimal("0.6032"), now + 3_600_003L);
+        assertTrue(store.loadBuyPriceGapWaitStartedAt("BABYUSDT").isEmpty());
         store.close();
     }
 
     @Test
-    void crossAccountBuyFillBlocksBothPriceDirectionsOnlyBeyondHalfPercent() {
+    void downwardBuyPriceClearsExistingUpwardWait() {
+        BinanceProperties properties = new BinanceProperties();
+        properties.getStorage().setDailyStatsDb(tempDir.resolve("downward.db").toString());
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties);
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator(store);
+        coordinator.recordBuyFill("BABYUSDT", new BigDecimal("0.01340"), 1_000L);
+
+        assertFalse(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01346701"),
+                2_000L).allowed());
+        assertEquals(2_000L, store.loadBuyPriceGapWaitStartedAt("BABYUSDT").orElseThrow());
+        assertTrue(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01200"),
+                3_000L).allowed());
+        assertTrue(store.loadBuyPriceGapWaitStartedAt("BABYUSDT").isEmpty());
+        assertFalse(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01346701"),
+                4_000L).allowed());
+        assertEquals(4_000L, store.loadBuyPriceGapWaitStartedAt("BABYUSDT").orElseThrow());
+        store.close();
+    }
+
+    @Test
+    void crossAccountBuyFillBlocksOnlyUpwardPricesBeyondHalfPercent() {
         SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
         assertTrue(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01330")).allowed());
         coordinator.recordBuyFill("babyusdt", new BigDecimal("0.01340"), 1_000L);
 
         assertTrue(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01333300")).allowed());
         assertTrue(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01346700")).allowed());
-        assertFalse(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01333299")).allowed());
+        assertTrue(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01333299")).allowed());
         assertFalse(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01346701")).allowed());
         assertTrue(coordinator.checkBuyPriceGap("VTHOUSDT", new BigDecimal("0.00100")).allowed());
 
         coordinator.recordBuyFill("BABYUSDT", new BigDecimal("0.01200"), 999L);
-        assertFalse(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01333299")).allowed());
+        assertTrue(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01333299")).allowed());
         coordinator.recordBuyFill("BABYUSDT", new BigDecimal("0.01333"), 1_001L);
         assertTrue(coordinator.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.01333299")).allowed());
     }
