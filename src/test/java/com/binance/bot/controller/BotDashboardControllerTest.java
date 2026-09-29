@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class BotDashboardControllerTest {
@@ -172,6 +173,50 @@ class BotDashboardControllerTest {
         verify(tradeClient).getAccountInfo();
         verify(tradeClient).getAllOrders("HOLOUSDT", 100);
         verify(tradeClient).getOpenOrders("HOLOUSDT");
+    }
+
+    @Test
+    void allAssetsReadsEachAccountOnceAndKeepsPartialFailuresVisible() throws Exception {
+        TradingAccountManager accountManager = mock(TradingAccountManager.class);
+        TradeNotificationService notificationService = mock(TradeNotificationService.class);
+        AccountTradingRuntime healthy = mock(AccountTradingRuntime.class);
+        AccountTradingRuntime unavailable = mock(AccountTradingRuntime.class);
+        BinanceAccountTradeClient healthyClient = mock(BinanceAccountTradeClient.class);
+        BinanceAccountTradeClient unavailableClient = mock(BinanceAccountTradeClient.class);
+        when(accountManager.runtimes()).thenReturn(List.of(healthy, unavailable));
+        when(healthy.accountId()).thenReturn("account-a");
+        when(healthy.alias()).thenReturn("Alpha");
+        when(healthy.tradeClient()).thenReturn(healthyClient);
+        when(unavailable.accountId()).thenReturn("account-b");
+        when(unavailable.alias()).thenReturn("Beta");
+        when(unavailable.tradeClient()).thenReturn(unavailableClient);
+        when(healthyClient.getAccountInfo()).thenReturn(new ObjectMapper().readTree("""
+                {"balances":[
+                  {"asset":"USDT","free":"0.00000000","locked":"0.00000000"},
+                  {"asset":"BABY","free":"1.20000000","locked":"0.30000000"},
+                  {"asset":"BNB","free":"0.00000001","locked":"0.00000000"}
+                ]}
+                """));
+        when(unavailableClient.getAccountInfo()).thenThrow(new IllegalStateException("unavailable"));
+        when(accountManager.summaries()).thenReturn(List.of(new TradingAccountManager.AccountSummary(
+                "account-c", "account-c", "Gamma", 0, false, false,
+                "INITIALIZATION_FAILED", "unavailable", null, null, false, "unavailable")));
+        BotDashboardController controller = new BotDashboardController(
+                accountManager, new BinanceProperties(), notificationService);
+
+        BotDashboardController.AccountAssetsSnapshot result = controller.allAssets();
+
+        assertEquals(3, result.accounts().size());
+        assertEquals("Alpha", result.accounts().get(0).accountAlias());
+        assertNull(result.accounts().get(0).error());
+        assertEquals(List.of("BABY", "BNB"), result.accounts().get(0).balances().stream()
+                .map(BotDashboardController.BalanceView::asset).toList());
+        assertEquals("1.50000000", result.accounts().get(0).balances().get(0).total());
+        assertEquals("账户余额暂时不可用", result.accounts().get(1).error());
+        assertEquals("账户初始化失败", result.accounts().get(2).error());
+        verify(healthyClient).getAccountInfo();
+        verify(unavailableClient).getAccountInfo();
+        verifyNoMoreInteractions(healthyClient, unavailableClient);
     }
 
     @Test

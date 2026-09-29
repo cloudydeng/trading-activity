@@ -53,6 +53,34 @@ public class BotDashboardController {
     @GetMapping("/api/accounts")
     public List<TradingAccountManager.AccountSummary> accounts() { return accountManager.summaries(); }
 
+    @GetMapping("/api/accounts/assets")
+    public AccountAssetsSnapshot allAssets() {
+        List<AccountAssetsView> accounts = new ArrayList<>();
+        for (AccountTradingRuntime runtime : accountManager.runtimes()) {
+            try {
+                JsonNode account = runtime.tradeClient().getAccountInfo();
+                if (account == null || !account.path("balances").isArray()) {
+                    accounts.add(new AccountAssetsView(runtime.accountId(), runtime.alias(),
+                            List.of(), "账户余额暂时不可用"));
+                    continue;
+                }
+                List<BalanceView> balances = nonZeroBalances(account.path("balances"));
+                balances.sort(Comparator.comparing(BalanceView::asset, String.CASE_INSENSITIVE_ORDER));
+                accounts.add(new AccountAssetsView(runtime.accountId(), runtime.alias(), balances, null));
+            } catch (RuntimeException exception) {
+                log.warn("[accountId={}] 读取账户余额失败", runtime.accountId());
+                accounts.add(new AccountAssetsView(runtime.accountId(), runtime.alias(),
+                        List.of(), "账户余额暂时不可用"));
+            }
+        }
+        accountManager.summaries().stream().filter(summary -> !summary.initialized())
+                .forEach(summary -> accounts.add(new AccountAssetsView(summary.accountId(),
+                        summary.alias(), List.of(), "账户初始化失败")));
+        accounts.sort(Comparator.comparing(AccountAssetsView::accountAlias, String.CASE_INSENSITIVE_ORDER)
+                .thenComparing(AccountAssetsView::accountId, String.CASE_INSENSITIVE_ORDER));
+        return new AccountAssetsSnapshot(accounts, System.currentTimeMillis());
+    }
+
     @GetMapping("/api/settings/trading")
     public TradingSettingsView tradingSettings() {
         DailyTradeStatsStore.TradingRuntimeSettings settings = removeUnusedTradingLimits(
@@ -700,6 +728,9 @@ public class BotDashboardController {
     public record AccountSnapshot(String accountId, String symbol, String apiKeyAlias, String accountType,
                                   boolean canTrade, long accountUpdateTimeMs, List<BalanceView> balances,
                                   List<OrderView> filledOrders, List<OrderView> openOrders, int usedApiWeight1m) { }
+    public record AccountAssetsSnapshot(List<AccountAssetsView> accounts, long updatedAtMs) { }
+    public record AccountAssetsView(String accountId, String accountAlias, List<BalanceView> balances,
+                                    String error) { }
     public record BalanceView(String asset, String free, String locked, String total) { }
     public record OrderView(long orderId, String clientOrderId, String side, String type, String status,
                             String price, String originalQty, String executedQty, String quoteQty, long timeMs) { }

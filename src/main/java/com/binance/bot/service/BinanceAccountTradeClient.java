@@ -304,6 +304,30 @@ public class BinanceAccountTradeClient {
         return getSignedJson("/api/v3/account", params, "查询账户信息失败");
     }
 
+    /** Read-only deposit history. Callers page within a window shorter than 90 days. */
+    public JsonNode getDepositHistory(long startTimeMs, long endTimeMs, int offset, int limit) {
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("startTime", String.valueOf(startTimeMs));
+        params.put("endTime", String.valueOf(endTimeMs));
+        params.put("offset", String.valueOf(Math.max(0, offset)));
+        params.put("limit", String.valueOf(Math.max(1, Math.min(limit, 1000))));
+        params.put("timestamp", String.valueOf(System.currentTimeMillis()));
+        return getSignedJson("/sapi/v1/capital/deposit/hisrec", params, "查询充值记录失败");
+    }
+
+    /** Read-only wallet transfer history for a single source/destination type. */
+    public JsonNode getUniversalTransferHistory(String type, long startTimeMs, long endTimeMs,
+                                                int page, int size) {
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("type", type);
+        params.put("startTime", String.valueOf(startTimeMs));
+        params.put("endTime", String.valueOf(endTimeMs));
+        params.put("current", String.valueOf(Math.max(1, page)));
+        params.put("size", String.valueOf(Math.max(1, Math.min(size, 100))));
+        params.put("timestamp", String.valueOf(System.currentTimeMillis()));
+        return getSignedJson("/sapi/v1/asset/transfer", params, "查询钱包划转记录失败");
+    }
+
     /** Account- and symbol-specific commission components used to price a fee-protected exit. */
     public JsonNode getAccountCommissionRates(String symbol) {
         Map<String, String> params = new LinkedHashMap<>();

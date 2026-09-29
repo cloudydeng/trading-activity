@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>全部账户资产 - Trading Activity</title>
+  <style>
+    :root{color-scheme:dark}body{font-family:system-ui,-apple-system,sans-serif;max-width:1180px;margin:28px auto;padding:0 18px;background:#101827;color:#e5e7eb}
+    .head{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}h1{font-size:23px;margin:0 0 7px}h2{font-size:17px;margin:0}
+    .muted{color:#a5b4c7;font-size:14px}a{color:#93c5fd}button{padding:9px 13px;border:0;border-radius:7px;font-size:14px;cursor:pointer;background:#334155;color:#fff}
+    .summary{display:flex;gap:18px;flex-wrap:wrap;background:#172033;border:1px solid #28364e;border-radius:10px;padding:14px 16px;margin:18px 0}
+    .summary strong{color:#e5e7eb}.accounts{display:grid;gap:12px}.account{background:#172033;border:1px solid #28364e;border-radius:10px;padding:15px}
+    .account-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:12px}.account-id{font-size:13px;color:#a5b4c7;font-weight:400}
+    .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;white-space:nowrap}th,td{padding:10px;border-bottom:1px solid #28364e;text-align:left;font-size:14px}
+    th{color:#9aabc2;font-weight:500}td.qty{font-variant-numeric:tabular-nums}tbody tr:last-child td{border-bottom:0}.empty{color:#a5b4c7;padding:10px 0}.error{color:#fb7185;padding:10px 0}
+  </style>
+</head>
+<body>
+  <div class="head"><div><h1>全部 API 账户资产与转入</h1><div id="updated" class="muted">正在加载…</div></div>
+    <p><a href="/dashboard.html">返回控制台</a> <a href="/account.html">账户与成交</a> <button type="button" onclick="load()">立即刷新</button></p></div>
+  <p class="muted">转入按近 179 天统计：充值记录及本账户其他钱包划入现货；“现在还有”是实时现货可用＋冻结。币种数量为原币单位，不作价格折算。主账户与子账户之间的划转暂未纳入，不能把转入减去余额当作盈亏。余额每 30 秒刷新，历史最多每 10 分钟查询一次币安。</p>
+  <div id="summary" class="summary muted">正在读取账户资产…</div>
+  <main id="accounts" class="accounts"></main>
+  <script>
+    const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    function qty(value){const raw=String(value??'0');if(!/^-?\d+(?:\.\d+)?$/.test(raw))return raw;const [whole,decimals='']=raw.split('.');const fraction=decimals.replace(/0+$/,'');return whole.replace(/\B(?=(\d{3})+(?!\d))/g,',')+(fraction?'.'+fraction:'')}
+    let balancesSnapshot=null, fundingSnapshot=null, loading=false;
+    function render(){
+      const accounts=Array.isArray(balancesSnapshot?.accounts)?balancesSnapshot.accounts:[];
+      const fundingByAccount=new Map((Array.isArray(fundingSnapshot?.accounts)?fundingSnapshot.accounts:[]).map(a=>[a.accountId,a]));
+      const errors=accounts.filter(a=>a.error||fundingByAccount.get(a.accountId)?.error).length;
+      document.querySelector('#summary').innerHTML=`<span>账户 <strong>${accounts.length}</strong></span><span>读取异常 <strong>${errors}</strong></span><span>${fundingSnapshot?'转入记录已同步':'转入记录读取中…'}</span>`;
+      document.querySelector('#accounts').innerHTML=accounts.length?accounts.map(account=>{
+        const balances=Array.isArray(account.balances)?account.balances:[];
+        const funding=fundingByAccount.get(account.accountId);
+        const rows=new Map();
+        for(const balance of balances)rows.set(balance.asset,{asset:balance.asset,balance});
+        for(const asset of (funding?.assets||[]))rows.set(asset.asset,{...(rows.get(asset.asset)||{asset:asset.asset}),funding:asset});
+        const items=[...rows.values()].sort((a,b)=>a.asset.localeCompare(b.asset));
+        const messages=[account.error,funding?.error].filter(Boolean);
+        const body=items.length?`<div class="table-wrap"><table><thead><tr><th>币种</th><th>充值转入</th><th>钱包划转转入</th><th>现在还有</th><th>可用</th><th>冻结</th></tr></thead><tbody>${items.map(item=>{
+          const incoming=fundingSnapshot?(!funding||!funding.depositComplete?'数据不完整':esc(qty(item.funding?.deposits||'0'))):'读取中';
+          const transferred=fundingSnapshot?(!funding||!funding.transferComplete?'数据不完整':esc(qty(item.funding?.transfers||'0'))):'读取中';
+          const remaining=account.error?'不可用':item.balance?esc(qty(item.balance.total)):'0';
+          const free=account.error?'不可用':item.balance?esc(qty(item.balance.free)):'0';
+          const locked=account.error?'不可用':item.balance?esc(qty(item.balance.locked)):'0';
+          return `<tr><td>${esc(item.asset)}</td><td class="qty">${incoming}</td><td class="qty">${transferred}</td><td class="qty">${remaining}</td><td class="qty">${free}</td><td class="qty">${locked}</td></tr>`
+        }).join('')}</tbody></table></div>`:'<div class="empty">暂无非零资产或可查转入记录</div>';
+        return `<section class="account"><div class="account-head"><h2>${esc(account.accountAlias||account.accountId)} <span class="account-id">(${esc(account.accountId)})</span></h2><span class="muted">${items.length} 种币</span></div>${messages.map(message=>`<div class="error">${esc(message)}</div>`).join('')}${body}</section>`
+      }).join(''):'<div class="empty">暂无可用账户</div>';
+      const at=balancesSnapshot?.updatedAtMs?new Date(balancesSnapshot.updatedAtMs):new Date();
+      document.querySelector('#updated').textContent=`余额更新 ${at.toLocaleString('zh-CN',{hour12:false})}`;
+    }
+    async function getJson(url){const response=await fetch(url,{cache:'no-store'});if(response.status===401){location='/login.html';return null}if(!response.ok)throw Error(`HTTP ${response.status}`);return response.json()}
+    async function load(){
+      if(loading)return;loading=true;
+      try{
+        const balances=await getJson('/api/accounts/assets');if(!balances)return;
+        balancesSnapshot=balances;render();
+        try{const funding=await getJson('/api/accounts/funding');if(funding){fundingSnapshot=funding;render()}}
+        catch(error){document.querySelector('#updated').innerHTML=`<span class="error">转入记录读取失败：${esc(error.message)}</span>`}
+      }catch(error){document.querySelector('#updated').innerHTML=`<span class="error">余额读取失败：${esc(error.message)}</span>`}
+      finally{loading=false}
+    }
+    load();setInterval(load,30000);
+  </script>
+</body>
+</html>
