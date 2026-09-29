@@ -94,6 +94,32 @@ class DailyTradeStatsStoreTest {
     }
 
     @Test
+    void persistsAlgoUsdcAndItsStrategyOverrideAcrossRestart() {
+        BinanceProperties properties = properties();
+        DailyTradeStatsStore first = new DailyTradeStatsStore(properties);
+        first.saveAccountSymbols("account-a", List.of("algousdc", "BABYUSDT"));
+        var profile = new BinanceProperties.SymbolStrategyProfile();
+        profile.setMode("BREAK_EVEN_MAKER");
+        first.saveStrategyOverride("account-a", "ALGOUSDC", profile);
+        first.close();
+
+        DailyTradeStatsStore restarted = new DailyTradeStatsStore(properties);
+        assertEquals(List.of("ALGOUSDC", "BABYUSDT"),
+                restarted.loadAccountSymbols("account-a").orElseThrow());
+        assertEquals("BREAK_EVEN_MAKER", restarted.loadStrategyOverrides("account-a")
+                .get("ALGOUSDC").getMode());
+        restarted.close();
+    }
+
+    @Test
+    void rejectsAlgoUsdtAndAlgoUsdcOnSameAccount() {
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
+        assertThrows(IllegalArgumentException.class, () -> store.saveAccountSymbols(
+                "account-a", List.of("ALGOUSDT", "ALGOUSDC")));
+        store.close();
+    }
+
+    @Test
     void rejectsEmptyOrOversizedAccountSymbolLists() {
         DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
 

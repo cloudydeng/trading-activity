@@ -172,6 +172,66 @@ class AccountTradingRuntimeTest {
     }
 
     @Test
+    void algoUsdcStartUsesUsdcBalanceWithoutRequiringUsdt() throws Exception {
+        HighFrequencyVolumeChurnEngine algo = mock(HighFrequencyVolumeChurnEngine.class);
+        when(algo.getSymbol()).thenReturn("ALGOUSDC");
+        when(algo.reconcileAccountRiskSnapshot(any())).thenReturn(true);
+        when(algo.startTrading()).thenReturn(true);
+        BinanceAccountTradeClient client = mock(BinanceAccountTradeClient.class);
+        when(client.getAccountInfo()).thenReturn(new ObjectMapper().readTree(
+                "{\"balances\":[{\"asset\":\"USDC\",\"free\":\"30\",\"locked\":\"0\"}]}") );
+        AccountRiskCoordinator coordinator = new AccountRiskCoordinator();
+        coordinator.register("account-a::ALGOUSDC", "USDC", () -> new TradingRiskGuard().snapshot(), () -> true);
+        AccountTradingRuntime runtime = new AccountTradingRuntime(
+                new AccountCredentials("account-a", "A", "key", "secret"), client,
+                mock(AccountUserDataStream.class), List.of(algo), Map.of(), Map.of(), coordinator);
+
+        assertTrue(runtime.start("ALGOUSDC"));
+        assertTrue(coordinator.reserveEntry("account-a::ALGOUSDC", new java.math.BigDecimal("6"),
+                new java.math.BigDecimal("100"), new java.math.BigDecimal("8")).accepted());
+        verify(algo).startTrading();
+    }
+
+    @Test
+    void singleSymbolSwitchRekeysRuntimeAndRiskLedger() {
+        HighFrequencyVolumeChurnEngine algo = mock(HighFrequencyVolumeChurnEngine.class);
+        TradingRiskGuard guard = new TradingRiskGuard();
+        java.util.concurrent.atomic.AtomicReference<String> symbol =
+                new java.util.concurrent.atomic.AtomicReference<>("ALGOUSDT");
+        when(algo.getSymbol()).thenAnswer(ignored -> symbol.get());
+        AccountTradingRuntime runtime = new AccountTradingRuntime(
+                new AccountCredentials("account-a", "A", "key", "secret"),
+                mock(BinanceAccountTradeClient.class), mock(AccountUserDataStream.class),
+                List.of(algo), Map.of("ALGOUSDT", guard), Map.of());
+
+        symbol.set("ALGOUSDC");
+        runtime.adoptSymbolSwitch("ALGOUSDT", "ALGOUSDC");
+        assertTrue(runtime.engine("ALGOUSDT").isEmpty());
+        assertTrue(runtime.engine("ALGOUSDC").isPresent());
+        assertTrue(runtime.riskGuard("ALGOUSDC").isPresent());
+    }
+
+    @Test
+    void mixedQuoteStartFailsClosedWhenUsdcBalanceMissing() throws Exception {
+        HighFrequencyVolumeChurnEngine algo = mock(HighFrequencyVolumeChurnEngine.class);
+        HighFrequencyVolumeChurnEngine baby = mock(HighFrequencyVolumeChurnEngine.class);
+        when(algo.getSymbol()).thenReturn("ALGOUSDC");
+        when(baby.getSymbol()).thenReturn("BABYUSDT");
+        when(algo.reconcileAccountRiskSnapshot(any())).thenReturn(true);
+        when(baby.reconcileAccountRiskSnapshot(any())).thenReturn(true);
+        BinanceAccountTradeClient client = mock(BinanceAccountTradeClient.class);
+        when(client.getAccountInfo()).thenReturn(new ObjectMapper().readTree(
+                "{\"balances\":[{\"asset\":\"USDT\",\"free\":\"30\",\"locked\":\"0\"}]}") );
+        AccountTradingRuntime runtime = new AccountTradingRuntime(
+                new AccountCredentials("account-a", "A", "key", "secret"), client,
+                mock(AccountUserDataStream.class), List.of(algo, baby), Map.of(), Map.of(),
+                new AccountRiskCoordinator());
+
+        assertFalse(runtime.start("ALGOUSDC"));
+        verify(algo, never()).startTrading();
+    }
+
+    @Test
     void symbolStartFailsClosedWhenAnotherConfiguredAssetDoesNotReconcile() throws Exception {
         HighFrequencyVolumeChurnEngine enso = mock(HighFrequencyVolumeChurnEngine.class);
         HighFrequencyVolumeChurnEngine btc = mock(HighFrequencyVolumeChurnEngine.class);

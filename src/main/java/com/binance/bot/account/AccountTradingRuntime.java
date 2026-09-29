@@ -1,5 +1,6 @@
 package com.binance.bot.account;
 
+import com.binance.bot.config.SupportedTradingPair;
 import com.binance.bot.notification.OpenOrderNotification;
 import com.binance.bot.service.AccountUserDataStream;
 import com.binance.bot.service.BinanceAccountTradeClient;
@@ -204,6 +205,28 @@ public class AccountTradingRuntime {
             lock.unlock();
         }
     }
+
+    /** Rekeys the sole stopped engine after the legacy symbol-switch endpoint succeeds. */
+    public void adoptSymbolSwitch(String previousSymbol, String targetSymbol) {
+        lock.lock();
+        try {
+            if (engines.size() != 1) throw new IllegalStateException("仅单交易对账户支持热切换");
+            String previous = normalizeSymbol(previousSymbol);
+            String target = normalizeSymbol(targetSymbol);
+            HighFrequencyVolumeChurnEngine switched = engines.get(previous);
+            if (switched == null || !target.equals(normalizeSymbol(switched.getSymbol()))) {
+                throw new IllegalStateException("交易对切换后的运行实例状态不一致");
+            }
+            engines.remove(previous);
+            engines.put(target, switched);
+            TradingRiskGuard riskGuard = riskGuards.remove(previous);
+            if (riskGuard != null) riskGuards.put(target, riskGuard);
+            PostFillOutcomeTracker tracker = outcomeTrackers.remove(previous);
+            if (tracker != null) outcomeTrackers.put(target, tracker);
+        } finally {
+            lock.unlock();
+        }
+    }
     public List<HighFrequencyVolumeChurnEngine> engines() {
         lock.lock();
         try {
@@ -313,7 +336,11 @@ public class AccountTradingRuntime {
             reconciled &= engineReconciled;
         }
         if (accountRiskCoordinator != null) {
-            reconciled &= accountRiskCoordinator.updateQuoteBalance(accountInfo, "USDT");
+            for (String quoteAsset : engines().stream()
+                    .map(engine -> SupportedTradingPair.quoteAsset(engine.getSymbol()))
+                    .distinct().toList()) {
+                reconciled &= accountRiskCoordinator.updateQuoteBalance(accountInfo, quoteAsset);
+            }
         }
         if (!reconciled) {
             target.markAccountRiskUnconfirmed("账户币种持仓无法从交易所历史成交安全恢复，拒绝启动");

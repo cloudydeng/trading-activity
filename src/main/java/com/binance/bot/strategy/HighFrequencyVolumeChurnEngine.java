@@ -1,5 +1,7 @@
 package com.binance.bot.strategy;
 
+import com.binance.bot.config.SupportedTradingPair;
+
 import com.binance.bot.account.AccountCredentials;
 import com.binance.bot.account.AccountExecutionEvent;
 import com.binance.bot.account.AccountRiskCoordinator;
@@ -218,11 +220,11 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             lastBuyFill.ifPresent(fill -> this.symbolTradeCoordinator.restoreBuyFill(
                     properties.getStrategy().getSymbol(), fill.price(), fill.tradeTimeMs()));
         }
-        this.accountRiskCoordinator.register(accountEngineKey, riskGuard::snapshot, accountRiskReconciled::get);
+        this.accountRiskCoordinator.register(accountEngineKey, quoteAsset(), riskGuard::snapshot, accountRiskReconciled::get);
         if (properties.getStrategy().getSymbolStrategies() != null) {
             properties.getStrategy().getSymbolStrategies().forEach((symbol, profile) -> {
                 String normalized = normalizeStrategySymbol(symbol);
-                if (profile != null && !normalized.isBlank() && normalized.endsWith("USDT")) {
+                if (profile != null && SupportedTradingPair.isSupported(normalized)) {
                     strategyProfiles.put(normalized, copyStrategyProfile(profile));
                 }
             });
@@ -833,8 +835,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             resetEntryTarget();
         }
         releaseSymbolTradeSlot();
-        log.info("[accountId={} alias={}] 引擎已停止。总交易量: {} USDT, 闭环轮数: {}",
-                accountId, accountAlias, totalVolumeUsdt.get(), roundTripsCompleted.get());
+        log.info("[accountId={} alias={}] 引擎已停止。总交易量: {} {}, 闭环轮数: {}",
+                accountId, accountAlias, totalVolumeUsdt.get(), quoteAsset(), roundTripsCompleted.get());
         return true;
         });
     }
@@ -1406,8 +1408,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             }
         }
         if (dailyVolumeLimitReached() && dailyVolumeStopPending.compareAndSet(false, true)) {
-            log.warn("[accountId={} alias={}] 今日真实成交量 {} USDT 已达到上限 {} USDT；停止新买入，空仓后自动停止",
-                    accountId, accountAlias, totalVolumeUsdt.get(), dailyVolumeLimitUsdt());
+            log.warn("[accountId={} alias={}] 今日真实成交量 {} {} 已达到上限 {} {}；停止新买入，空仓后自动停止",
+                    accountId, accountAlias, totalVolumeUsdt.get(), quoteAsset(), dailyVolumeLimitUsdt(), quoteAsset());
         }
         riskGuard.recordActualFill(side, inventoryQuantity, trade.quoteQuantity(), cashCommissionQuote,
                 tradeTimeMs > 0 ? tradeTimeMs : System.currentTimeMillis(), properties.getStrategy());
@@ -1788,7 +1790,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (maxDust == null || maxDust.signum() <= 0 || sellability.notional().signum() <= 0) return true;
         if (sellability.notional().compareTo(maxDust) <= 0) return true;
         halt("DUST 残余库存名义额超过上限 "
-                + sellability.notional().toPlainString() + " USDT，停止继续买入等待人工处理");
+                + sellability.notional().toPlainString() + " " + quoteAsset() + "，停止继续买入等待人工处理");
         return false;
     }
 
@@ -2710,8 +2712,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return withStateLock(() -> {
         String target = requestedSymbol == null ? "" : requestedSymbol.trim().toUpperCase();
         String current = properties.getStrategy().getSymbol().toUpperCase();
-        if (!target.matches("[A-Z0-9]{5,20}") || !target.endsWith("USDT")) {
-            return SymbolSwitchResult.rejected(current, "交易对格式无效；当前策略仅支持 USDT 现货交易对");
+        if (!SupportedTradingPair.isSupported(target)) {
+            return SymbolSwitchResult.rejected(current, "交易对格式无效；当前策略仅支持 USDT 现货交易对及 ALGOUSDC");
         }
         if (target.equals(current)) return new SymbolSwitchResult(true, current, "交易对未变化");
         if (isRunning.get() || activeOrderId.get() != null) {
@@ -2761,6 +2763,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             return SymbolSwitchResult.rejected(current, "无法持久化目标交易对，已保持原交易对");
         }
         properties.getStrategy().setSymbol(target);
+        accountRiskCoordinator.register(accountEngineKey, quoteAsset(), riskGuard::snapshot,
+                accountRiskReconciled::get);
         if (lastTargetBuyFill != null) {
             lastTargetBuyFill.ifPresent(fill -> symbolTradeCoordinator.restoreBuyFill(
                     target, fill.price(), fill.tradeTimeMs()));
@@ -2907,8 +2911,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     private String dailyVolumeLimitMessage(String action) {
         return "今日真实成交量 " + totalVolumeUsdt.get().stripTrailingZeros().toPlainString()
-                + " USDT 已达到每日上限 "
-                + dailyVolumeLimitUsdt().stripTrailingZeros().toPlainString() + " USDT；" + action;
+                + " " + quoteAsset() + " 已达到每日上限 "
+                + dailyVolumeLimitUsdt().stripTrailingZeros().toPlainString() + " " + quoteAsset() + "；" + action;
     }
 
     private BnbBalanceSnapshot refreshBnbBalanceSnapshot(boolean force) {
@@ -3234,9 +3238,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                                                               Long requestedBreakEvenMaxHoldMs) {
         return withStateLock(() -> {
         String symbol = normalizeStrategySymbol(requestedSymbol);
-        if (symbol.isBlank() || !symbol.endsWith("USDT")) {
+        if (!SupportedTradingPair.isSupported(symbol)) {
             return StrategySwitchResult.rejected(properties.getStrategy().getSymbol(),
-                    "交易对格式无效；当前策略仅支持 USDT 现货交易对");
+                    "交易对格式无效；当前策略仅支持 USDT 现货交易对及 ALGOUSDC");
         }
         BinanceProperties.SymbolStrategyProfile existing = strategyProfiles.get(symbol);
         String mode = requestedMode == null || requestedMode.isBlank()
@@ -3251,7 +3255,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (amount != null && (amount.signum() <= 0
                 || amount.compareTo(properties.getStrategy().getMaxLiveOrderNotionalUsdt()) > 0)) {
             return StrategySwitchResult.rejected(symbol, "单笔金额必须大于 0 且不超过生产上限 "
-                    + properties.getStrategy().getMaxLiveOrderNotionalUsdt().toPlainString() + " USDT");
+                    + properties.getStrategy().getMaxLiveOrderNotionalUsdt().toPlainString()
+                    + " " + SupportedTradingPair.quoteAsset(symbol));
         }
         Long entryTimeout = requestedEntryTimeoutMs == null && existing != null
                 ? existing.getEntryTimeoutMs() : requestedEntryTimeoutMs;
@@ -3300,7 +3305,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         if (dailyVolumeLimitUsdt.signum() <= 0
                 || dailyVolumeLimitUsdt.compareTo(new BigDecimal("1000000000")) > 0) {
             return StrategySwitchResult.rejected(symbol,
-                    "每日成交量上限必须大于 0 且不超过 1,000,000,000 USDT");
+                    "每日成交量上限必须大于 0 且不超过 1,000,000,000 "
+                            + SupportedTradingPair.quoteAsset(symbol));
         }
         // Null deliberately clears a manual fee/profit override: the fee returns to automatic
         // account lookup and the profit target returns to the global default.

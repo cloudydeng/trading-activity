@@ -61,6 +61,8 @@ BOT_ACCOUNT_PROFILES_JSON='{
 `orderAmountsUsdt` 可为每个账户按交易对设置单笔 USDT 名义金额；未配置的交易对回退到全局
 `binance.strategy.order-amount-usdt`。该值是随机区间的基准；实际 BUY 取 `[基准×80%, 基准×120%]` 内的整数，且不会超过 `max-live-order-notional-usdt`，控制台显示的是当前基准值。例如基准 `12 USDT` 时实际为 `10～14 USDT`。
 
+另外支持 `ALGOUSDC`：同样的金额配置字段对该交易对表示 USDC，买单使用账户可用 USDC，成交统计也以 USDC 计价。USDT 与 USDC 交易对可在同一账户配置，但总风险及回撤目前按名义金额 1:1 合计；同账户不可同时配置 `ALGOUSDT` 和 `ALGOUSDC`，以免共享的 ALGO 持仓被两套账本重复管理。
+
 生产环境可在受保护配置文件中用 `BINANCE_STRATEGY_MAX_DAILY_DRAWDOWN_USDT` 覆盖日内最大回撤；未配置时默认 `8 USDT`，修改后需重启服务。同交易对跨 API key 的交易轮次并发名额支持“全局默认值 + 按交易对覆盖”，均可设置 `0～20`；例如 `REZUSDT=0`、`THEUSDT=2`，没有单独设置的交易对使用全局默认值。`0` 表示暂停对应交易对新的 BUY 轮次，已有订单和持仓仍继续安全管理，恢复为 `1～20` 后按原 FIFO 继续。某交易对从所有账户配置中删除后，其单独并发覆盖也会自动清理。env 可用 `BINANCE_STRATEGY_MAX_CONCURRENT_ENTRIES_PER_SYMBOL` 提供全局初始值，控制台保存到 SQLite 后优先于 env 并立即生效。
 
 `symbolStrategies` 可为每个账户的每个交易对选择四种策略：

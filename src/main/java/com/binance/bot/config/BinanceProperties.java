@@ -135,7 +135,7 @@ public class BinanceProperties {
         /** After a detected sell-off, require a quiet period and a measured reclaim before bidding again. */
         private long postSelloffCooldownMs = 1_500;
         private double minPostSelloffReclaimBps = 3;
-        /** Conservative production guards. Values are denominated in the quote asset (USDT). */
+        /** Conservative production guards. Per-symbol values use quote asset; shared USDT/USDC caps assume 1:1. */
         private BigDecimal maxInventoryUsdt = new BigDecimal("100");
         private BigDecimal maxDailyDrawdownUsdt = new BigDecimal("8");
         private long maxInventoryAgeMs = 60_000;

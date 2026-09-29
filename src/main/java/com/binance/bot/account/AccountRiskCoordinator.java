@@ -20,6 +20,7 @@ public final class AccountRiskCoordinator {
     private static final long FORCED_BNB_DEDUP_MS = BNB_CACHE_MS;
     private final Map<String, Supplier<TradingRiskGuard.RiskSnapshot>> riskSuppliers = new ConcurrentHashMap<>();
     private final Map<String, Supplier<Boolean>> reconciliationSuppliers = new ConcurrentHashMap<>();
+    private final Map<String, String> quoteAssetsByEngine = new ConcurrentHashMap<>();
     private final Map<String, BigDecimal> pendingEntryNotional = new LinkedHashMap<>();
     private final ReentrantLock lock = new ReentrantLock();
     private LocalDate drawdownDate = LocalDate.now(ZoneOffset.UTC);
@@ -27,8 +28,8 @@ public final class AccountRiskCoordinator {
     private String latchedEntryBlockReason;
     private BnbBalanceSnapshot bnbBalanceSnapshot;
     private long lastBnbBalanceAttemptAtMs;
-    private BigDecimal freeQuoteBalance;
-    private BigDecimal quoteBalancePositionCostBaseline = BigDecimal.ZERO;
+    private final Map<String, BigDecimal> freeQuoteBalances = new LinkedHashMap<>();
+    private final Map<String, BigDecimal> quoteBalancePositionCostBaselines = new LinkedHashMap<>();
 
     public void register(String engineId, Supplier<TradingRiskGuard.RiskSnapshot> riskSupplier) {
         register(engineId, riskSupplier, () -> true);
@@ -36,10 +37,17 @@ public final class AccountRiskCoordinator {
 
     public void register(String engineId, Supplier<TradingRiskGuard.RiskSnapshot> riskSupplier,
                          Supplier<Boolean> reconciliationSupplier) {
+        register(engineId, "USDT", riskSupplier, reconciliationSupplier);
+    }
+
+    public void register(String engineId, String quoteAsset,
+                         Supplier<TradingRiskGuard.RiskSnapshot> riskSupplier,
+                         Supplier<Boolean> reconciliationSupplier) {
         if (engineId != null && riskSupplier != null) {
             riskSuppliers.put(engineId, riskSupplier);
             reconciliationSuppliers.put(engineId,
                     reconciliationSupplier == null ? () -> false : reconciliationSupplier);
+            quoteAssetsByEngine.put(engineId, quoteAsset);
         }
     }
 
@@ -48,6 +56,7 @@ public final class AccountRiskCoordinator {
         try {
             riskSuppliers.remove(engineId);
             reconciliationSuppliers.remove(engineId);
+            quoteAssetsByEngine.remove(engineId);
             pendingEntryNotional.remove(engineId);
         } finally {
             lock.unlock();
@@ -62,8 +71,11 @@ public final class AccountRiskCoordinator {
             for (JsonNode balance : accountInfo.path("balances")) {
                 if (quoteAsset.equalsIgnoreCase(balance.path("asset").asText())) {
                     try {
-                        freeQuoteBalance = new BigDecimal(balance.path("free").asText("0"));
-                        quoteBalancePositionCostBaseline = accountRiskSnapshot().positionCost();
+                        BigDecimal free = new BigDecimal(balance.path("free").asText("0"));
+                        if (free.signum() < 0) return false;
+                        freeQuoteBalances.put(quoteAsset, free);
+                        quoteBalancePositionCostBaselines.put(quoteAsset,
+                                accountRiskSnapshot().positionCostsByQuote().getOrDefault(quoteAsset, BigDecimal.ZERO));
                         return true;
                     } catch (NumberFormatException ignored) {
                         return false;
@@ -84,6 +96,8 @@ public final class AccountRiskCoordinator {
             if (engineId == null || requestedNotional == null || requestedNotional.signum() <= 0) {
                 return new EntryReservation(false, "账户风险预留参数无效");
             }
+            String quoteAsset = quoteAssetsByEngine.get(engineId);
+            if (quoteAsset == null) return new EntryReservation(false, "无法确认买单的报价币种");
             AccountRiskSnapshot accountRisk = accountRiskSnapshot();
             if (!accountRisk.complete()) {
                 return new EntryReservation(false, "无法确认账户所有币种的风险状态");
@@ -97,20 +111,31 @@ public final class AccountRiskCoordinator {
             BigDecimal projected = total.add(requestedNotional);
             if (accountExposureLimit != null && accountExposureLimit.signum() > 0
                     && projected.compareTo(accountExposureLimit) > 0) {
+                String aggregateUnit = quoteAssetsByEngine.containsValue("USDC")
+                        ? "U（USDT/USDC 按 1:1）" : "USDT";
                 return new EntryReservation(false, "新买入后账户总风险预计超过 "
-                        + formatUsdt(accountExposureLimit) + " USDT（当前占用 "
-                        + formatUsdt(total) + " USDT + 本单 " + formatUsdt(requestedNotional)
-                        + " USDT = 预计 " + formatUsdt(projected) + " USDT）");
+                        + formatUsdt(accountExposureLimit) + " " + aggregateUnit + "（当前占用 "
+                        + formatUsdt(total) + " " + aggregateUnit + " + 本单 " + formatUsdt(requestedNotional)
+                        + " " + quoteAsset + " = 预计 " + formatUsdt(projected) + " " + aggregateUnit + "）");
+            }
+            BigDecimal freeQuoteBalance = freeQuoteBalances.get(quoteAsset);
+            if (freeQuoteBalance == null && !"USDT".equals(quoteAsset)) {
+                return new EntryReservation(false, "无法确认账户可用 " + quoteAsset + " 余额");
             }
             if (freeQuoteBalance != null) {
-                BigDecimal spentSinceSnapshot = accountRisk.positionCost()
-                        .subtract(quoteBalancePositionCostBaseline).max(BigDecimal.ZERO);
+                BigDecimal spentSinceSnapshot = accountRisk.positionCostsByQuote()
+                        .getOrDefault(quoteAsset, BigDecimal.ZERO)
+                        .subtract(quoteBalancePositionCostBaselines.getOrDefault(quoteAsset, BigDecimal.ZERO))
+                        .max(BigDecimal.ZERO);
                 BigDecimal available = freeQuoteBalance.subtract(spentSinceSnapshot);
                 for (Map.Entry<String, BigDecimal> entry : pendingEntryNotional.entrySet()) {
-                    if (!engineId.equals(entry.getKey())) available = available.subtract(entry.getValue());
+                    if (!engineId.equals(entry.getKey())
+                            && quoteAsset.equals(quoteAssetsByEngine.get(entry.getKey()))) {
+                        available = available.subtract(entry.getValue());
+                    }
                 }
                 if (requestedNotional.compareTo(available.max(BigDecimal.ZERO)) > 0) {
-                    return new EntryReservation(false, "账户可用 USDT 不足，暂缓新买单");
+                    return new EntryReservation(false, "账户可用 " + quoteAsset + " 不足，暂缓新买单");
                 }
             }
             pendingEntryNotional.put(engineId, requestedNotional);
@@ -200,31 +225,36 @@ public final class AccountRiskCoordinator {
     private AccountRiskSnapshot accountRiskSnapshot() {
         BigDecimal positionCost = BigDecimal.ZERO;
         BigDecimal todayNetPnl = BigDecimal.ZERO;
+        Map<String, BigDecimal> positionCostsByQuote = new LinkedHashMap<>();
         LocalDate today = LocalDate.now(ZoneOffset.UTC);
-        for (Supplier<TradingRiskGuard.RiskSnapshot> supplier : riskSuppliers.values()) {
+        for (Map.Entry<String, Supplier<TradingRiskGuard.RiskSnapshot>> entry : riskSuppliers.entrySet()) {
             try {
-                TradingRiskGuard.RiskSnapshot value = supplier.get();
-                if (value == null) return new AccountRiskSnapshot(positionCost, todayNetPnl, false);
+                TradingRiskGuard.RiskSnapshot value = entry.getValue().get();
+                if (value == null) return new AccountRiskSnapshot(positionCost, todayNetPnl, positionCostsByQuote, false);
                 if (value.positionCostUsdt() != null && value.positionCostUsdt().signum() > 0) {
                     positionCost = positionCost.add(value.positionCostUsdt());
+                    String quoteAsset = quoteAssetsByEngine.get(entry.getKey());
+                    if (quoteAsset == null) return new AccountRiskSnapshot(positionCost, todayNetPnl,
+                            positionCostsByQuote, false);
+                    positionCostsByQuote.merge(quoteAsset, value.positionCostUsdt(), BigDecimal::add);
                 }
                 if (today.equals(value.ledgerDate()) && value.estimatedNetPnlUsdt() != null) {
                     todayNetPnl = todayNetPnl.add(value.estimatedNetPnlUsdt());
                 }
             } catch (RuntimeException ignored) {
-                return new AccountRiskSnapshot(positionCost, todayNetPnl, false);
+                return new AccountRiskSnapshot(positionCost, todayNetPnl, positionCostsByQuote, false);
             }
         }
         for (Supplier<Boolean> supplier : reconciliationSuppliers.values()) {
             try {
                 if (!Boolean.TRUE.equals(supplier.get())) {
-                    return new AccountRiskSnapshot(positionCost, todayNetPnl, false);
+                    return new AccountRiskSnapshot(positionCost, todayNetPnl, positionCostsByQuote, false);
                 }
             } catch (RuntimeException ignored) {
-                return new AccountRiskSnapshot(positionCost, todayNetPnl, false);
+                return new AccountRiskSnapshot(positionCost, todayNetPnl, positionCostsByQuote, false);
             }
         }
-        return new AccountRiskSnapshot(positionCost, todayNetPnl, true);
+        return new AccountRiskSnapshot(positionCost, todayNetPnl, positionCostsByQuote, true);
     }
 
     private String accountEntryBlockReason(AccountRiskSnapshot accountRisk, BigDecimal accountDrawdownLimit) {
@@ -248,7 +278,8 @@ public final class AccountRiskCoordinator {
         return value.stripTrailingZeros().toPlainString();
     }
 
-    private record AccountRiskSnapshot(BigDecimal positionCost, BigDecimal todayNetPnl, boolean complete) { }
+    private record AccountRiskSnapshot(BigDecimal positionCost, BigDecimal todayNetPnl,
+                                       Map<String, BigDecimal> positionCostsByQuote, boolean complete) { }
     public record EntryReservation(boolean accepted, String reason) { }
     public record ExposureSnapshot(BigDecimal positionCost, BigDecimal pendingEntryNotional,
                                    BigDecimal totalExposure, BigDecimal todayNetPnl,

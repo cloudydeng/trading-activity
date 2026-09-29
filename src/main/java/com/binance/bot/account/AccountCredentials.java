@@ -1,6 +1,7 @@
 package com.binance.bot.account;
 
 import com.binance.bot.config.BinanceProperties;
+import com.binance.bot.config.SupportedTradingPair;
 import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -37,7 +38,7 @@ public record AccountCredentials(String accountId, String alias, String apiKey, 
             orderAmountsUsdt.forEach((symbol, amount) -> {
                 if (symbol == null || amount == null || amount.signum() <= 0) return;
                 String normalizedSymbol = symbol.trim().toUpperCase();
-                if (normalizedSymbol.matches("[A-Z0-9]{5,20}") && normalizedSymbol.endsWith("USDT")) {
+                if (SupportedTradingPair.isSupported(normalizedSymbol)) {
                     normalizedAmounts.put(normalizedSymbol, amount);
                 }
             });
@@ -48,7 +49,7 @@ public record AccountCredentials(String accountId, String alias, String apiKey, 
             symbolStrategies.forEach((symbol, strategy) -> {
                 if (symbol == null || strategy == null) return;
                 String normalizedSymbol = symbol.trim().toUpperCase();
-                if (normalizedSymbol.matches("[A-Z0-9]{5,20}") && normalizedSymbol.endsWith("USDT")) {
+                if (SupportedTradingPair.isSupported(normalizedSymbol)) {
                     normalizedStrategies.put(normalizedSymbol, strategy);
                 }
             });
@@ -59,12 +60,13 @@ public record AccountCredentials(String accountId, String alias, String apiKey, 
             for (String symbol : symbols) {
                 if (symbol == null || symbol.isBlank()) continue;
                 String normalizedSymbol = symbol.trim().toUpperCase();
-                if (!normalizedSymbol.matches("[A-Z0-9]{5,20}") || !normalizedSymbol.endsWith("USDT")) {
-                    throw new IllegalArgumentException("symbols must contain valid USDT trading pairs");
+                if (!SupportedTradingPair.isSupported(normalizedSymbol)) {
+                    throw new IllegalArgumentException("symbols must contain valid USDT trading pairs or ALGOUSDC");
                 }
                 normalizedSymbols.add(normalizedSymbol);
             }
         }
+        SupportedTradingPair.requireDistinctBaseAssets(normalizedSymbols);
         symbols = List.copyOf(normalizedSymbols);
     }
 

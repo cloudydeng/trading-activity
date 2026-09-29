@@ -1,5 +1,7 @@
 package com.binance.bot.strategy;
 
+import com.binance.bot.config.SupportedTradingPair;
+
 import com.binance.bot.config.BinanceProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
@@ -1086,7 +1088,7 @@ public class DailyTradeStatsStore {
                     while (rows.next()) {
                         String key = rows.getString("setting_key");
                         String symbol = key.substring(prefix.length()).toUpperCase();
-                        if (!symbol.matches("[A-Z0-9]{5,20}") || !symbol.endsWith("USDT")) continue;
+                        if (!SupportedTradingPair.isSupported(symbol)) continue;
                         try {
                             BinanceProperties.SymbolStrategyProfile profile = objectMapper.readValue(
                                     rows.getString("setting_value"), BinanceProperties.SymbolStrategyProfile.class);
@@ -1181,8 +1183,8 @@ public class DailyTradeStatsStore {
 
     private String normalizeSymbol(String symbol) {
         String normalized = symbol == null ? "" : symbol.trim().toUpperCase();
-        if (!normalized.matches("[A-Z0-9]{5,20}") || !normalized.endsWith("USDT")) {
-            throw new IllegalArgumentException("当前策略仅支持 USDT 现货交易对");
+        if (!SupportedTradingPair.isSupported(normalized)) {
+            throw new IllegalArgumentException("当前策略仅支持 USDT 现货交易对及 ALGOUSDC");
         }
         return normalized;
     }
@@ -1192,8 +1194,9 @@ public class DailyTradeStatsStore {
         if (symbols != null) {
             for (String symbol : symbols) normalized.add(normalizeSymbol(symbol));
         }
-        if (normalized.isEmpty()) throw new IllegalArgumentException("账户至少需要保留一个 USDT 交易对");
+        if (normalized.isEmpty()) throw new IllegalArgumentException("账户至少需要保留一个交易对");
         if (normalized.size() > 5) throw new IllegalArgumentException("一个账户最多配置 5 个交易对");
+        SupportedTradingPair.requireDistinctBaseAssets(normalized);
         return List.copyOf(normalized);
     }
 

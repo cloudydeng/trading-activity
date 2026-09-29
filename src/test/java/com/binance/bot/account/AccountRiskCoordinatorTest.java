@@ -117,6 +117,41 @@ class AccountRiskCoordinatorTest {
     }
 
     @Test
+    void usdcOrdersUseUsdcBalanceAndShareApproximateAccountExposureLimit() throws Exception {
+        AccountRiskCoordinator coordinator = new AccountRiskCoordinator();
+        coordinator.register("a::ALGOUSDC", "USDC", () -> risk("0", "0"), () -> true);
+        coordinator.register("a::BABYUSDT", "USDT", () -> risk("0", "0"), () -> true);
+        var account = new ObjectMapper().readTree("""
+                {"balances":[{"asset":"USDT","free":"20","locked":"0"},
+                             {"asset":"USDC","free":"8","locked":"0"}]}
+                """);
+        assertTrue(coordinator.updateQuoteBalance(account, "USDT"));
+        assertTrue(coordinator.updateQuoteBalance(account, "USDC"));
+
+        assertTrue(coordinator.reserveEntry("a::BABYUSDT", new BigDecimal("12"),
+                new BigDecimal("25"), new BigDecimal("8")).accepted());
+        assertTrue(coordinator.reserveEntry("a::ALGOUSDC", new BigDecimal("7"),
+                new BigDecimal("25"), new BigDecimal("8")).accepted());
+        coordinator.releaseEntry("a::ALGOUSDC");
+        assertFalse(coordinator.reserveEntry("a::ALGOUSDC", new BigDecimal("9"),
+                new BigDecimal("25"), new BigDecimal("8")).accepted());
+        assertFalse(coordinator.reserveEntry("a::ALGOUSDC", new BigDecimal("14"),
+                new BigDecimal("25"), new BigDecimal("8")).accepted());
+    }
+
+    @Test
+    void usdcEntryFailsClosedWithoutUsdcSnapshot() {
+        AccountRiskCoordinator coordinator = new AccountRiskCoordinator();
+        coordinator.register("a::ALGOUSDC", "USDC", () -> risk("0", "0"), () -> true);
+
+        AccountRiskCoordinator.EntryReservation result = coordinator.reserveEntry("a::ALGOUSDC",
+                new BigDecimal("6"), new BigDecimal("100"), new BigDecimal("8"));
+
+        assertFalse(result.accepted());
+        assertTrue(result.reason().contains("USDC"));
+    }
+
+    @Test
     void unreconciledConfiguredSymbolFailsClosed() {
         AccountRiskCoordinator coordinator = new AccountRiskCoordinator();
         coordinator.register("a::ENSO", () -> risk("0", "0"), () -> false);

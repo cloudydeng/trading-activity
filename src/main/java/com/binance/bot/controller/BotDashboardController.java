@@ -1,5 +1,6 @@
 package com.binance.bot.controller;
 
+import com.binance.bot.config.SupportedTradingPair;
 import com.binance.bot.account.AccountTradingRuntime;
 import com.binance.bot.account.SymbolTradeCoordinator;
 import com.binance.bot.account.TradingAccountManager;
@@ -111,9 +112,9 @@ public class BotDashboardController {
                 current.maxConcurrentEntriesBySymbol()));
         String symbol = request.symbol() == null ? "" : request.symbol().trim().toUpperCase(Locale.ROOT);
         if (!symbol.isBlank()) {
-            if (!symbol.matches("[A-Z0-9]{5,20}") || !symbol.endsWith("USDT")) {
+            if (!SupportedTradingPair.isSupported(symbol)) {
                 return ResponseEntity.badRequest().body(Map.of("accepted", false,
-                        "message", "请输入有效的 USDT 交易对，例如 BTCUSDT"));
+                        "message", "请输入有效的 USDT 交易对或 ALGOUSDC"));
             }
             if (!accountManager.configuredTradingSymbols().contains(symbol)) {
                 return ResponseEntity.badRequest().body(Map.of("accepted", false,
@@ -409,7 +410,11 @@ public class BotDashboardController {
             return ResponseEntity.status(409).body(Map.of("accepted", false,
                     "message", "多币种账户不能在运行时替换交易对，请修改账户 symbols 配置后重启"));
         }
+        String previousSymbol = runtime.get().engine().getSymbol();
         HighFrequencyVolumeChurnEngine.SymbolSwitchResult result = runtime.get().engine().switchSymbol(request.symbol());
+        if (result.accepted() && !previousSymbol.equals(result.symbol())) {
+            runtime.get().adoptSymbolSwitch(previousSymbol, result.symbol());
+        }
         return result.accepted() ? ResponseEntity.ok(result) : ResponseEntity.status(409).body(result);
     }
 

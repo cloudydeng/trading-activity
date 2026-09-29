@@ -1,6 +1,7 @@
 package com.binance.bot.account;
 
 import com.binance.bot.config.BinanceProperties;
+import com.binance.bot.config.SupportedTradingPair;
 import com.binance.bot.manager.SymbolRuleManager;
 import com.binance.bot.notification.TradeNotificationService;
 import com.binance.bot.service.AccountUserDataStream;
@@ -179,6 +180,7 @@ public class AccountTradingRuntimeFactory {
         }
         if (symbols.isEmpty()) throw new IllegalArgumentException("account has no configured symbol");
         if (symbols.size() > 5) throw new IllegalArgumentException("an account supports at most 5 concurrent symbols");
+        SupportedTradingPair.requireDistinctBaseAssets(symbols);
         return List.copyOf(symbols);
     }
 
