@@ -22,7 +22,7 @@ import java.util.concurrent.locks.ReentrantLock;
 public final class SymbolTradeCoordinator {
     private static final long CROSS_ACCOUNT_BUY_GAP_MS = 2_000L;
     private static final BigDecimal MAX_BUY_PRICE_GAP = new BigDecimal("0.005");
-    private static final long BUY_PRICE_GAP_MAX_WAIT_MS = 3_600_000L;
+    private static final long BUY_PRICE_GAP_MAX_WAIT_MS = 1_800_000L;
     /**
      * Fair lock defines the ordering of truly concurrent first requests; the per-symbol
      * waiting maps below preserve that order across later retries.

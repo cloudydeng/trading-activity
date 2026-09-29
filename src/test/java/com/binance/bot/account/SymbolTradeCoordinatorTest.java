@@ -18,7 +18,7 @@ class SymbolTradeCoordinatorTest {
     @TempDir Path tempDir;
 
     @Test
-    void priceGapWaitExpiresAtOneHourAndSurvivesRestartButResetsOnReentry() {
+    void priceGapWaitExpiresAtThirtyMinutesAndSurvivesRestartButResetsOnReentry() {
         BinanceProperties properties = new BinanceProperties();
         properties.getStorage().setDailyStatsDb(tempDir.resolve("daily.db").toString());
         DailyTradeStatsStore store = new DailyTradeStatsStore(properties);
@@ -34,20 +34,20 @@ class SymbolTradeCoordinatorTest {
         assertFalse(first.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.6031"), now).allowed());
         assertEquals(now, store.loadBuyPriceGapWaitStartedAt("BABYUSDT").orElseThrow());
         assertFalse(first.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.6031"),
-                now + 3_599_999L).allowed());
+                now + 1_799_999L).allowed());
 
         SymbolTradeCoordinator restarted = new SymbolTradeCoordinator(store);
         restarted.restoreBuyFill("BABYUSDT", reference.price(), reference.tradeTimeMs());
         assertTrue(restarted.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.6031"),
-                now + 3_600_000L).allowed());
+                now + 1_800_000L).allowed());
         assertTrue(restarted.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.5969"),
-                now + 3_600_001L).allowed());
+                now + 1_800_001L).allowed());
         assertTrue(store.loadBuyPriceGapWaitStartedAt("BABYUSDT").isEmpty());
         assertFalse(restarted.checkBuyPriceGap("BABYUSDT", new BigDecimal("0.6031"),
-                now + 3_600_002L).allowed());
-        assertEquals(now + 3_600_002L,
+                now + 1_800_002L).allowed());
+        assertEquals(now + 1_800_002L,
                 store.loadBuyPriceGapWaitStartedAt("BABYUSDT").orElseThrow());
-        restarted.recordBuyFill("BABYUSDT", new BigDecimal("0.6032"), now + 3_600_003L);
+        restarted.recordBuyFill("BABYUSDT", new BigDecimal("0.6032"), now + 1_800_003L);
         assertTrue(store.loadBuyPriceGapWaitStartedAt("BABYUSDT").isEmpty());
         store.close();
     }

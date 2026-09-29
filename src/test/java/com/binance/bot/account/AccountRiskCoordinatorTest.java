@@ -1,5 +1,6 @@
 package com.binance.bot.account;
 
+import com.binance.bot.config.BinanceProperties;
 import com.binance.bot.strategy.TradingRiskGuard;
 import com.binance.bot.service.BinanceAccountTradeClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,6 +18,24 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class AccountRiskCoordinatorTest {
+    @Test
+    void defaultExposureLimitAllowsUpToOneHundredUsdtAcrossSymbols() {
+        BigDecimal limit = new BinanceProperties().getStrategy().getMaxInventoryUsdt();
+        assertEquals(new BigDecimal("100"), limit);
+
+        AccountRiskCoordinator coordinator = new AccountRiskCoordinator();
+        coordinator.register("a::BABY", () -> risk("0", "0"));
+        coordinator.register("a::VTHO", () -> risk("0", "0"));
+        coordinator.register("a::BTC", () -> risk("0", "0"));
+
+        assertTrue(coordinator.reserveEntry("a::BABY", new BigDecimal("60"), limit,
+                new BigDecimal("8")).accepted());
+        assertTrue(coordinator.reserveEntry("a::VTHO", new BigDecimal("40"), limit,
+                new BigDecimal("8")).accepted());
+        assertFalse(coordinator.reserveEntry("a::BTC", BigDecimal.ONE, limit,
+                new BigDecimal("8")).accepted());
+    }
+
     @Test
     void enforcesOneExposureLimitAcrossPositionsAndPendingBuys() {
         AccountRiskCoordinator coordinator = new AccountRiskCoordinator();

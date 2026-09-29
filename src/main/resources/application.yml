@@ -81,7 +81,7 @@ binance:
     post-selloff-cooldown-ms: 1500
     min-post-selloff-reclaim-bps: 3
     # 生产安全上限：达到任一限制后只允许继续降低已有仓位，禁止新开仓。
-    max-inventory-usdt: 40
+    max-inventory-usdt: 100
     # 可由受保护环境文件中的 BINANCE_STRATEGY_MAX_DAILY_DRAWDOWN_USDT 覆盖。
     max-daily-drawdown-usdt: "${BINANCE_STRATEGY_MAX_DAILY_DRAWDOWN_USDT:8}"
     max-inventory-age-ms: 600000

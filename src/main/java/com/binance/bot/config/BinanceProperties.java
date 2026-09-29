@@ -136,7 +136,7 @@ public class BinanceProperties {
         private long postSelloffCooldownMs = 1_500;
         private double minPostSelloffReclaimBps = 3;
         /** Conservative production guards. Values are denominated in the quote asset (USDT). */
-        private BigDecimal maxInventoryUsdt = new BigDecimal("40");
+        private BigDecimal maxInventoryUsdt = new BigDecimal("100");
         private BigDecimal maxDailyDrawdownUsdt = new BigDecimal("8");
         private long maxInventoryAgeMs = 60_000;
         /** Legacy compatibility setting; the three current strategies do not use this profit target. */
