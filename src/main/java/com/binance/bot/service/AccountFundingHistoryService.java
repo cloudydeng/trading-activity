@@ -120,6 +120,13 @@ public class AccountFundingHistoryService {
         for (int page = 1; page <= MAX_PAGES; page++) {
             JsonNode result = client.getUniversalTransferHistory(type, since, until, page, 100);
             JsonNode rows = result == null ? null : result.path("rows");
+            // Binance omits `rows` entirely when the result is {"total":0}.
+            if (result != null && result.path("total").isIntegralNumber()
+                    && result.path("total").asInt() == 0
+                    && (rows == null || rows.isMissingNode() || rows.isNull())) {
+                exhausted = true;
+                break;
+            }
             if (rows == null || !rows.isArray()) throw new IllegalStateException("transfer history unavailable");
             for (JsonNode item : rows) {
                 if (!"CONFIRMED".equals(item.path("status").asText())) continue;

@@ -42,7 +42,7 @@ class AccountFundingHistoryServiceTest {
                  {"id":"funding-wallet","coin":"BABY","amount":"40","status":1,"walletType":1,"insertTime":%d}]
                 """.formatted(now - 1000, now - 1000, now - 1000)));
         when(client.getUniversalTransferHistory(anyString(), anyLong(), anyLong(), anyInt(), eq(100)))
-                .thenReturn(mapper.readTree("{" + "\"total\":0,\"rows\":[]}"));
+                .thenReturn(mapper.readTree("{\"total\":0}"));
         when(client.getUniversalTransferHistory(eq("FUNDING_MAIN"), anyLong(), anyLong(), anyInt(), eq(100)))
                 .thenReturn(mapper.readTree("""
                         {"total":2,"rows":[{"tranId":123,"asset":"BABY","amount":"2.5","status":"CONFIRMED","timestamp":%d},
