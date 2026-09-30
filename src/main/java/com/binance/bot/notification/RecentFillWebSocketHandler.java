@@ -22,7 +22,8 @@ import java.util.concurrent.RejectedExecutionException;
 @Component
 @Slf4j
 public class RecentFillWebSocketHandler extends TextWebSocketHandler {
-    private static final int SNAPSHOT_LIMIT = 10;
+    // The dashboard shows 10 cards after folding each BUY into its matching SELL card.
+    private static final int SNAPSHOT_LIMIT = 40;
     private final TradeNotificationService notificationService;
     private final ObjectMapper objectMapper;
     private final ConcurrentMap<String, WebSocketSession> sessions = new ConcurrentHashMap<>();
