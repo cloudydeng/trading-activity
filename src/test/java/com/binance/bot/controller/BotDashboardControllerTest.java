@@ -15,6 +15,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -28,6 +30,32 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class BotDashboardControllerTest {
+    @Test
+    void lossSaleExportIncludesFilteredRowsAndBeijingTimes() {
+        TradingAccountManager accountManager = mock(TradingAccountManager.class);
+        TradeNotificationService notificationService = mock(TradeNotificationService.class);
+        DailyTradeStatsStore store = mock(DailyTradeStatsStore.class);
+        long buy = Instant.parse("2026-10-01T00:00:00Z").toEpochMilli();
+        long sell = buy + 90_000;
+        when(store.lossSaleExportRows("account-a", "PUMPUSDC")).thenReturn(List.of(
+                new DailyTradeStatsStore.LossSale("account-a", "=alias", "PUMPUSDC",
+                        12, 34, buy, sell, 90_000L, new BigDecimal("2"),
+                        new BigDecimal("3"), new BigDecimal("2"), new BigDecimal("2"))));
+        BotDashboardController controller = new BotDashboardController(
+                accountManager, new BinanceProperties(), notificationService, store,
+                new SymbolTradeCoordinator());
+
+        ResponseEntity<byte[]> response = controller.exportLossSales("account-a", "PUMPUSDC");
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        String csv = new String(response.getBody(), StandardCharsets.UTF_8);
+        assertEquals(true, csv.startsWith("\uFEFF账户别名,账户ID"));
+        assertEquals(true, csv.contains("\"'=alias\",\"account-a\",\"PUMPUSDC\""));
+        assertEquals(true, csv.contains("\"2026-10-01 08:00:00\",\"2026-10-01 08:01:30\",\"90\""));
+        assertEquals(true, csv.contains("\"USDC\",\"34\",\"12\""));
+        verify(store).lossSaleExportRows("account-a", "PUMPUSDC");
+    }
+
     @Test
     void tradingSettingsCanBeSavedAndAppliedImmediately() {
         TradingAccountManager accountManager = mock(TradingAccountManager.class);

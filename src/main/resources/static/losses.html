@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>亏损卖出记录 - Trading Activity</title>
+  <style>
+    :root{color-scheme:dark}body{font-family:system-ui,-apple-system,sans-serif;max-width:1500px;margin:28px auto;padding:0 18px;background:#101827;color:#e5e7eb}
+    a{color:#93c5fd}button,select{padding:9px 12px;border:1px solid #40506a;border-radius:7px;background:#172033;color:#e5e7eb;font-size:14px;cursor:pointer}
+    button:disabled{opacity:.45;cursor:not-allowed}.head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.head p{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+    h1{font-size:23px;margin:0 0 7px}h2{font-size:17px;margin:0 0 12px}.muted{color:#a5b4c7;font-size:14px}.error{color:#fb7185}
+    section{background:#172033;border:1px solid #28364e;border-radius:10px;padding:16px;margin-top:14px}.filters{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.filters label{display:flex;align-items:center;gap:8px}
+    .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;white-space:nowrap}th,td{padding:10px;border-bottom:1px solid #28364e;text-align:left;font-size:13px}th{color:#9aabc2;font-weight:500}.bad{color:#fb7185;font-weight:650}.pager{display:flex;align-items:center;gap:10px;margin-top:14px}
+  </style>
+</head>
+<body>
+  <div class="head">
+    <div><h1>亏损卖出记录</h1><div id="updated" class="muted">正在加载…</div></div>
+    <p><a href="/dashboard.html">返回控制台</a><a href="/volume.html">成交量汇总</a><button type="button" onclick="load()">立即刷新</button></p>
+  </div>
+  <section>
+    <p class="muted">记录卖出收入低于该账户、该币种持仓成本均价所分摊成本的成交。亏损金额为成本与卖出收入的差额，不含手续费折算；买入时间为本轮持仓首次买入时间。按 UTC 日期保留当天及之前 9 天，表中时间显示为北京时间。上线前已持有的仓位若缺少首次买入时间，将显示“未知”。</p>
+    <div class="filters">
+      <label>API 账户 <select id="accountFilter" onchange="changeFilter()"><option value="">全部账户</option></select></label>
+      <label>币种 <select id="symbolFilter" onchange="changeFilter()"><option value="">全部币种</option></select></label>
+      <button type="button" onclick="exportCsv()">导出当前筛选 CSV</button>
+    </div>
+  </section>
+  <section>
+    <h2>按 API 账户与币种汇总</h2>
+    <div class="table-wrap"><table><thead><tr><th>API 账户</th><th>交易对</th><th>亏损卖出笔数</th><th>卖出数量</th><th>价差亏损合计</th><th>平均持仓时长</th></tr></thead><tbody id="summaryRows"><tr><td colspan="6" class="muted">正在读取…</td></tr></tbody></table></div>
+  </section>
+  <section>
+    <h2>每笔亏损卖出</h2>
+    <div class="table-wrap"><table><thead><tr><th>API 账户</th><th>交易对</th><th>买入时间</th><th>卖出时间</th><th>持仓时长</th><th>卖出数量</th><th>买入成本均价</th><th>卖出价</th><th>价差亏损</th><th>订单 / 成交 ID</th></tr></thead><tbody id="detailRows"><tr><td colspan="10" class="muted">正在读取…</td></tr></tbody></table></div>
+    <div class="pager"><button id="previous" type="button" onclick="page(-1)">上一页</button><span id="pageInfo" class="muted"></span><button id="next" type="button" onclick="page(1)">下一页</button></div>
+  </section>
+  <script>
+    const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+    const number=value=>value===null||value===undefined?'—':Number(value).toLocaleString('zh-CN',{maximumFractionDigits:12});
+    const time=value=>value?new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}):'未知';
+    const duration=value=>value===null||value===undefined?'未知':`${number(Number(value)/1000)} 秒`;
+    const quote=symbol=>String(symbol||'').endsWith('USDC')?'USDC':'USDT';
+    const pageSize=100;
+    let offset=0,allSummaries=[];
+    function filters(){return {accountId:document.querySelector('#accountFilter').value,symbol:document.querySelector('#symbolFilter').value}}
+    function query(includePage=true){const selected=filters(),params=new URLSearchParams();if(selected.accountId)params.set('accountId',selected.accountId);if(selected.symbol)params.set('symbol',selected.symbol);if(includePage){params.set('limit',pageSize);params.set('offset',offset)}return params.toString()}
+    function syncFilterOptions(){
+      const account=document.querySelector('#accountFilter'),symbol=document.querySelector('#symbolFilter'),selectedAccount=account.value,selectedSymbol=symbol.value;
+      const accounts=[...new Map(allSummaries.map(row=>[row.accountId,row.accountAlias])).entries()].sort((a,b)=>a[1].localeCompare(b[1],'zh-CN'));
+      const symbols=[...new Set(allSummaries.map(row=>row.symbol))].sort();
+      account.innerHTML='<option value="">全部账户</option>'+accounts.map(([id,alias])=>`<option value="${esc(id)}">${esc(alias)} (${esc(id)})</option>`).join('');
+      symbol.innerHTML='<option value="">全部币种</option>'+symbols.map(value=>`<option value="${esc(value)}">${esc(value)}</option>`).join('');
+      account.value=selectedAccount;symbol.value=selectedSymbol;
+    }
+    function render(report){
+      const summaries=report.summaries||[],details=report.details||[];
+      document.querySelector('#summaryRows').innerHTML=summaries.length?summaries.map(row=>`<tr><td>${esc(row.accountAlias)}<br><span class="muted">${esc(row.accountId)}</span></td><td>${esc(row.symbol)}</td><td>${number(row.count)}</td><td>${number(row.quantity)}</td><td class="bad">${number(row.grossLossQuote)} ${quote(row.symbol)}</td><td>${duration(row.averageKnownHoldMs)}</td></tr>`).join(''):'<tr><td colspan="6" class="muted">当前筛选没有亏损卖出记录</td></tr>';
+      document.querySelector('#detailRows').innerHTML=details.length?details.map(row=>`<tr><td>${esc(row.accountAlias)}<br><span class="muted">${esc(row.accountId)}</span></td><td>${esc(row.symbol)}</td><td>${time(row.buyTimeMs)}</td><td>${time(row.sellTimeMs)}</td><td>${duration(row.holdMs)}</td><td>${number(row.quantity)}</td><td>${number(row.buyCostPrice)}</td><td>${number(row.sellPrice)}</td><td class="bad">${number(row.grossLossQuote)} ${quote(row.symbol)}</td><td>${esc(row.orderId)} / ${esc(row.tradeId)}</td></tr>`).join(''):'<tr><td colspan="10" class="muted">当前页没有记录</td></tr>';
+      const total=Number(report.totalCount||0);document.querySelector('#pageInfo').textContent=`${total?offset+1:0}–${Math.min(offset+pageSize,total)} / ${total} 笔`;document.querySelector('#previous').disabled=offset===0;document.querySelector('#next').disabled=offset+pageSize>=total;
+    }
+    async function load(){try{const selected=filters();const response=await fetch(`/api/accounts/loss-sales?${query()}`,{cache:'no-store'});if(response.status===401){location='/login.html';return}if(!response.ok)throw Error(response.status);const report=await response.json();if(!selected.accountId&&!selected.symbol){allSummaries=report.summaries||[];syncFilterOptions()}render(report);document.querySelector('#updated').textContent=`上次更新 ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`}catch(error){document.querySelector('#updated').innerHTML=`<span class="error">读取失败：${esc(error.message)}</span>`}}
+    function changeFilter(){offset=0;load()}
+    function page(direction){offset=Math.max(0,offset+direction*pageSize);load()}
+    function exportCsv(){location.href=`/api/accounts/loss-sales/export?${query(false)}`}
+    load();setInterval(load,30000);
+  </script>
+</body>
+</html>

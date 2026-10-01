@@ -137,6 +137,36 @@ public class DailyTradeStatsStore {
                     CREATE INDEX IF NOT EXISTS idx_trade_fill_date
                     ON trade_fill(trade_date)
                     """);
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS position_entry_time (
+                      account_id TEXT NOT NULL,
+                      symbol TEXT NOT NULL,
+                      buy_time INTEGER NOT NULL,
+                      PRIMARY KEY (account_id, symbol)
+                    )
+                    """);
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS loss_sale (
+                      account_id TEXT NOT NULL,
+                      account_alias TEXT NOT NULL,
+                      symbol TEXT NOT NULL,
+                      trade_identity TEXT NOT NULL,
+                      trade_id INTEGER NOT NULL,
+                      order_id INTEGER NOT NULL,
+                      buy_time INTEGER,
+                      sell_time INTEGER NOT NULL,
+                      hold_ms INTEGER,
+                      quantity TEXT NOT NULL,
+                      buy_cost_price TEXT NOT NULL,
+                      sell_price TEXT NOT NULL,
+                      gross_loss_quote TEXT NOT NULL,
+                      PRIMARY KEY (account_id, symbol, trade_identity)
+                    )
+                    """);
+            statement.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_loss_sale_time
+                    ON loss_sale(sell_time DESC)
+                    """);
         }
         if (tableExists("daily_trade_stats") && !columnExists("daily_trade_stats", "account_id")) {
             migrateLegacyDailyStats();
@@ -472,8 +502,18 @@ public class DailyTradeStatsStore {
                 MutableStats stats = load(date, normalizedAccountId, normalizedSymbol);
                 if (stats == null) stats = newStats(date, normalizedAccountId, alias, normalizedSymbol);
                 stats.accountAlias = alias;
+                long effectiveTradeTime = tradeTimeMs > 0 ? tradeTimeMs : System.currentTimeMillis();
+                if ("BUY".equalsIgnoreCase(side) && stats.positionQty.signum() <= 0) {
+                    savePositionEntryTime(normalizedAccountId, normalizedSymbol, effectiveTradeTime);
+                } else if ("SELL".equalsIgnoreCase(side)) {
+                    recordLossSale(stats, tradeIdentity, tradeId, orderId, inventoryQuantity,
+                            price, quoteQuantity, effectiveTradeTime);
+                }
                 applyTrade(stats, side, inventoryQuantity, quoteQuantity, commission,
                         commissionQuoteEquivalent, economicFeeQuote);
+                if ("SELL".equalsIgnoreCase(side) && stats.positionQty.signum() == 0) {
+                    clearPositionEntryTime(normalizedAccountId, normalizedSymbol);
+                }
                 upsert(stats);
                 if ("BUY".equalsIgnoreCase(side)) {
                     if (saveLastBuyFill(normalizedSymbol, price,
@@ -626,7 +666,7 @@ public class DailyTradeStatsStore {
     }
 
     /**
-     * Keeps the current UTC date plus the previous nine UTC dates in the fill-detail table.
+     * Keeps the current UTC date plus the previous nine UTC dates in the fill and loss-detail tables.
      * Daily aggregates and processed-trade identities are intentionally retained because they are
      * respectively the durable position ledger and the REST reconciliation deduplication ledger.
      */
@@ -636,8 +676,13 @@ public class DailyTradeStatsStore {
                 .minusDays(TRADE_FILL_RETENTION_DAYS - 1L);
         try {
             int deleted = deleteTradeFillsBefore(oldestRetainedDate);
+            int deletedLosses = deleteLossSalesBefore(oldestRetainedDate);
             if (deleted > 0) {
                 log.info("已删除 {} 条十天窗口外的成交明细，保留日期从 {} 起", deleted, oldestRetainedDate);
+            }
+            if (deletedLosses > 0) {
+                log.info("已删除 {} 条十天窗口外的亏损卖出记录，保留日期从 {} 起",
+                        deletedLosses, oldestRetainedDate);
             }
         } catch (RuntimeException e) {
             log.warn("自动清理十天窗口外的成交明细失败，将在下次计划任务重试", e);
@@ -653,6 +698,19 @@ public class DailyTradeStatsStore {
                 return statement.executeUpdate();
             } catch (SQLException e) {
                 throw new IllegalStateException("清理过期成交明细失败", e);
+            }
+        });
+    }
+
+    int deleteLossSalesBefore(LocalDate oldestRetainedDate) {
+        if (oldestRetainedDate == null) throw new IllegalArgumentException("最早保留日期不能为空");
+        return withLock(() -> {
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "DELETE FROM loss_sale WHERE sell_time<?")) {
+                statement.setLong(1, oldestRetainedDate.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli());
+                return statement.executeUpdate();
+            } catch (SQLException e) {
+                throw new IllegalStateException("清理过期亏损卖出记录失败", e);
             }
         });
     }
@@ -715,6 +773,81 @@ public class DailyTradeStatsStore {
         }
     }
 
+    private void savePositionEntryTime(String accountId, String symbol, long buyTime) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                INSERT INTO position_entry_time(account_id, symbol, buy_time) VALUES(?, ?, ?)
+                ON CONFLICT(account_id, symbol) DO UPDATE SET buy_time=excluded.buy_time
+                """)) {
+            statement.setString(1, accountId);
+            statement.setString(2, symbol);
+            statement.setLong(3, buyTime);
+            statement.executeUpdate();
+        }
+    }
+
+    private Long positionEntryTime(String accountId, String symbol) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT buy_time FROM position_entry_time WHERE account_id=? AND symbol=?")) {
+            statement.setString(1, accountId);
+            statement.setString(2, symbol);
+            try (ResultSet row = statement.executeQuery()) {
+                return row.next() ? row.getLong(1) : null;
+            }
+        }
+    }
+
+    private void clearPositionEntryTime(String accountId, String symbol) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "DELETE FROM position_entry_time WHERE account_id=? AND symbol=?")) {
+            statement.setString(1, accountId);
+            statement.setString(2, symbol);
+            statement.executeUpdate();
+        }
+    }
+
+    private void recordLossSale(MutableStats stats, String tradeIdentity, long tradeId, long orderId,
+                                BigDecimal inventoryQuantity, BigDecimal sellPrice,
+                                BigDecimal quoteQuantity, long sellTime) throws SQLException {
+        long oldestRetainedTime = LocalDate.now(ZoneOffset.UTC)
+                .minusDays(TRADE_FILL_RETENTION_DAYS - 1L)
+                .atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
+        if (sellTime < oldestRetainedTime) return;
+        if (stats.positionQty.signum() <= 0) return;
+        BigDecimal closedQty = inventoryQuantity.min(stats.positionQty);
+        BigDecimal buyCostPrice = stats.positionCostQuote.divide(stats.positionQty, MC);
+        BigDecimal allocatedCost = buyCostPrice.multiply(closedQty);
+        BigDecimal proceeds = inventoryQuantity.compareTo(closedQty) == 0 ? quoteQuantity
+                : quoteQuantity.multiply(closedQty).divide(inventoryQuantity, MC);
+        BigDecimal loss = allocatedCost.subtract(proceeds);
+        if (loss.signum() <= 0) return;
+        Long buyTime = positionEntryTime(stats.accountId, stats.symbol);
+        Long holdMs = buyTime == null || sellTime < buyTime ? null : sellTime - buyTime;
+        try (PreparedStatement statement = connection.prepareStatement("""
+                INSERT OR IGNORE INTO loss_sale
+                  (account_id, account_alias, symbol, trade_identity, trade_id, order_id,
+                   buy_time, sell_time, hold_ms, quantity, buy_cost_price, sell_price, gross_loss_quote)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            int i = 1;
+            statement.setString(i++, stats.accountId);
+            statement.setString(i++, stats.accountAlias);
+            statement.setString(i++, stats.symbol);
+            statement.setString(i++, tradeIdentity);
+            statement.setLong(i++, tradeId);
+            statement.setLong(i++, orderId);
+            if (buyTime == null) statement.setNull(i++, java.sql.Types.BIGINT);
+            else statement.setLong(i++, buyTime);
+            statement.setLong(i++, sellTime);
+            if (holdMs == null) statement.setNull(i++, java.sql.Types.BIGINT);
+            else statement.setLong(i++, holdMs);
+            statement.setString(i++, closedQty.toPlainString());
+            statement.setString(i++, buyCostPrice.toPlainString());
+            statement.setString(i++, sellPrice.toPlainString());
+            statement.setString(i, loss.toPlainString());
+            statement.executeUpdate();
+        }
+    }
+
     public DailyStatsSnapshot today(String accountId, String accountAlias, String symbol) {
         return snapshot(LocalDate.now(ZoneOffset.UTC), accountId, accountAlias, symbol);
     }
@@ -748,6 +881,7 @@ public class DailyTradeStatsStore {
                 stats.positionQty = BigDecimal.ZERO;
                 stats.positionCostQuote = BigDecimal.ZERO;
                 stats.roundTrips++;
+                clearPositionEntryTime(normalizedAccountId, normalizedSymbol);
                 upsert(stats);
                 connection.commit();
                 return true;
@@ -1010,6 +1144,116 @@ public class DailyTradeStatsStore {
             }
             return List.copyOf(fills);
         });
+    }
+
+    /** Loss details use the same rolling ten UTC dates as general fill details. */
+    public LossSaleReport lossSales(String accountId, String symbol, int limit, int offset) {
+        return withLock(() -> {
+            String selectedAccount = accountId == null || accountId.isBlank() ? null : normalizeAccountId(accountId);
+            String selectedSymbol = symbol == null || symbol.isBlank() ? null : normalizeSymbol(symbol);
+            String where = " WHERE sell_time>=?" + (selectedAccount == null ? "" : " AND account_id=?")
+                    + (selectedSymbol == null ? "" : " AND symbol=?");
+            int safeLimit = Math.max(1, Math.min(200, limit));
+            int safeOffset = Math.max(0, offset);
+            Map<String, MutableLossSaleSummary> summaries = new LinkedHashMap<>();
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT account_id, account_alias, symbol, quantity, gross_loss_quote, hold_ms "
+                            + "FROM loss_sale" + where + " ORDER BY sell_time DESC")) {
+                bindLossSaleFilters(statement, selectedAccount, selectedSymbol);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        String rowAccountId = rows.getString("account_id");
+                        String rowAlias = rows.getString("account_alias");
+                        String rowSymbol = rows.getString("symbol");
+                        String key = rowAccountId + "\u0000" + rowSymbol;
+                        MutableLossSaleSummary summary = summaries.computeIfAbsent(key,
+                                ignored -> new MutableLossSaleSummary(rowAccountId, rowAlias, rowSymbol));
+                        summary.count++;
+                        summary.quantity = summary.quantity.add(decimal(rows.getString("quantity")));
+                        summary.grossLossQuote = summary.grossLossQuote.add(decimal(rows.getString("gross_loss_quote")));
+                        Long holdMs = nullableLong(rows, "hold_ms");
+                        if (holdMs != null) {
+                            summary.totalKnownHoldMs += holdMs;
+                            summary.knownHoldCount++;
+                        }
+                    }
+                }
+            } catch (SQLException e) {
+                throw new IllegalStateException("读取亏损卖出汇总失败", e);
+            }
+            List<LossSale> details = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT account_id, account_alias, symbol, trade_id, order_id, buy_time, "
+                            + "sell_time, hold_ms, quantity, buy_cost_price, sell_price, gross_loss_quote "
+                            + "FROM loss_sale" + where + " ORDER BY sell_time DESC, trade_id DESC LIMIT ? OFFSET ?")) {
+                int index = bindLossSaleFilters(statement, selectedAccount, selectedSymbol);
+                statement.setInt(index++, safeLimit);
+                statement.setInt(index, safeOffset);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        details.add(readLossSale(rows));
+                    }
+                }
+            } catch (SQLException e) {
+                throw new IllegalStateException("读取亏损卖出明细失败", e);
+            }
+            List<LossSaleSummary> totals = summaries.values().stream()
+                    .map(MutableLossSaleSummary::snapshot)
+                    .sorted(java.util.Comparator.comparing(LossSaleSummary::accountAlias,
+                                    String.CASE_INSENSITIVE_ORDER)
+                            .thenComparing(LossSaleSummary::accountId)
+                            .thenComparing(LossSaleSummary::symbol))
+                    .toList();
+            long totalCount = totals.stream().mapToLong(LossSaleSummary::count).sum();
+            return new LossSaleReport(totals, List.copyOf(details), totalCount, safeLimit, safeOffset);
+        });
+    }
+
+    public List<LossSale> lossSaleExportRows(String accountId, String symbol) {
+        return withLock(() -> {
+            String selectedAccount = accountId == null || accountId.isBlank() ? null : normalizeAccountId(accountId);
+            String selectedSymbol = symbol == null || symbol.isBlank() ? null : normalizeSymbol(symbol);
+            String where = " WHERE sell_time>=?" + (selectedAccount == null ? "" : " AND account_id=?")
+                    + (selectedSymbol == null ? "" : " AND symbol=?");
+            List<LossSale> rows = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT account_id, account_alias, symbol, trade_id, order_id, buy_time, "
+                            + "sell_time, hold_ms, quantity, buy_cost_price, sell_price, gross_loss_quote "
+                            + "FROM loss_sale" + where + " ORDER BY sell_time DESC, trade_id DESC")) {
+                bindLossSaleFilters(statement, selectedAccount, selectedSymbol);
+                try (ResultSet result = statement.executeQuery()) {
+                    while (result.next()) rows.add(readLossSale(result));
+                }
+            } catch (SQLException e) {
+                throw new IllegalStateException("导出亏损卖出明细失败", e);
+            }
+            return List.copyOf(rows);
+        });
+    }
+
+    private int bindLossSaleFilters(PreparedStatement statement, String accountId, String symbol)
+            throws SQLException {
+        int index = 1;
+        statement.setLong(index++, LocalDate.now(ZoneOffset.UTC)
+                .minusDays(TRADE_FILL_RETENTION_DAYS - 1L)
+                .atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli());
+        if (accountId != null) statement.setString(index++, accountId);
+        if (symbol != null) statement.setString(index++, symbol);
+        return index;
+    }
+
+    private LossSale readLossSale(ResultSet rows) throws SQLException {
+        return new LossSale(rows.getString("account_id"), rows.getString("account_alias"),
+                rows.getString("symbol"), rows.getLong("trade_id"), rows.getLong("order_id"),
+                nullableLong(rows, "buy_time"), rows.getLong("sell_time"),
+                nullableLong(rows, "hold_ms"), decimal(rows.getString("quantity")),
+                decimal(rows.getString("buy_cost_price")), decimal(rows.getString("sell_price")),
+                decimal(rows.getString("gross_loss_quote")));
+    }
+
+    private Long nullableLong(ResultSet rows, String column) throws SQLException {
+        long value = rows.getLong(column);
+        return rows.wasNull() ? null : value;
     }
 
     public void saveActiveSymbol(String accountId, String symbol) {
@@ -1405,6 +1649,18 @@ public class DailyTradeStatsStore {
                              BigDecimal commission, String commissionAsset,
                              long tradeTimeMs, LocalDate tradeDate) { }
 
+    public record LossSale(String accountId, String accountAlias, String symbol,
+                           long tradeId, long orderId, Long buyTimeMs, long sellTimeMs, Long holdMs,
+                           BigDecimal quantity, BigDecimal buyCostPrice, BigDecimal sellPrice,
+                           BigDecimal grossLossQuote) { }
+
+    public record LossSaleSummary(String accountId, String accountAlias, String symbol,
+                                  long count, BigDecimal quantity, BigDecimal grossLossQuote,
+                                  Long averageKnownHoldMs) { }
+
+    public record LossSaleReport(List<LossSaleSummary> summaries, List<LossSale> details,
+                                 long totalCount, int limit, int offset) { }
+
     public record BuyFillReference(BigDecimal price, long tradeTimeMs) { }
 
     public record RuntimeState(String accountId, String symbol, String status, Long orderId,
@@ -1491,6 +1747,29 @@ public class DailyTradeStatsStore {
                     buy, sell, total, commission, totalCommissionBnb, cost,
                     grossPnl, grossPnl.subtract(economicFee),
                     tradeCount, roundTrips, commissionComplete);
+        }
+    }
+
+    private static final class MutableLossSaleSummary {
+        private final String accountId;
+        private final String accountAlias;
+        private final String symbol;
+        private long count;
+        private BigDecimal quantity = BigDecimal.ZERO;
+        private BigDecimal grossLossQuote = BigDecimal.ZERO;
+        private long totalKnownHoldMs;
+        private long knownHoldCount;
+
+        private MutableLossSaleSummary(String accountId, String accountAlias, String symbol) {
+            this.accountId = accountId;
+            this.accountAlias = accountAlias;
+            this.symbol = symbol;
+        }
+
+        private LossSaleSummary snapshot() {
+            Long average = knownHoldCount == 0 ? null : totalKnownHoldMs / knownHoldCount;
+            return new LossSaleSummary(accountId, accountAlias, symbol, count, quantity,
+                    grossLossQuote, average);
         }
     }
 

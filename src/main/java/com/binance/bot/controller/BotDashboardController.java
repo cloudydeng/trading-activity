@@ -21,7 +21,10 @@ import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.LocalDate;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.*;
 
@@ -205,6 +208,53 @@ public class BotDashboardController {
                         .thenComparing(DailyTradeStatsStore.AccountSymbolVolumeSummary::accountId,
                                 String.CASE_INSENSITIVE_ORDER))
                 .toList();
+    }
+
+    @GetMapping("/api/accounts/loss-sales")
+    public DailyTradeStatsStore.LossSaleReport lossSales(
+            @RequestParam(defaultValue = "") String accountId,
+            @RequestParam(defaultValue = "") String symbol,
+            @RequestParam(defaultValue = "100") int limit,
+            @RequestParam(defaultValue = "0") int offset) {
+        return dailyStatsStore.lossSales(accountId, symbol, limit, offset);
+    }
+
+    @GetMapping("/api/accounts/loss-sales/export")
+    public ResponseEntity<byte[]> exportLossSales(
+            @RequestParam(defaultValue = "") String accountId,
+            @RequestParam(defaultValue = "") String symbol) {
+        List<DailyTradeStatsStore.LossSale> rows = dailyStatsStore.lossSaleExportRows(accountId, symbol);
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+                .withZone(ZoneId.of("Asia/Shanghai"));
+        StringBuilder csv = new StringBuilder("\uFEFF账户别名,账户ID,交易对,买入时间(北京时间),卖出时间(北京时间),"
+                + "持仓时长(秒),卖出数量,买入成本均价,卖出价,价差亏损(不含手续费),计价币,订单ID,成交ID\r\n");
+        for (DailyTradeStatsStore.LossSale row : rows) {
+            csv.append(csvCell(row.accountAlias())).append(',')
+                    .append(csvCell(row.accountId())).append(',')
+                    .append(csvCell(row.symbol())).append(',')
+                    .append(csvCell(row.buyTimeMs() == null ? "" : formatter.format(Instant.ofEpochMilli(row.buyTimeMs())))).append(',')
+                    .append(csvCell(formatter.format(Instant.ofEpochMilli(row.sellTimeMs())))).append(',')
+                    .append(csvCell(row.holdMs() == null ? "" : BigDecimal.valueOf(row.holdMs())
+                            .movePointLeft(3).stripTrailingZeros().toPlainString())).append(',')
+                    .append(csvCell(row.quantity().toPlainString())).append(',')
+                    .append(csvCell(row.buyCostPrice().toPlainString())).append(',')
+                    .append(csvCell(row.sellPrice().toPlainString())).append(',')
+                    .append(csvCell(row.grossLossQuote().toPlainString())).append(',')
+                    .append(csvCell(row.symbol().endsWith("USDC") ? "USDC" : "USDT")).append(',')
+                    .append(csvCell(Long.toString(row.orderId()))).append(',')
+                    .append(csvCell(Long.toString(row.tradeId()))).append("\r\n");
+        }
+        String filename = "loss-sales-" + LocalDate.now(ZoneOffset.UTC) + ".csv";
+        return ResponseEntity.ok()
+                .header("Content-Type", "text/csv; charset=UTF-8")
+                .header("Content-Disposition", "attachment; filename=\"" + filename + "\"")
+                .body(csv.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String csvCell(String value) {
+        String safe = value == null ? "" : value;
+        if (!safe.isEmpty() && "=+-@".indexOf(safe.charAt(0)) >= 0) safe = "'" + safe;
+        return "\"" + safe.replace("\"", "\"\"") + "\"";
     }
 
     /**

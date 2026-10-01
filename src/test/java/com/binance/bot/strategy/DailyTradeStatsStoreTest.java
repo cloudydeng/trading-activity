@@ -19,6 +19,92 @@ class DailyTradeStatsStoreTest {
     @TempDir Path tempDir;
 
     @Test
+    void persistsLossSalesWithFirstBuyTimeAndGroupsByAccountAndSymbol() {
+        BinanceProperties properties = properties();
+        long today = LocalDate.now(ZoneOffset.UTC).atStartOfDay(ZoneOffset.UTC)
+                .toInstant().toEpochMilli();
+        long firstBuy = today - 60_000;
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties);
+        assertEquals(DailyTradeStatsStore.RecordResult.APPLIED,
+                trade(store, "account-a", "A", "PUMPUSDC", 1, "BUY", "10", "2", firstBuy));
+        assertEquals(DailyTradeStatsStore.RecordResult.APPLIED,
+                trade(store, "account-a", "A", "PUMPUSDC", 2, "BUY", "10", "4", today + 1_000));
+        assertEquals(DailyTradeStatsStore.RecordResult.APPLIED,
+                trade(store, "account-a", "A", "PUMPUSDC", 3, "SELL", "5", "2", today + 2_000));
+        assertEquals(DailyTradeStatsStore.RecordResult.DUPLICATE,
+                trade(store, "account-a", "A", "PUMPUSDC", 3, "SELL", "5", "2", today + 2_000));
+        assertEquals(DailyTradeStatsStore.RecordResult.APPLIED,
+                trade(store, "account-a", "A", "PUMPUSDC", 4, "SELL", "5", "4", today + 3_000));
+        assertEquals(DailyTradeStatsStore.RecordResult.APPLIED,
+                trade(store, "account-b", "B", "PUMPUSDC", 5, "BUY", "1", "5", today + 4_000));
+        assertEquals(DailyTradeStatsStore.RecordResult.APPLIED,
+                trade(store, "account-b", "B", "PUMPUSDC", 6, "SELL", "1", "4", today + 5_000));
+        store.close();
+
+        DailyTradeStatsStore restarted = new DailyTradeStatsStore(properties);
+        var report = restarted.lossSales("", "", 100, 0);
+        assertEquals(2, report.totalCount());
+        assertEquals(2, report.summaries().size());
+        var accountA = restarted.lossSales("account-a", "pumpusdc", 100, 0);
+        assertEquals(1, accountA.totalCount());
+        assertEquals(1, accountA.summaries().getFirst().count());
+        assertDecimal("5", accountA.summaries().getFirst().grossLossQuote());
+        var loss = accountA.details().getFirst();
+        assertEquals(firstBuy, loss.buyTimeMs());
+        assertEquals(today + 2_000, loss.sellTimeMs());
+        assertEquals(today + 2_000 - firstBuy, loss.holdMs());
+        assertDecimal("5", loss.quantity());
+        assertDecimal("3", loss.buyCostPrice());
+        assertDecimal("2", loss.sellPrice());
+        assertDecimal("5", loss.grossLossQuote());
+        assertEquals(1, restarted.lossSaleExportRows("account-b", "PUMPUSDC").size());
+        restarted.close();
+    }
+
+    @Test
+    void resetsBuyTimeAfterFlatAndPurgesOnlyExpiredLossSales() throws Exception {
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
+        long today = LocalDate.now(ZoneOffset.UTC).atStartOfDay(ZoneOffset.UTC)
+                .toInstant().toEpochMilli();
+        long old = today - 10L * 86_400_000L;
+        trade(store, "account-old", "Old", "ENSOUSDT", 1, "BUY", "1", "2", old);
+        trade(store, "account-old", "Old", "ENSOUSDT", 2, "SELL", "1", "1", old + 1_000);
+        trade(store, "account-a", "A", "ENSOUSDT", 3, "BUY", "1", "2", today + 1_000);
+        trade(store, "account-a", "A", "ENSOUSDT", 4, "SELL", "1", "1", today + 2_000);
+        trade(store, "account-a", "A", "ENSOUSDT", 5, "BUY", "1", "3", today + 3_000);
+        trade(store, "account-a", "A", "ENSOUSDT", 6, "SELL", "1", "2", today + 4_000);
+
+        var rows = store.lossSaleExportRows("account-a", "ENSOUSDT");
+        assertEquals(2, rows.size());
+        assertEquals(today + 3_000, rows.getFirst().buyTimeMs());
+        assertEquals(1_000L, rows.getFirst().holdMs());
+        assertEquals(today + 1_000, rows.get(1).buyTimeMs());
+        assertEquals(2, store.lossSales("", "", 1, 0).totalCount());
+        assertEquals(1, store.lossSales("", "", 1, 1).details().size());
+        assertEquals(0, store.lossSaleExportRows("account-old", "ENSOUSDT").size());
+        try (var connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + tempDir.resolve("daily.db"));
+             var statement = connection.prepareStatement(
+                     "UPDATE loss_sale SET sell_time=? WHERE account_id='account-a' AND trade_id=4")) {
+            statement.setLong(1, old + 1_000);
+            assertEquals(1, statement.executeUpdate());
+        }
+        assertEquals(1, store.deleteLossSalesBefore(LocalDate.now(ZoneOffset.UTC).minusDays(9)));
+        assertEquals(1, store.lossSaleExportRows("", "").size());
+        store.close();
+    }
+
+    private DailyTradeStatsStore.RecordResult trade(DailyTradeStatsStore store, String accountId,
+            String alias, String symbol, long tradeId, String side, String quantity, String price,
+            long time) {
+        BigDecimal qty = new BigDecimal(quantity);
+        BigDecimal unitPrice = new BigDecimal(price);
+        return store.recordTrade(accountId, alias, symbol, 1000 + tradeId, tradeId, side,
+                qty, qty, unitPrice, qty.multiply(unitPrice), BigDecimal.ZERO, "",
+                BigDecimal.ZERO, BigDecimal.ZERO, time);
+    }
+
+    @Test
     void remembersLatestBuyFillAcrossAccountsRestartAndOlderReconciliation() {
         DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
         long now = System.currentTimeMillis();
