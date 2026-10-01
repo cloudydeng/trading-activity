@@ -94,28 +94,28 @@ class DailyTradeStatsStoreTest {
     }
 
     @Test
-    void persistsAlgoUsdcAndItsStrategyOverrideAcrossRestart() {
+    void persistsUsdcSymbolAndItsStrategyOverrideAcrossRestart() {
         BinanceProperties properties = properties();
         DailyTradeStatsStore first = new DailyTradeStatsStore(properties);
-        first.saveAccountSymbols("account-a", List.of("algousdc", "BABYUSDT"));
+        first.saveAccountSymbols("account-a", List.of("pumpusdc", "BABYUSDT"));
         var profile = new BinanceProperties.SymbolStrategyProfile();
         profile.setMode("BREAK_EVEN_MAKER");
-        first.saveStrategyOverride("account-a", "ALGOUSDC", profile);
+        first.saveStrategyOverride("account-a", "PUMPUSDC", profile);
         first.close();
 
         DailyTradeStatsStore restarted = new DailyTradeStatsStore(properties);
-        assertEquals(List.of("ALGOUSDC", "BABYUSDT"),
+        assertEquals(List.of("PUMPUSDC", "BABYUSDT"),
                 restarted.loadAccountSymbols("account-a").orElseThrow());
         assertEquals("BREAK_EVEN_MAKER", restarted.loadStrategyOverrides("account-a")
-                .get("ALGOUSDC").getMode());
+                .get("PUMPUSDC").getMode());
         restarted.close();
     }
 
     @Test
-    void rejectsAlgoUsdtAndAlgoUsdcOnSameAccount() {
+    void rejectsUsdtAndUsdcMarketsSharingBaseOnSameAccount() {
         DailyTradeStatsStore store = new DailyTradeStatsStore(properties());
         assertThrows(IllegalArgumentException.class, () -> store.saveAccountSymbols(
-                "account-a", List.of("ALGOUSDT", "ALGOUSDC")));
+                "account-a", List.of("PUMPUSDT", "PUMPUSDC")));
         store.close();
     }
 

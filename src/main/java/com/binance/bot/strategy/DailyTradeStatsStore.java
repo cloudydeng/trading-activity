@@ -1184,7 +1184,7 @@ public class DailyTradeStatsStore {
     private String normalizeSymbol(String symbol) {
         String normalized = symbol == null ? "" : symbol.trim().toUpperCase();
         if (!SupportedTradingPair.isSupported(normalized)) {
-            throw new IllegalArgumentException("当前策略仅支持 USDT 现货交易对及 ALGOUSDC");
+            throw new IllegalArgumentException("当前策略仅支持 USDT 或 USDC 现货交易对");
         }
         return normalized;
     }

@@ -1,6 +1,8 @@
 package com.binance.bot.account;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -27,6 +29,16 @@ class AccountIdentityTest {
     void rejectsApiKeyMaterialAsOversizedAccountId() {
         assertThrows(IllegalArgumentException.class,
                 () -> new AccountCredentials("x".repeat(65), "A", "key", "secret"));
+    }
+
+    @Test
+    void acceptsUsdcAccountSymbolsButRejectsSharedBaseInventory() {
+        AccountCredentials credentials = new AccountCredentials("account-a", "A", "key", "secret",
+                Map.of(), Map.of(), List.of("pumpusdc", "ALGOUSDT"));
+        assertEquals(List.of("PUMPUSDC", "ALGOUSDT"), credentials.symbols());
+        assertThrows(IllegalArgumentException.class, () -> new AccountCredentials(
+                "account-a", "A", "key", "secret", Map.of(), Map.of(),
+                List.of("PUMPUSDC", "PUMPUSDT")));
     }
 
     private record PublicAccount(String accountId, String alias) { }

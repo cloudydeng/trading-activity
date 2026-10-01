@@ -61,7 +61,7 @@ public record AccountCredentials(String accountId, String alias, String apiKey, 
                 if (symbol == null || symbol.isBlank()) continue;
                 String normalizedSymbol = symbol.trim().toUpperCase();
                 if (!SupportedTradingPair.isSupported(normalizedSymbol)) {
-                    throw new IllegalArgumentException("symbols must contain valid USDT trading pairs or ALGOUSDC");
+                    throw new IllegalArgumentException("symbols must contain valid USDT or USDC trading pairs");
                 }
                 normalizedSymbols.add(normalizedSymbol);
             }

@@ -2713,7 +2713,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         String target = requestedSymbol == null ? "" : requestedSymbol.trim().toUpperCase();
         String current = properties.getStrategy().getSymbol().toUpperCase();
         if (!SupportedTradingPair.isSupported(target)) {
-            return SymbolSwitchResult.rejected(current, "交易对格式无效；当前策略仅支持 USDT 现货交易对及 ALGOUSDC");
+            return SymbolSwitchResult.rejected(current, "交易对格式无效；当前策略仅支持 USDT 或 USDC 现货交易对");
         }
         if (target.equals(current)) return new SymbolSwitchResult(true, current, "交易对未变化");
         if (isRunning.get() || activeOrderId.get() != null) {
@@ -3240,7 +3240,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         String symbol = normalizeStrategySymbol(requestedSymbol);
         if (!SupportedTradingPair.isSupported(symbol)) {
             return StrategySwitchResult.rejected(properties.getStrategy().getSymbol(),
-                    "交易对格式无效；当前策略仅支持 USDT 现货交易对及 ALGOUSDC");
+                    "交易对格式无效；当前策略仅支持 USDT 或 USDC 现货交易对");
         }
         BinanceProperties.SymbolStrategyProfile existing = strategyProfiles.get(symbol);
         String mode = requestedMode == null || requestedMode.isBlank()

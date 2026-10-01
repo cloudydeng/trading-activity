@@ -114,7 +114,7 @@ public class BotDashboardController {
         if (!symbol.isBlank()) {
             if (!SupportedTradingPair.isSupported(symbol)) {
                 return ResponseEntity.badRequest().body(Map.of("accepted", false,
-                        "message", "请输入有效的 USDT 交易对或 ALGOUSDC"));
+                        "message", "请输入有效的 USDT 或 USDC 交易对"));
             }
             if (!accountManager.configuredTradingSymbols().contains(symbol)) {
                 return ResponseEntity.badRequest().body(Map.of("accepted", false,

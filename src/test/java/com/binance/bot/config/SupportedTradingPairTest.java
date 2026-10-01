@@ -11,18 +11,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SupportedTradingPairTest {
     @Test
-    void acceptsExistingUsdtSymbolsAndAlgoUsdcOnly() {
+    void acceptsUsdtAndUsdcSymbols() {
         assertTrue(SupportedTradingPair.isSupported(" babyusdt "));
         assertTrue(SupportedTradingPair.isSupported("algousdc"));
+        assertTrue(SupportedTradingPair.isSupported(" pumpusdc "));
         assertEquals("USDC", SupportedTradingPair.quoteAsset("ALGOUSDC"));
+        assertEquals("USDC", SupportedTradingPair.quoteAsset("PUMPUSDC"));
         assertEquals("USDT", SupportedTradingPair.quoteAsset("BABYUSDT"));
-        assertFalse(SupportedTradingPair.isSupported("BABYUSDC"));
+        assertTrue(SupportedTradingPair.isSupported("BABYUSDC"));
         assertFalse(SupportedTradingPair.isSupported("ALGOUSD"));
     }
 
     @Test
-    void rejectsTwoMarketsSharingAlgoInventoryOnOneAccount() {
+    void rejectsTwoMarketsSharingBaseInventoryOnOneAccount() {
         assertThrows(IllegalArgumentException.class, () -> SupportedTradingPair.requireDistinctBaseAssets(
                 List.of("ALGOUSDT", "ALGOUSDC")));
+        assertThrows(IllegalArgumentException.class, () -> SupportedTradingPair.requireDistinctBaseAssets(
+                List.of("pumpusdc", "PUMPUSDT")));
+        SupportedTradingPair.requireDistinctBaseAssets(List.of("PUMPUSDC", "ALGOUSDT"));
     }
 }
