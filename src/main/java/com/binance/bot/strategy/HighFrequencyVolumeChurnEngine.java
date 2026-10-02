@@ -60,6 +60,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private static final BigDecimal ORDER_AMOUNT_RANDOM_LOWER_MULTIPLIER = new BigDecimal("0.8");
     private static final BigDecimal ORDER_AMOUNT_RANDOM_UPPER_MULTIPLIER = new BigDecimal("1.2");
     private static final BigDecimal BREAK_EVEN_ENTRY_BUFFER_BPS = new BigDecimal("5");
+    private static final BigDecimal MIN_BEST_BID_NOTIONAL_FOR_FIRST_LEVEL = new BigDecimal("500");
     private final String accountId;
     private final String accountAlias;
     private final String accountTag;
@@ -80,6 +81,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newHttpClient();
     private final AtomicReference<BigDecimal> lastBestBid = new AtomicReference<>();
+    private final AtomicReference<BigDecimal> lastBestBidNotional = new AtomicReference<>();
     private final AtomicReference<BigDecimal> lastBestAsk = new AtomicReference<>();
     private final AtomicReference<BigDecimal> lastMidPrice = new AtomicReference<>();
     private final AtomicLong lastMarketDataTimestamp = new AtomicLong(0);
@@ -370,6 +372,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     }
                     lastMarketFrameTimestamp.set(System.currentTimeMillis());
                     lastMarketDataTimestamp.set(0);
+                    lastBestBidNotional.set(null);
                     latestBidDepthPrices.set(List.of());
                     lastDepthDataTimestamp.set(0);
                     WebSocket previous = activeMarketWebSocket.getAndSet(ws);
@@ -428,6 +431,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         marketActivityTracker.reset();
         latestBidDepthPrices.set(List.of());
         lastDepthDataTimestamp.set(0);
+        lastBestBidNotional.set(null);
         log.warn("[accountId={} alias={}] 行情流不可用: {}", accountId, accountAlias, reason);
         if (isRunning.get()) protectOnStreamLoss("行情流不可用: " + reason);
         scheduleMarketReconnect();
@@ -449,6 +453,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         latestBidDepthPrices.set(List.of());
         lastDepthDataTimestamp.set(0);
         lastMarketDataTimestamp.set(0);
+        lastBestBidNotional.set(null);
         if (isRunning.get()) {
             preMarketRecoveryStatusReason.set(statusReason.get());
             statusReason.set("行情流 1001 瞬断，正在自动重连");
@@ -1033,6 +1038,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 long now = System.currentTimeMillis();
                 BigDecimal mid = bid.add(ask).divide(BigDecimal.valueOf(2), RoundingMode.HALF_UP);
                 lastBestBid.set(bid);
+                lastBestBidNotional.set(bid.signum() > 0 && bidQty.signum() >= 0
+                        ? bid.multiply(bidQty) : null);
                 lastBestAsk.set(ask);
                 lastMidPrice.set(mid);
                 lastMarketDataTimestamp.set(now);
@@ -3576,7 +3583,22 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         String symbol = properties.getStrategy().getSymbol();
         if (symbolTradeCoordinator.maxConcurrentEntriesPerSymbol(symbol) > 1
                 && symbolTradeCoordinator.hasActiveSellOrder(symbol)) return 4;
-        return usesBidAskMakerStrategy() ? bidAskEntryBookLevel() : 1;
+        int configuredLevel = usesBidAskMakerStrategy() ? bidAskEntryBookLevel() : 1;
+        return configuredLevel == 1 && thinBestBidNotional() ? 2 : configuredLevel;
+    }
+
+    public boolean isEntryBookLevelOverriddenByThinBestBid() {
+        return !isEntryBookLevelOverriddenByConcurrency()
+                && (!usesBidAskMakerStrategy() || bidAskEntryBookLevel() == 1)
+                && thinBestBidNotional();
+    }
+
+    private boolean thinBestBidNotional() {
+        BigDecimal notional = lastBestBidNotional.get();
+        long bookAt = lastMarketDataTimestamp.get();
+        return notional != null && bookAt > 0
+                && System.currentTimeMillis() - bookAt <= properties.getStrategy().getMarketDataStaleMs()
+                && notional.compareTo(MIN_BEST_BID_NOTIONAL_FOR_FIRST_LEVEL) < 0;
     }
 
     public boolean isEntryBookLevelOverriddenByConcurrency() {

@@ -486,6 +486,112 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void thinBestBidMovesOnlyFirstLevelEntriesToSecondBid() {
+        WebSocket socket = mock(WebSocket.class);
+        engine.onText(socket, """
+                {"bids":[["1.0000","700"],["0.9999","1000"],["0.9998","1000"]],
+                 "asks":[["1.0001","1000"]]}
+                """, true);
+        engine.onText(socket, """
+                {"b":"1.0000","B":"500","a":"1.0001","A":"1000"}
+                """, true);
+        assertEquals(1, engine.getEffectiveEntryBookLevel());
+        assertFalse(engine.isEntryBookLevelOverriddenByThinBestBid());
+
+        engine.onText(socket, """
+                {"b":"1.0000","B":"499.99","a":"1.0001","A":"1000"}
+                """, true);
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule("ENSOUSDT");
+        for (String mode : List.of("BUY_PRICE_MAKER", "FEE_AWARE_MAKER",
+                "BREAK_EVEN_MAKER", "BID_ASK_MAKER")) {
+            assertTrue(engine.switchStrategy("ENSOUSDT", mode, new BigDecimal("6"),
+                    20_000L, 120_000L).accepted());
+            assertEquals(2, engine.getEffectiveEntryBookLevel(), mode);
+            assertTrue(engine.isEntryBookLevelOverriddenByThinBestBid(), mode);
+            assertEquals(0, new BigDecimal("0.9999").compareTo(ReflectionTestUtils.invokeMethod(
+                    engine, "configuredEntryBookPrice", new BigDecimal("1.0000"), rule,
+                    System.currentTimeMillis())), mode);
+        }
+
+        assertTrue(engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L, null, null, null, null, null, null,
+                60_000L, new BigDecimal("510"), 1, 3).accepted());
+        assertEquals(3, engine.getEffectiveEntryBookLevel());
+        assertFalse(engine.isEntryBookLevelOverriddenByThinBestBid());
+
+        engine.onText(socket, """
+                {"b":"1.0000","B":"501","a":"1.0001","A":"1000"}
+                """, true);
+        assertTrue(engine.switchStrategy("ENSOUSDT", "BUY_PRICE_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L).accepted());
+        assertEquals(1, engine.getEffectiveEntryBookLevel());
+
+        SymbolTradeCoordinator coordinator = (SymbolTradeCoordinator)
+                ReflectionTestUtils.getField(engine, "symbolTradeCoordinator");
+        coordinator.configureMaxConcurrentEntriesPerSymbol(2);
+        coordinator.markActiveSellOrder("ENSOUSDT", "other", 101L);
+        engine.onText(socket, """
+                {"b":"1.0000","B":"1","a":"1.0001","A":"1000"}
+                """, true);
+        assertEquals(4, engine.getEffectiveEntryBookLevel());
+        assertFalse(engine.isEntryBookLevelOverriddenByThinBestBid());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void thinBestBidWaitsForFreshSecondBidAndRetainsSecondBidOrderAtTimeout() {
+        atomic("lastBestBidNotional", BigDecimal.class).set(new BigDecimal("499.99"));
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
+                .set(System.currentTimeMillis());
+        SymbolRuleManager.SymbolRule rule = ruleManager.getRule("ENSOUSDT");
+        assertEquals(2, engine.getEffectiveEntryBookLevel());
+        assertNull(ReflectionTestUtils.invokeMethod(engine, "configuredEntryBookPrice",
+                new BigDecimal("1.0000"), rule, System.currentTimeMillis()));
+        assertTrue(engine.getStatusReason().get().contains("等待买2深度行情"));
+
+        atomic("latestBidDepthPrices", List.class).set(List.of(
+                new BigDecimal("1.0000"), new BigDecimal("0.9999")));
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "lastDepthDataTimestamp"))
+                .set(System.currentTimeMillis());
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
+        atomic("activeOrderId", Long.class).set(42L);
+        atomic("activeClientOrderId", String.class).set("churn-BUY-second-level");
+        atomic("activeOrderPrice", BigDecimal.class).set(new BigDecimal("0.9999"));
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp"))
+                .set(System.currentTimeMillis() - 25_000);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("1.0000"), new BigDecimal("1.0001"));
+
+        verify(tradeService, never()).cancelOrder("ENSOUSDT", 42L);
+        assertTrue(engine.getStatusReason().get().contains("仍处于买2"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void thinBestBidActuallySubmitsSecondBidPrice() throws Exception {
+        assertTrue(engine.switchStrategy("ENSOUSDT", "BUY_PRICE_MAKER",
+                new BigDecimal("6"), 20_000L, 120_000L).accepted());
+        atomic("lastBestBidNotional", BigDecimal.class).set(new BigDecimal("499.99"));
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "lastMarketDataTimestamp"))
+                .set(System.currentTimeMillis());
+        atomic("latestBidDepthPrices", List.class).set(List.of(
+                new BigDecimal("1.0000"), new BigDecimal("0.9999")));
+        ((AtomicLong) ReflectionTestUtils.getField(engine, "lastDepthDataTimestamp"))
+                .set(System.currentTimeMillis());
+        when(tradeService.cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"), any(), any(),
+                isNull(), anyString())).thenReturn(new ObjectMapper().readTree("{\"orderId\":101}"));
+        engine.getIsRunning().set(true);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("1.0000"), new BigDecimal("1.0001"));
+
+        verify(tradeService).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                decimalEquals("0.9999"), any(), isNull(), anyString());
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void concurrencyOverrideWaitsForFreshFourthBidAndPreservesMinuteMaGate() {
         SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();

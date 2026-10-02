@@ -640,6 +640,7 @@ public class BotDashboardController {
                 Map.entry("strategyProfile", engine.getStrategyProfile()),
                 Map.entry("effectiveEntryBookLevel", engine.getEffectiveEntryBookLevel()),
                 Map.entry("entryBookLevelOverriddenByConcurrency", engine.isEntryBookLevelOverriddenByConcurrency()),
+                Map.entry("entryBookLevelOverriddenByThinBestBid", engine.isEntryBookLevelOverriddenByThinBestBid()),
                 Map.entry("tickSize", engine.getTickSize()),
                 Map.entry("feeAwareRecommendedEntryAnchorPrice", engine.getFeeAwareRecommendedEntryAnchorPrice()),
                 Map.entry("strategyChangePending", engine.hasPendingStrategyChange()),
