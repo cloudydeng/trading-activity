@@ -127,6 +127,32 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
+    void acceptedBidAskSellStartsMinuteWaitForAnotherApiKey() throws Exception {
+        engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L, null, null);
+        SymbolTradeCoordinator coordinator = (SymbolTradeCoordinator) ReflectionTestUtils.getField(
+                engine, "symbolTradeCoordinator");
+        coordinator.configureMaxConcurrentEntriesPerSymbol(2);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("holdingInventory", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("filledEntryQuantity", BigDecimal.class).set(new BigDecimal("10"));
+        atomic("filledEntryQuoteQuantity", BigDecimal.class).set(new BigDecimal("6"));
+        atomic("lastBestAsk", BigDecimal.class).set(new BigDecimal("0.6002"));
+        when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), any(), any(), anyString()))
+                .thenReturn(new ObjectMapper().readTree("{\"orderId\":701}"));
+
+        ReflectionTestUtils.invokeMethod(engine, "submitImmediateExit", ruleManager.getRule("ENSOUSDT"));
+
+        assertEquals(701L, atomic("activeOrderId", Long.class).get());
+        long acceptedAt = ((AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp")).get();
+        assertFalse(coordinator.reserveBuySubmission("ENSOUSDT", "other").allowed());
+        assertTrue(coordinator.hasActiveSellOrder("ENSOUSDT"));
+        assertTrue(coordinator.acquire("ENSOUSDT", "other::ENSOUSDT", "Other").accepted());
+        assertFalse(coordinator.acquire("ENSOUSDT", "test-account::ENSOUSDT", "test-bot").accepted());
+        assertTrue(acceptedAt > 0);
+    }
+
+    @Test
     void sellFillNotificationIncludesWeightedBuyCostForSameQuantity() {
         ReflectionTestUtils.invokeMethod(engine, "applyTrade", 41L, 101L, "BUY",
                 BigDecimal.ONE, new BigDecimal("5.907"), new BigDecimal("5.907"),

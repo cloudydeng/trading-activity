@@ -18,6 +18,80 @@ class SymbolTradeCoordinatorTest {
     @TempDir Path tempDir;
 
     @Test
+    void concurrencyTwoWaitsOneMinuteAfterOtherKeyAcceptedSell() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        coordinator.configureMaxConcurrentEntriesPerSymbol(2);
+        coordinator.noteAcceptedSellSubmission("pumpusdc", "account-a", 10_000L);
+
+        assertTrue(coordinator.reserveBuySubmission("PUMPUSDC", "account-a", 10_500L).allowed());
+        assertTrue(coordinator.reserveBuySubmission("ALGOUSDC", "account-b", 10_500L).allowed());
+        var early = coordinator.reserveBuySubmission("PUMPUSDC", "account-b", 69_999L);
+        assertFalse(early.allowed());
+        assertEquals(1L, early.retryAfterMs());
+        assertTrue(early.reason().contains("60 秒"));
+        assertTrue(coordinator.reserveBuySubmission("PUMPUSDC", "account-b", 70_000L).allowed());
+    }
+
+    @Test
+    void minuteWaitUsesEffectiveSymbolConcurrencyAndLatestOtherKeySell() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        coordinator.configureMaxConcurrentEntriesPerSymbol(1);
+        coordinator.configureMaxConcurrentEntriesBySymbol(Map.of("PUMPUSDC", 2));
+        coordinator.noteAcceptedSellSubmission("PUMPUSDC", "account-a", 10_000L);
+        coordinator.noteAcceptedSellSubmission("PUMPUSDC", "account-c", 20_000L);
+        coordinator.noteAcceptedSellSubmission("PUMPUSDC", "account-b", 30_000L);
+        assertEquals(10_000L, coordinator.reserveBuySubmission("PUMPUSDC", "account-b", 70_000L).retryAfterMs());
+        assertTrue(coordinator.reserveBuySubmission("PUMPUSDC", "account-b", 80_000L).allowed());
+
+        coordinator.configureMaxConcurrentEntriesPerSymbol(2);
+        coordinator.configureMaxConcurrentEntriesBySymbol(Map.of("PUMPUSDC", 1));
+        coordinator.noteAcceptedSellSubmission("PUMPUSDC", "account-a", 90_000L);
+        assertTrue(coordinator.reserveBuySubmission("PUMPUSDC", "account-b", 90_001L).allowed());
+    }
+
+    @Test
+    void sellSubmissionAttemptAloneDoesNotStartMinuteWait() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        coordinator.configureMaxConcurrentEntriesPerSymbol(2);
+        coordinator.noteAccountActivity("PUMPUSDC", "account-a", 10_000L);
+        assertTrue(coordinator.reserveBuySubmission("PUMPUSDC", "account-b", 12_000L).allowed());
+    }
+
+    @Test
+    void secondKeyWaitsForSellAcceptanceAndCannotAcquireSecondBuyWhileFirstIsBuying() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        coordinator.configureMaxConcurrentEntriesPerSymbol(2);
+        assertTrue(coordinator.acquire("PUMPUSDC", "account-a::PUMPUSDC", "A").accepted());
+        assertFalse(coordinator.acquire("PUMPUSDC", "account-b::PUMPUSDC", "B").accepted());
+        coordinator.transitionToSell("PUMPUSDC", "account-a::PUMPUSDC", "A");
+        assertTrue(coordinator.acquire("PUMPUSDC", "account-b::PUMPUSDC", "B").accepted());
+        assertFalse(coordinator.reserveBuySubmission("PUMPUSDC", "account-b", 15_000L).allowed());
+        coordinator.noteAcceptedSellSubmission("PUMPUSDC", "account-a", 20_000L);
+        coordinator.markActiveSellOrder("PUMPUSDC", "account-a::PUMPUSDC", 101L);
+        assertFalse(coordinator.reserveBuySubmission("PUMPUSDC", "account-b", 79_999L).allowed());
+        assertTrue(coordinator.reserveBuySubmission("PUMPUSDC", "account-b", 80_000L).allowed());
+        assertFalse(coordinator.acquire("PUMPUSDC", "account-a::PUMPUSDC", "A").accepted());
+    }
+
+    @Test
+    void acceptedSellMinuteSurvivesRestartAndOlderRestoreDoesNotExtendIt() {
+        BinanceProperties properties = new BinanceProperties();
+        properties.getStorage().setDailyStatsDb(tempDir.resolve("sell-minute.db").toString());
+        DailyTradeStatsStore store = new DailyTradeStatsStore(properties);
+        SymbolTradeCoordinator first = new SymbolTradeCoordinator(store);
+        first.noteAcceptedSellSubmission("PUMPUSDC", "account-a", 10_000L);
+        store.close();
+
+        DailyTradeStatsStore restartedStore = new DailyTradeStatsStore(properties);
+        SymbolTradeCoordinator restarted = new SymbolTradeCoordinator(restartedStore);
+        restarted.configureMaxConcurrentEntriesPerSymbol(2);
+        restarted.noteAcceptedSellSubmission("PUMPUSDC", "account-a", 9_000L);
+        assertFalse(restarted.reserveBuySubmission("PUMPUSDC", "account-b", 69_999L).allowed());
+        assertTrue(restarted.reserveBuySubmission("PUMPUSDC", "account-b", 70_000L).allowed());
+        restartedStore.close();
+    }
+
+    @Test
     void priceGapWaitExpiresAtFifteenMinutesAndSurvivesRestartButResetsOnReentry() {
         BinanceProperties properties = new BinanceProperties();
         properties.getStorage().setDailyStatsDb(tempDir.resolve("daily.db").toString());

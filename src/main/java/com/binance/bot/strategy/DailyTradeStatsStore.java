@@ -48,6 +48,7 @@ public class DailyTradeStatsStore {
     private static final String TRADING_RUNTIME_SETTINGS_KEY = "trading_runtime_settings";
     private static final String LAST_BUY_FILL_PREFIX = "last_buy_fill:";
     private static final String BUY_PRICE_GAP_WAIT_PREFIX = "buy_price_gap_wait:";
+    private static final String ACCEPTED_SELL_TIMES_PREFIX = "accepted_sell_times:";
     private static final int TRADE_FILL_RETENTION_DAYS = 10;
     private static final int SYMBOL_FILL_ROW_LIMIT = 2000;
 
@@ -641,6 +642,34 @@ public class DailyTradeStatsStore {
     public void clearBuyPriceGapWait(String symbol) {
         String key = BUY_PRICE_GAP_WAIT_PREFIX + normalizeSymbol(symbol);
         withLock(() -> deleteSetting(key, "清理买入价差等待时间失败"));
+    }
+
+    public Map<String, Long> loadAcceptedSellTimes(String symbol) {
+        return withLock(() -> {
+            try {
+                var payload = loadSetting(ACCEPTED_SELL_TIMES_PREFIX + normalizeSymbol(symbol));
+                if (payload.isEmpty()) return Map.of();
+                Map<String, Long> times = objectMapper.readValue(payload.get(),
+                        objectMapper.getTypeFactory().constructMapType(LinkedHashMap.class, String.class, Long.class));
+                if (times == null || times.entrySet().stream().anyMatch(entry -> entry.getKey().isBlank()
+                        || entry.getValue() == null || entry.getValue() <= 0))
+                    throw new IllegalArgumentException("无效的卖单报单时间");
+                return Map.copyOf(times);
+            } catch (Exception e) {
+                throw new IllegalStateException("读取跨账户卖单等待时间失败", e);
+            }
+        });
+    }
+
+    public void saveAcceptedSellTimes(String symbol, Map<String, Long> times) {
+        withLock(() -> {
+            try {
+                saveSetting(ACCEPTED_SELL_TIMES_PREFIX + normalizeSymbol(symbol),
+                        objectMapper.writeValueAsString(times), "保存跨账户卖单等待时间失败");
+            } catch (Exception e) {
+                throw new IllegalStateException("保存跨账户卖单等待时间失败", e);
+            }
+        });
     }
 
     public java.util.OptionalLong latestTradeId(String accountId, String symbol, LocalDate date) {

@@ -21,6 +21,7 @@ import java.util.concurrent.locks.ReentrantLock;
 @Component
 public final class SymbolTradeCoordinator {
     private static final long CROSS_ACCOUNT_BUY_GAP_MS = 2_000L;
+    private static final long CROSS_ACCOUNT_SELL_TO_BUY_GAP_MS = 60_000L;
     private static final BigDecimal MAX_BUY_PRICE_GAP = new BigDecimal("0.005");
     private static final long BUY_PRICE_GAP_MAX_WAIT_MS = 900_000L;
     /**
@@ -33,6 +34,7 @@ public final class SymbolTradeCoordinator {
     private final Map<String, LinkedHashMap<String, Long>> activeSellOrdersBySymbol = new LinkedHashMap<>();
     private final Map<String, Integer> maxConcurrentEntriesBySymbol = new LinkedHashMap<>();
     private final Map<String, LastAccountActivity> lastAccountActivityBySymbol = new LinkedHashMap<>();
+    private final Map<String, Map<String, Long>> acceptedSellTimesBySymbol = new LinkedHashMap<>();
     private final Map<String, LastBuyFill> lastBuyFillBySymbol = new LinkedHashMap<>();
     private final Map<String, Long> buyPriceGapWaitStartedBySymbol = new LinkedHashMap<>();
     private final AtomicInteger maxConcurrentEntriesPerSymbol = new AtomicInteger(1);
@@ -232,6 +234,25 @@ public final class SymbolTradeCoordinator {
         }
         lock.lock();
         try {
+            if (maxConcurrentEntriesPerSymbol(normalizedSymbol) >= 2) {
+                Map<String, Holder> holders = holdersBySymbol.get(normalizedSymbol);
+                Map<String, Long> activeSells = activeSellOrdersBySymbol.get(normalizedSymbol);
+                boolean awaitingOtherSell = holders != null && holders.values().stream().anyMatch(holder ->
+                        holder.phase() == Phase.SELLING
+                                && !normalizedAccountId.equals(accountIdOf(holder.engineId()))
+                                && (activeSells == null || !activeSells.containsKey(holder.engineId())));
+                if (awaitingOtherSell) return new BuyPacePermit(false, 1_000L,
+                        normalizedSymbol + " 等待其他 API Key 的卖单成功报单后开始 60 秒计时");
+                Map<String, Long> sells = acceptedSellTimes(normalizedSymbol);
+                long latestOtherSell = sells.entrySet().stream()
+                        .filter(entry -> !normalizedAccountId.equals(entry.getKey()))
+                        .mapToLong(Map.Entry::getValue).max().orElse(0);
+                long remaining = latestOtherSell <= 0 ? 0
+                        : CROSS_ACCOUNT_SELL_TO_BUY_GAP_MS - Math.max(0L, nowMs - latestOtherSell);
+                if (remaining > 0) return new BuyPacePermit(false, remaining,
+                        normalizedSymbol + " 等待其他 API Key 的卖单报单满 60 秒；约 "
+                                + ((remaining + 999) / 1000) + " 秒后再尝试买入");
+            }
             LastAccountActivity previous = lastAccountActivityBySymbol.get(normalizedSymbol);
             if (previous != null && !previous.accountId().equals(normalizedAccountId)) {
                 long elapsedMs = Math.max(0L, nowMs - previous.atMs());
@@ -252,6 +273,36 @@ public final class SymbolTradeCoordinator {
     /** SELL is never delayed, but a later BUY from another account observes this timestamp. */
     public void noteSellSubmission(String symbol, String accountId) {
         noteAccountActivity(symbol, accountId, System.currentTimeMillis());
+    }
+
+    /** Only accepted SELL orders start the cross-key minute; restore uses exchange order time. */
+    public void noteAcceptedSellSubmission(String symbol, String accountId, long submittedAtMs) {
+        String normalizedSymbol = normalizeSymbol(symbol);
+        String normalizedAccountId = normalizeEngineId(accountId);
+        if (normalizedSymbol.isBlank() || normalizedAccountId.isBlank() || submittedAtMs <= 0)
+            throw new IllegalArgumentException("卖单报单时间参数无效");
+        lock.lock();
+        try {
+            Map<String, Long> times = acceptedSellTimes(normalizedSymbol);
+            long previous = times.getOrDefault(normalizedAccountId, 0L);
+            if (submittedAtMs <= previous) return;
+            Map<String, Long> updated = new LinkedHashMap<>(times);
+            updated.put(normalizedAccountId, submittedAtMs);
+            if (priceGapStateStore != null) priceGapStateStore.saveAcceptedSellTimes(normalizedSymbol, updated);
+            times.put(normalizedAccountId, submittedAtMs);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private Map<String, Long> acceptedSellTimes(String symbol) {
+        return acceptedSellTimesBySymbol.computeIfAbsent(symbol, ignored -> new LinkedHashMap<>(
+                priceGapStateStore == null ? Map.of() : priceGapStateStore.loadAcceptedSellTimes(symbol)));
+    }
+
+    private String accountIdOf(String engineId) {
+        int separator = engineId.indexOf("::");
+        return separator < 0 ? engineId : engineId.substring(0, separator);
     }
 
     /** A new account waits after the prior account's full cycle has actually finished. */

@@ -752,6 +752,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         currentStatus.set(ChurnStatus.SELLING);
         statusReason.set("重启后已恢复本进程卖单 " + state.orderId()
                 + "，继续等待成交/检查换单");
+        if (!recordAcceptedSellTime(order.path("time").asLong(state.orderPlacedAtMs()))) return false;
         persistRuntimeState(true);
         if (currentStatus.get() == ChurnStatus.HALTED) return false;
         scheduleOrderReconciliation(state.orderId());
@@ -2383,11 +2384,27 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 ? entryOrderTimeoutMs() : exitOrderTimeoutMs()));
         currentStatus.set(status);
         if (status == ChurnStatus.SELLING) {
+            if (!recordAcceptedSellTime(orderPlacedTimestamp.get())) {
+                persistRuntimeState(true);
+                return;
+            }
             symbolTradeCoordinator.markActiveSellOrder(properties.getStrategy().getSymbol(),
                     accountEngineKey, orderId);
         }
         persistRuntimeState(true);
         if (currentStatus.get() != ChurnStatus.HALTED) scheduleOrderReconciliation(orderId);
+    }
+
+    private boolean recordAcceptedSellTime(long submittedAtMs) {
+        try {
+            symbolTradeCoordinator.noteAcceptedSellSubmission(properties.getStrategy().getSymbol(), accountId,
+                    submittedAtMs > 0 ? submittedAtMs : System.currentTimeMillis());
+            return true;
+        } catch (RuntimeException e) {
+            log.error("[accountId={} alias={}] 卖单报单时间持久化失败", accountId, accountAlias, e);
+            halt("卖单报单时间持久化失败，停止新交易，需人工核对");
+            return false;
+        }
     }
 
     private void scheduleOrderReconciliation(long orderId) {
