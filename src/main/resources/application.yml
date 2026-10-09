@@ -51,7 +51,7 @@ binance:
     ask-depth-offset-ticks: 0
     # 买单超时基准；每张 BUY 创建时在 1.0～1.5 倍内随机一次。
     order-ttl-ms: 20000
-    # 卖单超时基准；每次挂单/复查窗口在 1.0～1.5 倍内随机，超时后按最新卖一管理。
+    # 卖单超时基准；每次挂单/复查窗口在 1.0～1.5 倍内随机。BUY_PRICE_MAKER 超时按最新买一，其他策略按卖一（保本策略仍守净保本价）。
     limit-sell-timeout-ms: 120000
     # BUY_PRICE_MAKER 未单独配置卖单超时时使用 1800 秒基准；显式账户/币种配置优先。
     buy-price-maker-limit-sell-timeout-ms: 1800000

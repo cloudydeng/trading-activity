@@ -1252,7 +1252,7 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void timedOutBuyPriceMakerSellRepricesToLatestAskWithoutBuyPriceFloor() throws Exception {
+    void timedOutBuyPriceMakerSellRepricesToLatestBidWithoutBuyPriceFloor() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         engine.switchStrategy("ENSOUSDT", "BUY_PRICE_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L);
@@ -1273,15 +1273,54 @@ class HighFrequencyVolumeChurnEngineTest {
                 new BinanceAccountTradeClient.AssetBalance("ENSO", new BigDecimal("10"), BigDecimal.ZERO,
                         new BigDecimal("10")));
         when(tradeService.placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
-                decimalEquals("0.5990"), anyString())).thenReturn(mapper.readTree("{\"orderId\":88}"));
+                decimalEquals("0.5989"), anyString())).thenReturn(mapper.readTree("{\"orderId\":88}"));
 
         ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
-                new BigDecimal("0.5989"), new BigDecimal("0.5990"));
+                new BigDecimal("0.5989"), new BigDecimal("0.6000"));
 
         verify(tradeService).cancelOrder("ENSOUSDT", 77L);
         verify(tradeService).placeLimitGtcSell(eq("ENSOUSDT"), decimalEquals("10"),
-                decimalEquals("0.5990"), anyString());
+                decimalEquals("0.5989"), anyString());
         assertEquals(88L, atomic("activeOrderId", Long.class).get());
+        assertTrue(engine.getStatusReason().get().contains("最新买一"));
+    }
+
+    @Test
+    void timedOutBuyPriceMakerSellAlreadyAtBidIsKept() {
+        engine.switchStrategy("ENSOUSDT", "BUY_PRICE_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L);
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("activeOrderId", Long.class).set(77L);
+        atomic("activeOrderPrice", BigDecimal.class).set(new BigDecimal("0.599000"));
+        AtomicLong placedAt = (AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp");
+        long expiredAt = System.currentTimeMillis() - 121_000L;
+        placedAt.set(expiredAt);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine",
+                new BigDecimal("0.5990"), new BigDecimal("0.6000"));
+
+        verify(tradeService, never()).cancelOrder("ENSOUSDT", 77L);
+        assertTrue(placedAt.get() > expiredAt);
+        assertTrue(engine.getStatusReason().get().contains("仍在买一，保留当前 LIMIT 卖单"));
+    }
+
+    @Test
+    void timedOutBuyPriceMakerSellWaitsForValidBidWithoutCanceling() {
+        engine.switchStrategy("ENSOUSDT", "BUY_PRICE_MAKER", new BigDecimal("6"),
+                20_000L, 120_000L);
+        engine.getIsRunning().set(true);
+        engine.getCurrentStatus().set(HighFrequencyVolumeChurnEngine.ChurnStatus.SELLING);
+        atomic("activeOrderId", Long.class).set(77L);
+        AtomicLong placedAt = (AtomicLong) ReflectionTestUtils.getField(engine, "orderPlacedTimestamp");
+        long expiredAt = System.currentTimeMillis() - 121_000L;
+        placedAt.set(expiredAt);
+
+        ReflectionTestUtils.invokeMethod(engine, "driveChurnStateMachine", BigDecimal.ZERO, BigDecimal.ONE);
+
+        verify(tradeService, never()).cancelOrder("ENSOUSDT", 77L);
+        assertEquals(expiredAt, placedAt.get());
+        assertTrue(engine.getStatusReason().get().contains("最新买一不可用"));
     }
 
     @Test

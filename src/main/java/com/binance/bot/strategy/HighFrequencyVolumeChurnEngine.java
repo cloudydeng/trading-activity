@@ -1189,11 +1189,17 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 if (activeId != null) {
                     long sellTimeoutMs = currentActiveOrderTimeoutMs(ChurnStatus.SELLING);
                     if (now - orderPlacedTimestamp.get() >= sellTimeoutMs) {
-                        BigDecimal currentBestAsk = positiveOrZero(bestAsk);
-                        if (currentBestAsk.signum() <= 0) currentBestAsk = lastBestAskOrZero();
-                        if (deferTimedOutExitIfStillBestAsk(rule, currentBestAsk, now, sellTimeoutMs)) return;
-                        if (currentBestAsk.signum() <= 0) return;
-                        rollTimedOutExitToBestAsk(symbol, currentBestAsk, rule, activeId, sellTimeoutMs);
+                        boolean exitAtBestBid = usesBuyPriceMakerStrategy();
+                        BigDecimal currentBookPrice = exitAtBestBid ? positiveOrZero(bestBid) : positiveOrZero(bestAsk);
+                        if (!exitAtBestBid && currentBookPrice.signum() <= 0) currentBookPrice = lastBestAskOrZero();
+                        if (exitAtBestBid && currentBookPrice.signum() <= 0) {
+                            statusReason.set("卖单已到检查时间，但最新买一不可用，保留原卖单等待行情");
+                            return;
+                        }
+                        String bookLevel = exitAtBestBid ? "买一" : "卖一";
+                        if (deferTimedOutExitIfStillAtBookPrice(rule, currentBookPrice, bookLevel, now, sellTimeoutMs)) return;
+                        if (currentBookPrice.signum() <= 0) return;
+                        rollTimedOutExitToBookPrice(symbol, currentBookPrice, bookLevel, rule, activeId, sellTimeoutMs);
                     }
                     return;
                 }
@@ -1593,37 +1599,37 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
 
     /**
      * Every sell order has a configurable working window. Once it expires, keep
-     * the order when it is still at the latest best ask and re-arm the timer.
-     * Only an order that is no longer at the best ask is canceled, reconciled,
-     * and repriced. All strategies use the latest best ask when repricing;
+     * the order when it is still at the strategy's target book price and re-arm the timer.
+     * Otherwise cancel, reconcile, and reprice. BUY_PRICE_MAKER targets the latest
+     * best bid after timeout; the other strategies target the latest best ask.
      * FEE_AWARE_MAKER enforces its fee floor only on the initial exit. BREAK_EVEN_MAKER
      * enforces its net break-even floor on every exit. BUY_PRICE_MAKER enforces the actual
      * buy average only on the initial exit. No path falls back to MARKET.
      */
-    private boolean deferTimedOutExitIfStillBestAsk(SymbolRuleManager.SymbolRule rule,
-                                                    BigDecimal bestAsk, long now,
-                                                    long completedTimeoutMs) {
-        BigDecimal normalizedAsk = positiveOrZero(bestAsk);
-        if (normalizedAsk.signum() <= 0) {
+    private boolean deferTimedOutExitIfStillAtBookPrice(SymbolRuleManager.SymbolRule rule,
+                                                        BigDecimal bookPrice, String bookLevel,
+                                                        long now, long completedTimeoutMs) {
+        BigDecimal normalizedBookPrice = positiveOrZero(bookPrice);
+        if (normalizedBookPrice.signum() <= 0) {
             orderPlacedTimestamp.set(now);
             long nextTimeoutMs = randomizedTimeoutMs(exitOrderTimeoutMs());
             activeOrderTimeoutMs.set(nextTimeoutMs);
             persistRuntimeState(true);
             publishSellCancelCheckAt(now, nextTimeoutMs);
             statusReason.set("卖单满 " + durationLabel(completedTimeoutMs)
-                    + " 但暂时无法确认最新卖一，保留当前 LIMIT 卖单；"
+                    + " 但暂时无法确认最新" + bookLevel + "，保留当前 LIMIT 卖单；"
                     + durationLabel(nextTimeoutMs) + " 后复查");
-            log.info("[accountId={} alias={}] 卖单超时但最新卖一暂不可用，保留订单 {}，下次按 {} 复查",
-                    accountId, accountAlias, activeOrderId.get(), durationLabel(nextTimeoutMs));
+            log.info("[accountId={} alias={}] 卖单超时但最新{}暂不可用，保留订单 {}，下次按 {} 复查",
+                    accountId, accountAlias, bookLevel, activeOrderId.get(), durationLabel(nextTimeoutMs));
             return true;
         }
-        normalizedAsk = PrecisionUtil.roundDownToStep(normalizedAsk, rule.tickSize());
+        normalizedBookPrice = PrecisionUtil.roundDownToStep(normalizedBookPrice, rule.tickSize());
         BigDecimal orderPrice = activeOrderPrice.get();
         if (orderPrice == null || orderPrice.signum() <= 0) return false;
         BigDecimal normalizedOrderPrice = PrecisionUtil.roundDownToStep(orderPrice, rule.tickSize());
         if (usesBreakEvenMakerStrategy()
                 && normalizedOrderPrice.compareTo(feeAwareTargetPrice(rule)) < 0) return false;
-        if (normalizedOrderPrice.compareTo(normalizedAsk) != 0) return false;
+        if (normalizedOrderPrice.compareTo(normalizedBookPrice) != 0) return false;
 
         orderPlacedTimestamp.set(now);
         long nextTimeoutMs = randomizedTimeoutMs(exitOrderTimeoutMs());
@@ -1631,18 +1637,18 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         persistRuntimeState(true);
         publishSellCancelCheckAt(now, nextTimeoutMs);
         statusReason.set("卖单满 " + durationLabel(completedTimeoutMs)
-                + " 但仍在卖一，保留当前 LIMIT 卖单 @ "
+                + " 但仍在" + bookLevel + "，保留当前 LIMIT 卖单 @ "
                 + normalizedOrderPrice.toPlainString() + "；"
                 + durationLabel(nextTimeoutMs) + " 后复查");
-        log.info("[accountId={} alias={}] 卖单 {} 满 {} 仍在卖一 @ {}，保留原单并重新计时",
-                accountId, accountAlias, activeOrderId.get(), durationLabel(completedTimeoutMs),
+        log.info("[accountId={} alias={}] 卖单 {} 满 {} 仍在{} @ {}，保留原单并重新计时",
+                accountId, accountAlias, activeOrderId.get(), durationLabel(completedTimeoutMs), bookLevel,
                 normalizedOrderPrice);
         return true;
     }
 
-    private void rollTimedOutExitToBestAsk(String symbol, BigDecimal bestAsk,
-                                           SymbolRuleManager.SymbolRule rule, long orderId,
-                                           long completedTimeoutMs) {
+    private void rollTimedOutExitToBookPrice(String symbol, BigDecimal bookPrice, String bookLevel,
+                                             SymbolRuleManager.SymbolRule rule, long orderId,
+                                             long completedTimeoutMs) {
         if (!exitSubmissionInFlight.compareAndSet(false, true)) return;
         try {
             JsonNode cancel = tradeService.cancelOrder(symbol, orderId);
@@ -1673,12 +1679,12 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
             }
             if (currentStatus.get() != ChurnStatus.SELLING) currentStatus.set(ChurnStatus.SELLING);
 
-            BigDecimal price = timedOutExitPrice(rule, bestAsk);
+            BigDecimal price = timedOutExitPrice(rule, bookPrice);
             SellabilityResult sellability = currentSellability(rule, price);
             if (!sellability.sellable()) {
                 if (!verifyDustWithinLimit(sellability)) return;
                 currentStatus.set(ChurnStatus.IDLE);
-                updateDustState(sellability, "剩余持仓不足以按卖一价创建 LIMIT 卖单，等待后续 BUY 合并");
+                updateDustState(sellability, "剩余持仓不足以按" + bookLevel + "价创建 LIMIT 卖单，等待后续 BUY 合并");
                 return;
             }
             BigDecimal quantity = sellability.normalizedQty();
@@ -1703,14 +1709,14 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 activeOrderPrice.set(price);
                 persistRuntimeState(true);
                 statusReason.set("上一张卖单满 " + durationLabel(completedTimeoutMs)
-                        + "，剩余持仓已按最新卖一挂 LIMIT @ "
+                        + "，剩余持仓已按最新" + bookLevel + "挂 LIMIT @ "
                         + price.toPlainString());
-                log.info("[accountId={} alias={}] 卖单满 {}，已按最新卖一重新挂 LIMIT {} {} @ {}",
-                        accountId, accountAlias, durationLabel(completedTimeoutMs),
+                log.info("[accountId={} alias={}] 卖单满 {}，已按最新{}重新挂 LIMIT {} {} @ {}",
+                        accountId, accountAlias, durationLabel(completedTimeoutMs), bookLevel,
                         quantity, baseAsset(), price);
             } else {
                 reconcileAmbiguousSubmission(clientOrderId, ChurnStatus.SELLING,
-                        "卖一价 LIMIT 卖单结果未知");
+                        bookLevel + "价 LIMIT 卖单结果未知");
             }
         } finally {
             exitSubmissionInFlight.set(false);
@@ -1948,13 +1954,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return price.signum() > 0 ? price : aboveEntry;
     }
 
-    private BigDecimal timedOutExitPrice(SymbolRuleManager.SymbolRule rule, BigDecimal bestAsk) {
-        BigDecimal ask = positiveOrZero(bestAsk);
-        if (ask.signum() <= 0) return BigDecimal.ZERO;
+    private BigDecimal timedOutExitPrice(SymbolRuleManager.SymbolRule rule, BigDecimal bookPrice) {
+        BigDecimal price = positiveOrZero(bookPrice);
+        if (price.signum() <= 0) return BigDecimal.ZERO;
         if (usesBreakEvenMakerStrategy()) {
-            return PrecisionUtil.roundUpToStep(ask.max(feeAwareTargetPrice(rule)), rule.tickSize());
+            return PrecisionUtil.roundUpToStep(price.max(feeAwareTargetPrice(rule)), rule.tickSize());
         }
-        return PrecisionUtil.roundDownToStep(ask, rule.tickSize());
+        return PrecisionUtil.roundDownToStep(price, rule.tickSize());
     }
 
     private BigDecimal exitReferencePrice(SymbolRuleManager.SymbolRule rule) {
