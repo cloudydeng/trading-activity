@@ -116,7 +116,7 @@ class HighFrequencyVolumeChurnEngineTest {
         when(marketSignalEvaluator.evaluate(anyLong(), eq(properties.getStrategy()))).thenReturn(
                 MarketSignalEvaluator.EntryDecision.allow(new BigDecimal("0.2"), new BigDecimal("0.2"),
                         new BigDecimal("0.2"), BigDecimal.ZERO, BigDecimal.ZERO));
-        when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong()))
+        when(marketSignalEvaluator.minuteMovingAverage3(anyLong(), anyLong()))
                 .thenReturn(new BigDecimal("100"));
         AccountCredentials credentials = new AccountCredentials("test-account", "test-bot", "test-api-key", "test-secret-key");
         notificationService = mock(TradeNotificationService.class);
@@ -397,7 +397,7 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void everyMakerStrategyRequiresBuyPriceStrictlyBelowMinuteMa7Only() {
+    void everyMakerStrategyRequiresBuyPriceStrictlyBelowMinuteMa3Only() {
         long now = System.currentTimeMillis();
         SymbolRuleManager.SymbolRule rule = ruleManager.getRule("ENSOUSDT");
         when(marketSignalEvaluator.getBreakEvenReferencePrice(anyLong(), anyLong()))
@@ -405,17 +405,17 @@ class HighFrequencyVolumeChurnEngineTest {
         for (String mode : List.of("FEE_AWARE_MAKER", "BID_ASK_MAKER", "BUY_PRICE_MAKER", "BREAK_EVEN_MAKER")) {
             assertTrue(engine.switchStrategy("ENSOUSDT", mode, new BigDecimal("6"),
                     20_000L, 1_800_000L).accepted());
-            when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong())).thenReturn(null);
+            when(marketSignalEvaluator.minuteMovingAverage3(anyLong(), anyLong())).thenReturn(null);
             assertNull(ReflectionTestUtils.invokeMethod(engine, "entryPriceForStrategy",
                     new BigDecimal("0.6"), rule, now), mode);
-            assertTrue(engine.getStatusReason().get().contains("MA(7)"));
+            assertTrue(engine.getStatusReason().get().contains("MA(3)"));
 
-            when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong()))
+            when(marketSignalEvaluator.minuteMovingAverage3(anyLong(), anyLong()))
                     .thenReturn(new BigDecimal("0.6"));
             assertNull(ReflectionTestUtils.invokeMethod(engine, "entryPriceForStrategy",
                     new BigDecimal("0.6"), rule, now), mode);
 
-            when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong()))
+            when(marketSignalEvaluator.minuteMovingAverage3(anyLong(), anyLong()))
                     .thenReturn(new BigDecimal("0.7"));
             assertEquals(0, new BigDecimal("0.6").compareTo(ReflectionTestUtils.invokeMethod(
                     engine, "entryPriceForStrategy", new BigDecimal("0.6"), rule, now)), mode);
@@ -428,7 +428,7 @@ class HighFrequencyVolumeChurnEngineTest {
         coordinator.recordBuyFill("ENSOUSDT", new BigDecimal("0.6000"), System.currentTimeMillis());
         HighFrequencyVolumeChurnEngine nextAccount = engineFor("account-b", "B", tradeService, coordinator);
         SymbolRuleManager.SymbolRule rule = ruleManager.getRule("ENSOUSDT");
-        when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong()))
+        when(marketSignalEvaluator.minuteMovingAverage3(anyLong(), anyLong()))
                 .thenReturn(new BigDecimal("1"));
         when(marketSignalEvaluator.getBreakEvenReferencePrice(anyLong(), anyLong()))
                 .thenReturn(new BigDecimal("1"));
@@ -464,7 +464,7 @@ class HighFrequencyVolumeChurnEngineTest {
                 concurrentEngine, "lastDepthDataTimestamp");
         when(marketSignalEvaluator.getBreakEvenReferencePrice(anyLong(), anyLong()))
                 .thenReturn(BigDecimal.ONE);
-        when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong()))
+        when(marketSignalEvaluator.minuteMovingAverage3(anyLong(), anyLong()))
                 .thenReturn(new BigDecimal("0.7"));
 
         assertTrue(concurrentEngine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
@@ -647,11 +647,11 @@ class HighFrequencyVolumeChurnEngineTest {
                 new BigDecimal("0.6000"), rule, now));
 
         depthAt.set(now);
-        when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong()))
+        when(marketSignalEvaluator.minuteMovingAverage3(anyLong(), anyLong()))
                 .thenReturn(new BigDecimal("0.5997"));
         assertNull(ReflectionTestUtils.invokeMethod(concurrentEngine, "entryPriceForStrategy",
                 new BigDecimal("0.6000"), rule, now));
-        assertTrue(concurrentEngine.getStatusReason().get().contains("MA(7)"));
+        assertTrue(concurrentEngine.getStatusReason().get().contains("MA(3)"));
     }
 
     @Test
@@ -700,8 +700,8 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void workingBuyIsCancelledWhenMinuteMa7DropsBelowItsPrice() throws Exception {
-        when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong()))
+    void workingBuyIsCancelledWhenMinuteMa3DropsBelowItsPrice() throws Exception {
+        when(marketSignalEvaluator.minuteMovingAverage3(anyLong(), anyLong()))
                 .thenReturn(new BigDecimal("0.59"));
         when(tradeService.cancelOrder("ENSOUSDT", 77L))
                 .thenReturn(new ObjectMapper().readTree("{\"orderId\":77,\"status\":\"CANCELED\"}"));
@@ -2594,7 +2594,7 @@ class HighFrequencyVolumeChurnEngineTest {
                 new BigDecimal("0.862"), new BigDecimal("0.863"));
         assertEquals(1, coordinator.snapshot("ENSOUSDT").holders().size());
 
-        when(marketSignalEvaluator.minuteMovingAverage7(anyLong(), anyLong())).thenReturn(null);
+        when(marketSignalEvaluator.minuteMovingAverage3(anyLong(), anyLong())).thenReturn(null);
         ((AtomicLong) ReflectionTestUtils.getField(engineB, "nextOrderAttemptAt")).set(0L);
         ReflectionTestUtils.invokeMethod(engineB, "driveChurnStateMachine",
                 new BigDecimal("0.862"), new BigDecimal("0.863"));

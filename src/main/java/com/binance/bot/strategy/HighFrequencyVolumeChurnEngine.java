@@ -1149,7 +1149,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 Long orderId = activeOrderId.get();
                 if (orderId == null) { halt("买单状态没有活动订单"); return; }
                 if (!entryCancellationPending.get()
-                        && !buyBelowMinuteMa7(activeOrderPrice.get(), now)) {
+                        && !buyBelowMinuteMa3(activeOrderPrice.get(), now)) {
                     cancelActiveEntryOrder(statusReason.get() + "；撤销活动买单");
                     return;
                 }
@@ -3724,7 +3724,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                 ? configuredBookPrice
                 : PrecisionUtil.roundDownToStep(bestBid.subtract(rule.tickSize().multiply(BigDecimal.valueOf(
                 properties.getStrategy().getBidDepthOffsetTicks()))), rule.tickSize());
-        if (!buyBelowMinuteMa7(price, nowMs)) return null;
+        if (!buyBelowMinuteMa3(price, nowMs)) return null;
         SymbolTradeCoordinator.PriceGapPermit priceGap = symbolTradeCoordinator.checkBuyPriceGap(
                 properties.getStrategy().getSymbol(), price);
         if (!priceGap.allowed()) {
@@ -3769,15 +3769,15 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         return false;
     }
 
-    private boolean buyBelowMinuteMa7(BigDecimal price, long nowMs) {
-        BigDecimal ma7 = marketSignalEvaluator.minuteMovingAverage7(
+    private boolean buyBelowMinuteMa3(BigDecimal price, long nowMs) {
+        BigDecimal ma3 = marketSignalEvaluator.minuteMovingAverage3(
                 nowMs, properties.getStrategy().getMarketDataStaleMs());
-        if (ma7 == null) {
-            statusReason.set("等待有效的分时 MA(7) 分钟价格数据");
+        if (ma3 == null) {
+            statusReason.set("等待有效的分时 MA(3) 分钟价格数据");
             return false;
         }
-        if (price != null && price.signum() > 0 && price.compareTo(ma7) < 0) return true;
-        statusReason.set("等待买价低于分时 MA(7) " + ma7.stripTrailingZeros().toPlainString());
+        if (price != null && price.signum() > 0 && price.compareTo(ma3) < 0) return true;
+        statusReason.set("等待买价低于分时 MA(3) " + ma3.stripTrailingZeros().toPlainString());
         return false;
     }
 
@@ -4540,8 +4540,8 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     && now - lastDepthDataTimestamp.get() <= properties.getStrategy().getDepthDataStaleMs()
                     && prices.size() > index ? prices.get(index) : null;
         }
-        Boolean entryBelowMa7 = entryPrice == null || minute.ma7() == null ? null
-                : entryPrice.compareTo(minute.ma7()) < 0;
+        Boolean entryBelowMa3 = entryPrice == null || minute.ma3() == null ? null
+                : entryPrice.compareTo(minute.ma3()) < 0;
         BigDecimal spreadBps = null;
         if (bestBid != null && bestAsk != null && bestBid.signum() > 0 && bestAsk.compareTo(bestBid) >= 0) {
             BigDecimal mid = bestBid.add(bestAsk).divide(BigDecimal.valueOf(2), 12, RoundingMode.HALF_UP);
@@ -4550,13 +4550,13 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         long bookAt = lastMarketDataTimestamp.get();
         boolean bookFresh = bookAt > 0 && now - bookAt <= properties.getStrategy().getMarketDataStaleMs();
-        return new MarketActivitySnapshot(activity, minute.ma7(), minute.lastUpdateAgeMs(),
-                entryPrice, entryBelowMa7, bookFresh, spreadBps);
+        return new MarketActivitySnapshot(activity, minute.ma3(), minute.lastUpdateAgeMs(),
+                entryPrice, entryBelowMa3, bookFresh, spreadBps);
     }
 
-    public record MarketActivitySnapshot(MarketActivityTracker.Snapshot activity, BigDecimal ma7,
+    public record MarketActivitySnapshot(MarketActivityTracker.Snapshot activity, BigDecimal ma3,
                                          Long minuteKlineAgeMs, BigDecimal proposedEntryPrice,
-                                         Boolean entryBelowMa7, boolean bookFresh, BigDecimal spreadBps) { }
+                                         Boolean entryBelowMa3, boolean bookFresh, BigDecimal spreadBps) { }
 
     public record MarketDataSnapshot(BigDecimal bestBid, BigDecimal bestAsk, BigDecimal midPrice,
                                      List<BigDecimal> bidPrices, long updatedAtMs, long depthUpdatedAtMs,

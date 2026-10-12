@@ -13,42 +13,42 @@ class MarketSignalEvaluatorTest {
     private final BinanceProperties.Strategy config = new BinanceProperties.Strategy();
 
     @Test
-    void minuteMa7NeedsOnlySevenConsecutiveFreshClosesAndUsesCurrentMinute() {
+    void minuteMa3NeedsThreeConsecutiveFreshClosesAndUsesCurrentMinute() {
         MarketSignalEvaluator evaluator = new MarketSignalEvaluator();
         long firstMinute = 60_000L;
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 2; i++) {
             evaluator.recordMinuteClose(firstMinute + i * 60_000L,
                     decimal("100"), firstMinute + i * 60_000L);
         }
-        assertNull(evaluator.minuteMovingAverage7(firstMinute + 6 * 60_000L + 1_000L, 5_000L));
+        assertNull(evaluator.minuteMovingAverage3(firstMinute + 2 * 60_000L + 1_000L, 5_000L));
 
-        long currentMinute = firstMinute + 6 * 60_000L;
+        long currentMinute = firstMinute + 2 * 60_000L;
         evaluator.recordMinuteClose(currentMinute, decimal("90"), currentMinute + 1_000L);
-        assertEquals(0, decimal("98.57142857142857").compareTo(evaluator.minuteMovingAverage7(
+        assertEquals(0, decimal("96.66666666666667").compareTo(evaluator.minuteMovingAverage3(
                 currentMinute + 2_000L, 5_000L)));
         MarketSignalEvaluator.MinuteDataSnapshot diagnostics = evaluator.minuteDataSnapshot(
                 currentMinute + 2_000L, 5_000L);
         assertEquals(currentMinute, diagnostics.latestOpenTimeMs());
         assertEquals(1_000L, diagnostics.lastUpdateAgeMs());
-        assertEquals(0, decimal("98.57142857142857").compareTo(diagnostics.ma7()));
+        assertEquals(0, decimal("96.66666666666667").compareTo(diagnostics.ma3()));
 
         evaluator.recordMinuteClose(currentMinute, decimal("80"), currentMinute + 3_000L);
-        assertEquals(0, decimal("97.14285714285714").compareTo(evaluator.minuteMovingAverage7(
+        assertEquals(0, decimal("93.33333333333333").compareTo(evaluator.minuteMovingAverage3(
                 currentMinute + 4_000L, 5_000L)));
-        assertNull(evaluator.minuteMovingAverage7(currentMinute + 10_000L, 5_000L));
-        assertNull(evaluator.minuteDataSnapshot(currentMinute + 10_000L, 5_000L).ma7());
+        assertNull(evaluator.minuteMovingAverage3(currentMinute + 10_000L, 5_000L));
+        assertNull(evaluator.minuteDataSnapshot(currentMinute + 10_000L, 5_000L).ma3());
         evaluator.reset();
-        assertNull(evaluator.minuteMovingAverage7(currentMinute + 4_000L, 5_000L));
+        assertNull(evaluator.minuteMovingAverage3(currentMinute + 4_000L, 5_000L));
     }
 
     @Test
-    void minuteMa7RejectsGaps() {
+    void minuteMa3RejectsGaps() {
         MarketSignalEvaluator evaluator = new MarketSignalEvaluator();
-        for (int i = 0; i < 7; i++) {
-            long minute = (i + (i > 3 ? 1 : 0)) * 60_000L;
+        for (int i = 0; i < 3; i++) {
+            long minute = (i + (i > 0 ? 1 : 0)) * 60_000L;
             evaluator.recordMinuteClose(minute, decimal("100"), minute + 1_000L);
         }
-        assertNull(evaluator.minuteMovingAverage7(7 * 60_000L + 2_000L, 5_000L));
+        assertNull(evaluator.minuteMovingAverage3(3 * 60_000L + 2_000L, 5_000L));
     }
 
     @Test

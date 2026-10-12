@@ -147,28 +147,28 @@ public class MarketSignalEvaluator {
             if (latest != null && openTimeMs < latest.openTimeMs()) return;
             if (latest != null && openTimeMs == latest.openTimeMs()) minuteCloses.removeLast();
             minuteCloses.addLast(new MinuteClose(openTimeMs, close, receivedAtMs));
-            while (minuteCloses.size() > 7) minuteCloses.removeFirst();
+            while (minuteCloses.size() > 3) minuteCloses.removeFirst();
         } finally {
             lock.unlock();
         }
     }
 
-    /** Null unless seven consecutive 1-minute closes include a fresh current minute. */
-    public BigDecimal minuteMovingAverage7(long nowMs, long maxAgeMs) {
+    /** Null unless three consecutive 1-minute closes include a fresh current minute. */
+    public BigDecimal minuteMovingAverage3(long nowMs, long maxAgeMs) {
         lock.lock();
         try {
-            if (minuteCloses.size() < 7) return null;
+            if (minuteCloses.size() < 3) return null;
             MinuteClose latest = minuteCloses.peekLast();
             if (latest == null || latest.openTimeMs() != nowMs / MINUTE_MS * MINUTE_MS
                     || nowMs - latest.receivedAtMs() > Math.max(5_000L, maxAgeMs)) return null;
             BigDecimal sum = BigDecimal.ZERO;
             int index = 0;
             for (MinuteClose candle : minuteCloses) {
-                if (candle.openTimeMs() != latest.openTimeMs() - (6L - index) * MINUTE_MS) return null;
+                if (candle.openTimeMs() != latest.openTimeMs() - (2L - index) * MINUTE_MS) return null;
                 sum = sum.add(candle.close());
                 index++;
             }
-            return sum.divide(BigDecimal.valueOf(7), MC);
+            return sum.divide(BigDecimal.valueOf(3), MC);
         } finally {
             lock.unlock();
         }
@@ -178,7 +178,7 @@ public class MarketSignalEvaluator {
         lock.lock();
         try {
             MinuteClose latest = minuteCloses.peekLast();
-            return new MinuteDataSnapshot(minuteMovingAverage7(nowMs, maxAgeMs),
+            return new MinuteDataSnapshot(minuteMovingAverage3(nowMs, maxAgeMs),
                     latest == null ? null : latest.openTimeMs(),
                     latest == null ? null : Math.max(0, nowMs - latest.receivedAtMs()));
         } finally {
@@ -303,7 +303,7 @@ public class MarketSignalEvaluator {
 
     private record Quote(BigDecimal bid, BigDecimal bidQty, BigDecimal ask, BigDecimal askQty, long timestampMs) { }
     private record MinuteClose(long openTimeMs, BigDecimal close, long receivedAtMs) { }
-    public record MinuteDataSnapshot(BigDecimal ma7, Long latestOpenTimeMs, Long lastUpdateAgeMs) { }
+    public record MinuteDataSnapshot(BigDecimal ma3, Long latestOpenTimeMs, Long lastUpdateAgeMs) { }
     private record TradeFlow(BigDecimal signedQuantity, BigDecimal totalQuantity, long timestampMs) { }
     private record DepthSnapshot(BigDecimal bidDepth, BigDecimal askDepth, long timestampMs) { }
     private record Selloff(long detectedAtMs, BigDecimal lowMid) { }
