@@ -349,7 +349,7 @@ class HighFrequencyVolumeChurnEngineTest {
         assertEquals(0, new BigDecimal("8").compareTo(profile.getValue().getMaxEntryAnchorDriftBps()));
         assertEquals(0, new BigDecimal("8").compareTo(profile.getValue().getMaxCumulativeEntryAnchorDriftBps()));
         assertEquals(300_000L, profile.getValue().getEntryTimeoutCooldownMs());
-        assertEquals(60_000L, profile.getValue().getPostSellEntryDelayMs());
+        assertEquals(5_000L, profile.getValue().getPostSellEntryDelayMs());
         assertEquals(0, new BigDecimal("510").compareTo(profile.getValue().getDailyVolumeLimitUsdt()));
     }
 
@@ -1080,11 +1080,11 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void buyPriceMakerUsesThirtyMinuteSellTimeoutDefaultUnlessExplicitlyOverridden() {
+    void buyPriceMakerUsesSixtySecondSellTimeoutDefaultUnlessExplicitlyOverridden() {
         assertTrue(engine.switchStrategy("ENSOUSDT", "BUY_PRICE_MAKER", new BigDecimal("6"),
                 20_000L, null).accepted());
         Long defaultTimeout = ReflectionTestUtils.invokeMethod(engine, "exitOrderTimeoutMs");
-        assertEquals(1_800_000L, defaultTimeout);
+        assertEquals(60_000L, defaultTimeout);
 
         assertTrue(engine.switchStrategy("ENSOUSDT", "BUY_PRICE_MAKER", new BigDecimal("6"),
                 20_000L, 600_000L).accepted());

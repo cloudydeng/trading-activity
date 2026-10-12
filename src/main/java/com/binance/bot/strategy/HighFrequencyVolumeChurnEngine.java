@@ -3313,7 +3313,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
         }
         Long postSellEntryDelayMs = requestedPostSellEntryDelayMs == null && existing != null
                 ? existing.getPostSellEntryDelayMs() : requestedPostSellEntryDelayMs;
-        if (postSellEntryDelayMs == null) postSellEntryDelayMs = 60_000L;
+        if (postSellEntryDelayMs == null) postSellEntryDelayMs = 5_000L;
         if (!validPostSellEntryDelay(postSellEntryDelayMs)) {
             return StrategySwitchResult.rejected(symbol, "卖出后买入等待时间必须在 0 秒到 24 小时之间");
         }
@@ -3586,7 +3586,7 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
     private long postSellEntryDelayMs() {
         var profile = symbolStrategy(properties.getStrategy().getSymbol());
         Long delayMs = profile == null ? null : profile.getPostSellEntryDelayMs();
-        if (delayMs == null) delayMs = 60_000L;
+        if (delayMs == null) delayMs = 5_000L;
         return Math.max(0, Math.min(86_400_000L, delayMs));
     }
 

@@ -112,7 +112,7 @@ class TradingAccountManagerTest {
         assertEquals("BUY_PRICE_MAKER", profile.getValue().getMode());
         assertEquals(0, new BigDecimal("12").compareTo(profile.getValue().getOrderAmountUsdt()));
         assertEquals(0, new BigDecimal("10000").compareTo(profile.getValue().getDailyVolumeLimitUsdt()));
-        assertEquals(119_000L, profile.getValue().getExitTimeoutMs());
+        assertEquals(60_000L, profile.getValue().getExitTimeoutMs());
         verify(store, never()).saveStrategyOverride(eq("account-a"), eq("PROMUSDT"), any());
         verify(saharaEngine).initialize();
         verify(accountA).applyConfiguredSymbols(eq(List.of("PROMUSDT", "SAHARAUSDT")), anyMap());

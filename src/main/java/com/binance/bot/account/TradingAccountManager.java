@@ -30,7 +30,7 @@ import java.util.concurrent.locks.ReentrantLock;
 public class TradingAccountManager {
     private static final BigDecimal NEW_SYMBOL_DEFAULT_ORDER_AMOUNT_USDT = new BigDecimal("12");
     private static final BigDecimal NEW_SYMBOL_DEFAULT_DAILY_VOLUME_LIMIT_USDT = new BigDecimal("10000");
-    private static final long NEW_SYMBOL_DEFAULT_EXIT_TIMEOUT_MS = 119_000L;
+    private static final long NEW_SYMBOL_DEFAULT_EXIT_TIMEOUT_MS = 60_000L;
 
     private final BinanceProperties properties;
     private final AccountTradingRuntimeFactory runtimeFactory;

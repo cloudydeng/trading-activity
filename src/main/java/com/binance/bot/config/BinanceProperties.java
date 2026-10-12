@@ -81,7 +81,7 @@ public class BinanceProperties {
         /** Optional manual cumulative anchor price. Null lets the runtime derive it from recent buys. */
         private BigDecimal manualEntryAnchorPrice;
         /** Maker-entry strategies wait this long after a flat sell before opening the next buy. */
-        private Long postSellEntryDelayMs = 60_000L;
+        private Long postSellEntryDelayMs = 5_000L;
         /** BID_ASK_MAKER initial sell markup above the actual buy average, measured in ticks. */
         private Integer bidAskInitialSellMarkupTicks = 1;
         /** BID_ASK_MAKER entry book level: 1=best bid, up to the fifth bid from the depth stream. */
@@ -105,11 +105,11 @@ public class BinanceProperties {
         private BigDecimal maxLiveOrderNotionalUsdt = new BigDecimal("30");
         private int bidDepthOffsetTicks;
         private int askDepthOffsetTicks;
-        private long orderTtlMs;
+        private long orderTtlMs = 30_000;
         /** Check a working sell after this delay; keep it at best ask or re-place at latest best ask. */
-        private long limitSellTimeoutMs = 120_000;
+        private long limitSellTimeoutMs = 60_000;
         /** BUY_PRICE_MAKER-specific sell timeout used when the symbol has no explicit override. */
-        private long buyPriceMakerLimitSellTimeoutMs = 1_800_000;
+        private long buyPriceMakerLimitSellTimeoutMs = 60_000;
         /** Soft signal noise cannot cancel a fresh entry before this resting time. */
         private long minEntryOrderRestMs = 800;
         private double randomSizeJitter;

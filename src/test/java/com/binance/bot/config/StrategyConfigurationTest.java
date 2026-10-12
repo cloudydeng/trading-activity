@@ -47,11 +47,16 @@ class StrategyConfigurationTest {
     }
 
     @Test
-    void buyPriceMakerSellTimeoutDefaultsToThirtyMinutes() throws Exception {
-        assertEquals("1800000", new PropertySourcesPropertyResolver(applicationPropertySources())
-                .getProperty(BUY_PRICE_EXIT_TIMEOUT_PROPERTY_KEY));
-        assertEquals(1_800_000L,
-                new BinanceProperties().getStrategy().getBuyPriceMakerLimitSellTimeoutMs());
+    void orderTimeoutsAndPostSellDelayUseRequestedDefaults() throws Exception {
+        PropertySourcesPropertyResolver resolver = new PropertySourcesPropertyResolver(applicationPropertySources());
+        assertEquals("30000", resolver.getProperty("binance.strategy.order-ttl-ms"));
+        assertEquals("60000", resolver.getProperty("binance.strategy.limit-sell-timeout-ms"));
+        assertEquals("60000", resolver.getProperty(BUY_PRICE_EXIT_TIMEOUT_PROPERTY_KEY));
+        BinanceProperties.Strategy strategy = new BinanceProperties().getStrategy();
+        assertEquals(30_000L, strategy.getOrderTtlMs());
+        assertEquals(60_000L, strategy.getLimitSellTimeoutMs());
+        assertEquals(60_000L, strategy.getBuyPriceMakerLimitSellTimeoutMs());
+        assertEquals(5_000L, new BinanceProperties.SymbolStrategyProfile().getPostSellEntryDelayMs());
     }
 
     private MutablePropertySources applicationPropertySources() throws Exception {

@@ -50,12 +50,12 @@ binance:
     # 旧版盘口偏移配置；当前三种策略的初始卖价不读取该字段。
     ask-depth-offset-ticks: 0
     # 买单超时基准；每张 BUY 创建时在 1.0～1.5 倍内随机一次。
-    order-ttl-ms: 20000
+    order-ttl-ms: 30000
     # 卖单超时基准；每次挂单/复查窗口在 1.0～1.5 倍内随机。BUY_PRICE_MAKER 超时按最新买一，其他策略按卖一（保本策略仍守净保本价）。
-    limit-sell-timeout-ms: 120000
-    # BUY_PRICE_MAKER 未单独配置卖单超时时使用 1800 秒基准；显式账户/币种配置优先。
-    buy-price-maker-limit-sell-timeout-ms: 1800000
-    # 仅作为兼容配置；买单现在固定驻留至 20 秒 TTL，不再因短线信号撤单。
+    limit-sell-timeout-ms: 60000
+    # BUY_PRICE_MAKER / BREAK_EVEN_MAKER 未单独配置卖单超时时也使用 60 秒基准；显式账户/币种配置优先。
+    buy-price-maker-limit-sell-timeout-ms: 60000
+    # 仅作为兼容配置；买单现在按超时基准的随机窗口驻留，不再因短线信号撤单。
     min-entry-order-rest-ms: 800
     # 买入只允许 Maker；随机超时后若仍在策略配置档位则继续挂，否则撤单，不追卖一、不转 IOC。
     # 旧比例抖动字段仅保留配置兼容；当前按上面的 USDT 整数区间随机。
