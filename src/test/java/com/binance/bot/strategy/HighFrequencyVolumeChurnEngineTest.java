@@ -127,7 +127,7 @@ class HighFrequencyVolumeChurnEngineTest {
     }
 
     @Test
-    void acceptedBidAskSellStartsMinuteWaitForAnotherApiKey() throws Exception {
+    void acceptedBidAskSellStartsThreeSecondWaitForAnotherApiKey() throws Exception {
         engine.switchStrategy("ENSOUSDT", "BID_ASK_MAKER", new BigDecimal("6"),
                 20_000L, 120_000L, null, null);
         SymbolTradeCoordinator coordinator = (SymbolTradeCoordinator) ReflectionTestUtils.getField(
@@ -150,6 +150,30 @@ class HighFrequencyVolumeChurnEngineTest {
         assertTrue(coordinator.acquire("ENSOUSDT", "other::ENSOUSDT", "Other").accepted());
         assertFalse(coordinator.acquire("ENSOUSDT", "test-account::ENSOUSDT", "test-bot").accepted());
         assertTrue(acceptedAt > 0);
+    }
+
+    @Test
+    void pacedBuyRechecksActiveSellWithinOneSecondSoFlatExitCanReleaseItEarly() {
+        SymbolTradeCoordinator coordinator = new SymbolTradeCoordinator();
+        coordinator.configureMaxConcurrentEntriesPerSymbol(2);
+        coordinator.claimExistingSell("ENSOUSDT", "account-a::ENSOUSDT", "A");
+        coordinator.noteAcceptedSellSubmission("ENSOUSDT", "account-a", System.currentTimeMillis());
+        coordinator.markActiveSellOrder("ENSOUSDT", "account-a::ENSOUSDT", 701L);
+        BinanceAccountTradeClient waitingTrade = mock(BinanceAccountTradeClient.class);
+        HighFrequencyVolumeChurnEngine waitingEngine = engineFor("account-b", "B", waitingTrade, coordinator);
+
+        ReflectionTestUtils.invokeMethod(waitingEngine, "submitMakerOrder", "ENSOUSDT", "BUY",
+                new BigDecimal("0.862"), new BigDecimal("10"), null,
+                HighFrequencyVolumeChurnEngine.ChurnStatus.BUYING);
+
+        assertTrue(waitingEngine.getStatusReason().get().contains("活动卖单"),
+                waitingEngine.getStatusReason().get());
+        long nextAttemptAt = ((AtomicLong) ReflectionTestUtils.getField(waitingEngine,
+                "nextOrderAttemptAt")).get();
+        assertTrue(nextAttemptAt > 0);
+        assertTrue(nextAttemptAt - System.currentTimeMillis() <= 1_000L);
+        verify(waitingTrade, never()).cancelAndReplaceOrder(eq("ENSOUSDT"), eq("BUY"),
+                any(), any(), isNull(), anyString());
     }
 
     @Test

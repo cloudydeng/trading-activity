@@ -21,7 +21,7 @@ import java.util.concurrent.locks.ReentrantLock;
 @Component
 public final class SymbolTradeCoordinator {
     private static final long CROSS_ACCOUNT_BUY_GAP_MS = 2_000L;
-    private static final long CROSS_ACCOUNT_SELL_TO_BUY_GAP_MS = 60_000L;
+    private static final long CROSS_ACCOUNT_SELL_TO_BUY_GAP_MS = 3_000L;
     private static final BigDecimal MAX_BUY_PRICE_GAP = new BigDecimal("0.005");
     private static final long BUY_PRICE_GAP_MAX_WAIT_MS = 900_000L;
     /**
@@ -242,16 +242,20 @@ public final class SymbolTradeCoordinator {
                                 && !normalizedAccountId.equals(accountIdOf(holder.engineId()))
                                 && (activeSells == null || !activeSells.containsKey(holder.engineId())));
                 if (awaitingOtherSell) return new BuyPacePermit(false, 1_000L,
-                        normalizedSymbol + " 等待其他 API Key 的卖单成功报单后开始 60 秒计时");
+                        normalizedSymbol + " 等待其他 API Key 的卖单成功报单后开始 3 秒计时");
                 Map<String, Long> sells = acceptedSellTimes(normalizedSymbol);
-                long latestOtherSell = sells.entrySet().stream()
-                        .filter(entry -> !normalizedAccountId.equals(entry.getKey()))
-                        .mapToLong(Map.Entry::getValue).max().orElse(0);
+                long latestOtherSell = holders == null ? 0 : holders.values().stream()
+                        .filter(holder -> holder.phase() == Phase.SELLING
+                                && activeSells != null && activeSells.containsKey(holder.engineId()))
+                        .map(holder -> accountIdOf(holder.engineId()))
+                        .filter(otherAccountId -> !normalizedAccountId.equals(otherAccountId))
+                        .mapToLong(otherAccountId -> sells.getOrDefault(otherAccountId, 0L))
+                        .max().orElse(0);
                 long remaining = latestOtherSell <= 0 ? 0
                         : CROSS_ACCOUNT_SELL_TO_BUY_GAP_MS - Math.max(0L, nowMs - latestOtherSell);
                 if (remaining > 0) return new BuyPacePermit(false, remaining,
-                        normalizedSymbol + " 等待其他 API Key 的卖单报单满 60 秒；约 "
-                                + ((remaining + 999) / 1000) + " 秒后再尝试买入");
+                        normalizedSymbol + " 其他 API Key 的活动卖单报单未满 3 秒；约 "
+                                + ((remaining + 999) / 1000) + " 秒后重试，卖完并确认空仓则提前结束等待");
             }
             LastAccountActivity previous = lastAccountActivityBySymbol.get(normalizedSymbol);
             if (previous != null && !previous.accountId().equals(normalizedAccountId)) {

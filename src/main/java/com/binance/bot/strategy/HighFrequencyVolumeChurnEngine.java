@@ -2134,7 +2134,9 @@ public class HighFrequencyVolumeChurnEngine implements WebSocket.Listener {
                     symbol, accountId);
             if (!pace.allowed()) {
                 accountRiskCoordinator.releaseEntry(accountEngineKey);
-                nextOrderAttemptAt.set(System.currentTimeMillis() + Math.max(1L, pace.retryAfterMs()));
+                // A different account may finish its SELL before the wait expires.
+                nextOrderAttemptAt.set(System.currentTimeMillis()
+                        + Math.min(1_000L, Math.max(1L, pace.retryAfterMs())));
                 statusReason.set(pace.reason());
                 return;
             }
